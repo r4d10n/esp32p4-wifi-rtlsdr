@@ -1,0 +1,8 @@
+{
+  "correlation": 0.9636145140365883,
+  "rmse_db": 2.4808664080479668,
+  "power_diff_mean_db": -2.008968173876994,
+  "peaks_matched": 1,
+  "peaks_total_ref": 1,
+  "score": 96.36145140365883
+}
