@@ -38,4 +38,43 @@ menu "RTL-SDR WiFi Bridge Configuration"
             Size of the IQ sample ring buffer in KB.
             Stored in PSRAM. Larger = more resilience to WiFi jitter.
 
+    choice RTLSDR_TRANSPORT
+        prompt "IQ Transport Protocol"
+        default RTLSDR_TRANSPORT_TCP
+        help
+            Select the transport protocol for IQ sample streaming.
+            TCP: Standard rtl_tcp protocol, compatible with SDR++/GQRX.
+            UDP: Lower overhead, higher throughput, needs udp2tcp bridge for rtl_tcp clients.
+            BOTH: Run TCP and UDP simultaneously on different ports.
+
+        config RTLSDR_TRANSPORT_TCP
+            bool "TCP only (rtl_tcp compatible)"
+        config RTLSDR_TRANSPORT_UDP
+            bool "UDP only (higher throughput)"
+        config RTLSDR_TRANSPORT_BOTH
+            bool "Both TCP and UDP"
+    endchoice
+
+    config RTLUDP_PORT
+        int "UDP streaming port"
+        default 1235
+        depends on RTLSDR_TRANSPORT_UDP || RTLSDR_TRANSPORT_BOTH
+        help
+            UDP port for IQ sample streaming. Commands received on this port too.
+
+    config RTLUDP_PAYLOAD_SIZE
+        int "UDP payload size (bytes)"
+        default 1024
+        depends on RTLSDR_TRANSPORT_UDP || RTLSDR_TRANSPORT_BOTH
+        help
+            Size of IQ data payload per UDP packet (excluding 8-byte header).
+            Must be <= 1464 to fit in one Ethernet frame.
+
+    config HOSTED_SDIO_40MHZ
+        bool "Use 40 MHz SDIO clock (faster WiFi, PCB dependent)"
+        default n
+        help
+            Increase SDIO clock from 25 MHz to 40 MHz for higher WiFi throughput.
+            May not work on all PCB layouts. Test with your board.
+
 endmenu

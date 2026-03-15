@@ -20,6 +20,7 @@
 #include "mdns.h"
 #include "rtlsdr.h"
 #include "rtltcp.h"
+#include "rtludp.h"
 
 static const char *TAG = "main";
 
@@ -33,6 +34,7 @@ static const char *TAG = "main";
 
 static rtlsdr_dev_t    *sdr_dev = NULL;
 static rtltcp_server_t *tcp_srv = NULL;
+static rtludp_server_t *udp_srv = NULL;
 
 /* ──────────────────────── WiFi Event Handler ──────────────────────── */
 
@@ -119,8 +121,15 @@ static void usb_host_task(void *arg)
 
 static void iq_data_cb(uint8_t *buf, uint32_t len, void *ctx)
 {
-    rtltcp_server_t *srv = (rtltcp_server_t *)ctx;
-    rtltcp_push_samples(srv, buf, len);
+    (void)ctx;
+    /* Push to TCP server if running */
+    if (tcp_srv) {
+        rtltcp_push_samples(tcp_srv, buf, len);
+    }
+    /* Push to UDP server if running */
+    if (udp_srv) {
+        rtludp_push_samples(udp_srv, buf, len);
+    }
 }
 
 /* ──────────────────────── SDR Streaming Task ──────────────────────── */
@@ -194,18 +203,25 @@ void app_main(void)
     tcp_config.dev = sdr_dev;
     ESP_ERROR_CHECK(rtltcp_server_start(&tcp_srv, &tcp_config));
 
+    /* Start RTL-UDP server */
+    rtludp_config_t udp_config = RTLUDP_CONFIG_DEFAULT();
+    udp_config.dev = sdr_dev;
+    ESP_ERROR_CHECK(rtludp_server_start(&udp_srv, &udp_config));
+
     /* Start SDR streaming task on Core 0 (with USB) */
     xTaskCreatePinnedToCore(sdr_stream_task, "sdr_stream", 8192, NULL, 8, NULL, 0);
 
     ESP_LOGI(TAG, "=== RTL-TCP server ready on port %d ===", RTLTCP_DEFAULT_PORT);
-    ESP_LOGI(TAG, "Connect with: rtl_tcp -a <this_ip> -p %d", RTLTCP_DEFAULT_PORT);
-    ESP_LOGI(TAG, "  or SDR++ / GQRX → rtl_tcp source");
+    ESP_LOGI(TAG, "=== RTL-UDP server ready on port %d ===", RTLUDP_DEFAULT_PORT);
+    ESP_LOGI(TAG, "Connect TCP: SDR++ / GQRX → rtl_tcp at port %d", RTLTCP_DEFAULT_PORT);
+    ESP_LOGI(TAG, "Connect UDP: send any packet to port %d to subscribe", RTLUDP_DEFAULT_PORT);
 
     /* Main task just monitors status */
     while (1) {
-        bool connected = rtltcp_is_client_connected(tcp_srv);
-        ESP_LOGI(TAG, "Status: client=%s freq=%luHz rate=%luHz",
-                 connected ? "YES" : "no",
+        bool tcp_conn = rtltcp_is_client_connected(tcp_srv);
+        bool udp_conn = rtludp_is_client_active(udp_srv);
+        ESP_LOGI(TAG, "Status: tcp=%s udp=%s freq=%luHz rate=%luHz",
+                 tcp_conn ? "YES" : "no", udp_conn ? "YES" : "no",
                  (unsigned long)rtlsdr_get_center_freq(sdr_dev),
                  (unsigned long)rtlsdr_get_sample_rate(sdr_dev));
         vTaskDelay(pdMS_TO_TICKS(10000));
