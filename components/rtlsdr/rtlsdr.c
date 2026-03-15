@@ -264,8 +264,8 @@ static esp_err_t rtlsdr_init_baseband(rtlsdr_dev_t *dev)
     ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_USB, 0x2000, &val, 1);
     ESP_RETURN_ON_ERROR(ret, TAG, "USB SYSCTL write failed");
 
-    /* USB_EPA_MAXPKT = 0x4000 (as used in xtrsdr for ESP32 USB host) */
-    uint8_t maxpkt[2] = {0x40, 0x00};
+    /* USB_EPA_MAXPKT = 0x0002 (512 bytes for HS, librtlsdr default) */
+    uint8_t maxpkt[2] = {0x00, 0x02};
     ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_USB, 0x2158, maxpkt, 2);
     ESP_RETURN_ON_ERROR(ret, TAG, "EPA MAXPKT write failed");
 
