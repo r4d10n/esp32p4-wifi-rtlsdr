@@ -8,9 +8,12 @@
  */
 
 #include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_check.h"
 #include "rtlsdr.h"
+#include "rtlsdr_internal.h"
 
 static const char *TAG = "r82xx";
 
@@ -32,12 +35,6 @@ static const uint8_t r82xx_init_regs[] = {
     0x48, 0xCC, 0x60, 0x00,    /* regs 0x18-0x1B */
     0x54, 0xAE, 0x4A, 0xC0,    /* regs 0x1C-0x1F */
 };
-
-/* Forward declarations for internal rtlsdr register access */
-extern esp_err_t rtlsdr_read_reg(void *dev, uint16_t block,
-                                  uint16_t addr, uint8_t *val, uint16_t len);
-extern esp_err_t rtlsdr_write_reg(void *dev, uint16_t block,
-                                   uint16_t addr, const uint8_t *val, uint16_t len);
 
 /* I2C read/write via RTL2832U IIC block */
 static esp_err_t r82xx_write(rtlsdr_dev_t *dev, uint8_t reg, const uint8_t *data, uint8_t len)

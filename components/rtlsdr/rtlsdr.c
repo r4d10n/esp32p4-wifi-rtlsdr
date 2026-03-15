@@ -122,8 +122,8 @@ static esp_err_t rtlsdr_ctrl_transfer(rtlsdr_dev_t *dev, uint8_t bmRequestType,
 }
 
 /* Read a register block */
-static esp_err_t rtlsdr_read_reg(rtlsdr_dev_t *dev, uint16_t block,
-                                  uint16_t addr, uint8_t *val, uint16_t len)
+esp_err_t rtlsdr_read_reg(rtlsdr_dev_t *dev, uint16_t block,
+                           uint16_t addr, uint8_t *val, uint16_t len)
 {
     uint16_t wIndex = block;
     uint16_t wValue = addr;
@@ -131,8 +131,8 @@ static esp_err_t rtlsdr_read_reg(rtlsdr_dev_t *dev, uint16_t block,
 }
 
 /* Write a register block */
-static esp_err_t rtlsdr_write_reg(rtlsdr_dev_t *dev, uint16_t block,
-                                   uint16_t addr, const uint8_t *val, uint16_t len)
+esp_err_t rtlsdr_write_reg(rtlsdr_dev_t *dev, uint16_t block,
+                            uint16_t addr, const uint8_t *val, uint16_t len)
 {
     uint16_t wIndex = (block) | 0x10;
     uint16_t wValue = addr;
@@ -169,7 +169,7 @@ static esp_err_t rtlsdr_demod_read_reg(rtlsdr_dev_t *dev, uint8_t page,
 
 /* ──────────────────────── I2C Repeater (Tuner Access) ──────────────────────── */
 
-static esp_err_t rtlsdr_set_i2c_repeater(rtlsdr_dev_t *dev, bool on)
+esp_err_t rtlsdr_set_i2c_repeater(rtlsdr_dev_t *dev, bool on)
 {
     return rtlsdr_demod_write_reg(dev, 1, 0x01, on ? 0x18 : 0x10, 1);
 }
@@ -381,7 +381,7 @@ esp_err_t rtlsdr_init(rtlsdr_dev_t **out_dev)
             if (ret != ESP_OK) continue;
 
             const usb_device_desc_t *desc;
-            ret = usb_host_get_device_desc(test_dev, &desc);
+            ret = usb_host_get_device_descriptor(test_dev, &desc);
             if (ret == ESP_OK && rtlsdr_is_target_device(desc)) {
                 ESP_LOGI(TAG, "RTL-SDR found! VID=0x%04x PID=0x%04x",
                          desc->idVendor, desc->idProduct);
