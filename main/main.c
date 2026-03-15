@@ -306,6 +306,12 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "ESP32-P4 RTL-SDR WiFi Bridge starting...");
 
+    /* Run FFT benchmark at startup (disable for production) */
+#if 1
+    extern void bench_fft_all(void);
+    bench_fft_all();
+#endif
+
     /* Initialize NVS (required by WiFi) */
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
