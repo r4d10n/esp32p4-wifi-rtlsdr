@@ -469,6 +469,7 @@ static void usb_client_event_cb(const usb_host_client_event_msg_t *msg, void *ar
 
 static uint32_t bulk_cb_count = 0;
 static uint32_t bulk_bytes_total = 0;
+static uint32_t bulk_start_tick = 0;
 
 static void bulk_xfer_cb(usb_transfer_t *xfer)
 {
@@ -477,14 +478,20 @@ static void bulk_xfer_cb(usb_transfer_t *xfer)
     if (xfer->status == USB_TRANSFER_STATUS_COMPLETED && xfer->actual_num_bytes > 0) {
         bulk_cb_count++;
         bulk_bytes_total += xfer->actual_num_bytes;
+        if (bulk_cb_count == 1) {
+            bulk_start_tick = xTaskGetTickCount();
+        }
         if (bulk_cb_count <= 3 || (bulk_cb_count % 500) == 0) {
-            uint32_t elapsed_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-            uint32_t rate_kbps = (bulk_bytes_total / 1024) * 1000 / (elapsed_ms ? elapsed_ms : 1);
-            ESP_LOGI(TAG, "Bulk IN #%lu: %d bytes (total %lu KB, ~%lu KB/s = %lu kSPS)",
-                     (unsigned long)bulk_cb_count, xfer->actual_num_bytes,
-                     (unsigned long)(bulk_bytes_total / 1024),
-                     (unsigned long)rate_kbps,
-                     (unsigned long)(rate_kbps * 1024 / 2 / 1000));
+            uint32_t elapsed_ms = (xTaskGetTickCount() - bulk_start_tick) * portTICK_PERIOD_MS;
+            if (elapsed_ms > 0) {
+                uint32_t rate_kbps = (uint32_t)((uint64_t)bulk_bytes_total * 1000 / 1024 / elapsed_ms);
+                ESP_LOGI(TAG, "USB: #%lu %dB (total %lu KB in %lums = %lu KB/s = %lu kSPS)",
+                         (unsigned long)bulk_cb_count, xfer->actual_num_bytes,
+                         (unsigned long)(bulk_bytes_total / 1024),
+                         (unsigned long)elapsed_ms,
+                         (unsigned long)rate_kbps,
+                         (unsigned long)(rate_kbps * 1024 / 2 / 1000));
+            }
         }
         if (dev->async_cb) {
             dev->async_cb(xfer->data_buffer, xfer->actual_num_bytes, dev->async_ctx);
