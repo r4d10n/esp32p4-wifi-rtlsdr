@@ -12,6 +12,7 @@
 #include "esp_log.h"
 #include "esp_check.h"
 #include "esp_event.h"
+#include "esp_hosted.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "nvs_flash.h"
@@ -55,6 +56,13 @@ static esp_err_t wifi_init_sta(void)
     ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "event loop failed");
 
     esp_netif_create_default_wifi_sta();
+
+    /* Initialize ESP-Hosted transport (SDIO to ESP32-C6) before WiFi */
+    ESP_LOGI(TAG, "Initializing ESP-Hosted...");
+    ESP_RETURN_ON_ERROR(esp_hosted_init(), TAG, "esp_hosted_init failed");
+    ESP_LOGI(TAG, "Connecting to C6 slave over SDIO...");
+    ESP_RETURN_ON_ERROR(esp_hosted_connect_to_slave(), TAG, "esp_hosted_connect failed");
+    ESP_LOGI(TAG, "ESP-Hosted connected to C6");
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&cfg), TAG, "wifi init failed");
