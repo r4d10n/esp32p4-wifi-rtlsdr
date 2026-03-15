@@ -264,14 +264,14 @@ static esp_err_t rtlsdr_init_baseband(rtlsdr_dev_t *dev)
     ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_USB, 0x2000, &val, 1);
     ESP_RETURN_ON_ERROR(ret, TAG, "USB SYSCTL write failed");
 
-    /* USB_EPA_MAXPKT = 0x0002 (512 bytes for HS) */
-    uint8_t maxpkt[2] = {0x00, 0x02};
-    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_USB, 0x0158, maxpkt, 2);
+    /* USB_EPA_MAXPKT = 0x4000 (as used in xtrsdr for ESP32 USB host) */
+    uint8_t maxpkt[2] = {0x40, 0x00};
+    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_USB, 0x2158, maxpkt, 2);
     ESP_RETURN_ON_ERROR(ret, TAG, "EPA MAXPKT write failed");
 
     /* USB_EPA_CTL = 0x1002 */
     uint8_t epa_ctl[2] = {0x10, 0x02};
-    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_USB, 0x0148, epa_ctl, 2);
+    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_USB, 0x2148, epa_ctl, 2);
     ESP_RETURN_ON_ERROR(ret, TAG, "EPA CTL write failed");
 
     /* DEMOD_CTL_1 (0x300b) = 0x22 */
@@ -313,27 +313,48 @@ static esp_err_t rtlsdr_init_baseband(rtlsdr_dev_t *dev)
         ESP_LOGW(TAG, "Demod reset 2 failed (ret=%d), continuing...", ret);
     }
 
-    /* Disable zero-IF mode (reg 1:0x15 = 0x00) */
+    /* Disable spectrum inversion and adjacent channel rejection */
     ret = rtlsdr_demod_write_reg(dev, 1, 0x15, 0x00, 1);
-    ESP_RETURN_ON_ERROR(ret, TAG, "Zero-IF disable failed");
-
-    /* Disable output ADC (reg 1:0x16 = 0x0000) */
+    ESP_RETURN_ON_ERROR(ret, TAG, "Spectrum inv/adj disable failed");
     ret = rtlsdr_demod_write_reg(dev, 1, 0x16, 0x0000, 2);
     ESP_RETURN_ON_ERROR(ret, TAG, "ADC disable failed");
+
+    /* Clear both DDC shift and IF frequency registers */
+    for (int i = 0; i < 6; i++) {
+        rtlsdr_demod_write_reg(dev, 1, 0x16 + i, 0x00, 1);
+    }
 
     /* Load FIR filter */
     ret = rtlsdr_set_fir(dev);
     ESP_RETURN_ON_ERROR(ret, TAG, "FIR set failed");
 
-    /* Enable spectrum inversion (reg 0:0x19 = 0x05) */
+    /* Enable SDR mode, disable DAGC (bit 5) */
     ret = rtlsdr_demod_write_reg(dev, 0, 0x19, 0x05, 1);
-    ESP_RETURN_ON_ERROR(ret, TAG, "Spectrum inv failed");
+    ESP_RETURN_ON_ERROR(ret, TAG, "SDR mode failed");
 
-    /* Set IF filter calibration (reg 1:0x93 = 0xf0, 1:0x94 = 0x0f) */
+    /* Init FSM state-holding register */
     ret = rtlsdr_demod_write_reg(dev, 1, 0x93, 0xf0, 1);
-    ESP_RETURN_ON_ERROR(ret, TAG, "IF cal 1 failed");
+    ESP_RETURN_ON_ERROR(ret, TAG, "FSM 1 failed");
     ret = rtlsdr_demod_write_reg(dev, 1, 0x94, 0x0f, 1);
-    ESP_RETURN_ON_ERROR(ret, TAG, "IF cal 2 failed");
+    ESP_RETURN_ON_ERROR(ret, TAG, "FSM 2 failed");
+
+    /* Disable AGC */
+    rtlsdr_demod_write_reg(dev, 1, 0x11, 0x00, 1);
+
+    /* Disable RF and IF AGC loop */
+    rtlsdr_demod_write_reg(dev, 1, 0x04, 0x00, 1);
+
+    /* Disable PID filter */
+    rtlsdr_demod_write_reg(dev, 0, 0x61, 0x60, 1);
+
+    /* Default ADC_I/ADC_Q datapath */
+    rtlsdr_demod_write_reg(dev, 0, 0x06, 0x80, 1);
+
+    /* Enable Zero-IF mode, DC cancellation, IQ estimation/compensation */
+    rtlsdr_demod_write_reg(dev, 1, 0xb1, 0x1b, 1);
+
+    /* Disable 4.096 MHz clock output on TP_CK0 */
+    rtlsdr_demod_write_reg(dev, 0, 0x0d, 0x83, 1);
 
     /* Set initial sample rate to 1.024 MSPS */
     uint32_t rsamp_ratio = ((uint64_t)RTL_XTAL_FREQ * (1 << 22)) / 1024000;
@@ -446,16 +467,27 @@ static void usb_client_event_cb(const usb_host_client_event_msg_t *msg, void *ar
 
 /* ──────────────────────── Async Bulk Reads ──────────────────────── */
 
+static uint32_t bulk_cb_count = 0;
+static uint32_t bulk_bytes_total = 0;
+
 static void bulk_xfer_cb(usb_transfer_t *xfer)
 {
     rtlsdr_dev_t *dev = (rtlsdr_dev_t *)xfer->context;
 
     if (xfer->status == USB_TRANSFER_STATUS_COMPLETED && xfer->actual_num_bytes > 0) {
+        bulk_cb_count++;
+        bulk_bytes_total += xfer->actual_num_bytes;
+        if (bulk_cb_count <= 3 || (bulk_cb_count % 1000) == 0) {
+            ESP_LOGI(TAG, "Bulk IN #%lu: %d bytes (total %lu bytes)",
+                     (unsigned long)bulk_cb_count, xfer->actual_num_bytes,
+                     (unsigned long)bulk_bytes_total);
+        }
         if (dev->async_cb) {
             dev->async_cb(xfer->data_buffer, xfer->actual_num_bytes, dev->async_ctx);
         }
     } else if (xfer->status != USB_TRANSFER_STATUS_CANCELED) {
-        ESP_LOGW(TAG, "Bulk IN status=%d bytes=%d", xfer->status, xfer->actual_num_bytes);
+        ESP_LOGW(TAG, "Bulk IN status=%d bytes=%d (cb#%lu)",
+                 xfer->status, xfer->actual_num_bytes, (unsigned long)bulk_cb_count);
     }
 
     /* Resubmit if still running */
@@ -845,11 +877,11 @@ esp_err_t rtlsdr_reset_buffer(rtlsdr_dev_t *dev)
     uint8_t epa_ctl[2];
 
     epa_ctl[0] = 0x10; epa_ctl[1] = 0x02;
-    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_USB, 0x0148, epa_ctl, 2);
+    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_USB, 0x2148, epa_ctl, 2);
     ESP_RETURN_ON_ERROR(ret, TAG, "EPA CTL reset set failed");
 
     epa_ctl[0] = 0x00; epa_ctl[1] = 0x00;
-    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_USB, 0x0148, epa_ctl, 2);
+    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_USB, 0x2148, epa_ctl, 2);
     ESP_RETURN_ON_ERROR(ret, TAG, "EPA CTL reset clear failed");
 
     return ESP_OK;
@@ -898,6 +930,8 @@ esp_err_t rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_cb_t cb,
     dev->async_running = true;
 
     /* Submit all transfers */
+    ESP_LOGI(TAG, "Submitting %lu bulk IN transfers (%lu bytes each, EP=0x%02x)",
+             (unsigned long)buf_num, (unsigned long)buf_len, RTLSDR_BULK_EP);
     for (uint32_t i = 0; i < buf_num; i++) {
         esp_err_t ret = usb_host_transfer_submit(dev->xfers[i]);
         if (ret != ESP_OK) {
@@ -907,6 +941,7 @@ esp_err_t rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_cb_t cb,
             break;
         }
     }
+    ESP_LOGI(TAG, "All %lu bulk transfers submitted, streaming active", (unsigned long)buf_num);
 
     /* Wait until stopped (USB events pumped by background client task) */
     while (dev->async_running) {
