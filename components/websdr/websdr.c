@@ -581,8 +581,8 @@ esp_err_t websdr_server_start(websdr_server_t **out_server, const websdr_config_
     srv->dev = config->dev;
     srv->fft_size = config->fft_size ? config->fft_size : WEBSDR_DEFAULT_FFT_SIZE;
     srv->fft_rate = config->fft_rate ? config->fft_rate : WEBSDR_DEFAULT_FFT_RATE;
-    srv->db_min = -40.0f;
-    srv->db_max = 40.0f;
+    srv->db_min = 10.0f;
+    srv->db_max = 90.0f;
     srv->running = true;
 
     srv->client_mutex = xSemaphoreCreateMutex();

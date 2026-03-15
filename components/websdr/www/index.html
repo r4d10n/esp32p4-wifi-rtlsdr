@@ -8,22 +8,28 @@
 </head>
 <body>
 <div id="app">
-<div id="header"><h1>ESP32-P4 WebSDR</h1><span id="status" class="disconnected">Disconnected</span></div>
-<div id="info-bar"><span id="freq-display">--- MHz</span><span id="rate-display">---</span><span id="smeter">S0</span></div>
-<div id="display"><canvas id="spectrum"></canvas><canvas id="waterfall"></canvas></div>
+<div id="header"><div id="status-dot"></div><span id="status-txt">Disconnected</span><div id="freq-display"></div><span id="rate-display">---</span><span id="smeter">S0</span><div id="smeter-bar"><div id="smeter-fill"></div></div><span id="bw-val" style="font-size:10px;color:#557755;min-width:52px">-- BW</span><div class="hdr-spacer"></div><button id="audio-btn">Audio</button></div>
+<div id="display"><div id="spectrum-wrap"><canvas id="spectrum"></canvas></div><div id="waterfall-wrap"><canvas id="waterfall"></canvas></div></div>
 <div id="controls">
-<div class="cg"><label>Freq MHz</label><input type="number" id="freq-input" step="0.001" min="24" max="1766" value="100.000"><button id="freq-set">Set</button></div>
-<div class="cg"><label>Mode</label><div id="mode-btns"><button class="mode-btn" data-mode="NFM">NFM</button><button class="mode-btn" data-mode="AM">AM</button><button class="mode-btn active" data-mode="WBFM">WBFM</button><button class="mode-btn" data-mode="USB">USB</button><button class="mode-btn" data-mode="LSB">LSB</button></div></div>
-<div class="cg"><label>Rate</label><select id="rate-select"><option value="250000">250k</option><option value="900001">900k</option><option value="1024000" selected>1.024M</option><option value="1200000">1.2M</option><option value="2048000">2.048M</option><option value="2400000">2.4M</option><option value="3200000">3.2M</option></select></div>
-<div class="cg"><label>FFT</label><select id="fft-select"><option value="256">256</option><option value="512">512</option><option value="1024" selected>1024</option><option value="2048">2048</option><option value="4096">4096</option><option value="8192">8192</option><option value="16384">16384</option></select></div>
-<div class="cg"><label>Gain:<span id="gain-val">Auto</span></label><input type="range" id="gain-slider" min="0" max="496" value="0"></div>
-<div class="cg"><label>Range <span id="range-val">80</span>dB</label><input type="range" id="range-slider" min="10" max="120" value="80"></div>
-<div class="cg"><label>Ref <span id="ref-val">0</span>dB</label><input type="range" id="ref-slider" min="-80" max="40" value="0"></div>
-<div class="cg"><label>Zoom</label><button id="zoom-in">+</button><button id="zoom-out">-</button><button id="zoom-reset">1:1</button><span id="zoom-val">1x</span></div>
-<div class="cg"><label>WF <span id="wf-speed-val">50</span></label><input type="range" id="wf-speed" min="5" max="100" value="50"></div>
-<div class="cg"><label>Vol:<span id="vol-val">50%</span></label><input type="range" id="vol-slider" min="0" max="100" value="50"></div>
-<div class="cg"><label>Sql:<span id="sql-val">0</span></label><input type="range" id="sql-slider" min="0" max="255" value="0"></div>
-<div class="cg"><button id="audio-btn">Start Audio</button></div>
+<div class="cg"><span class="lbl">Mode</span><div id="mode-btns"><button class="mode-btn" data-mode="NFM">NFM</button><button class="mode-btn" data-mode="AM">AM</button><button class="mode-btn active" data-mode="WBFM">WBFM</button><button class="mode-btn" data-mode="USB">USB</button><button class="mode-btn" data-mode="LSB">LSB</button></div></div>
+<div class="cg-sep"></div>
+<div class="cg"><span class="lbl">Tune</span><input type="range" id="tune-slider" min="-50000" max="50000" value="0" step="100" style="width:90px"><span id="tune-lbl" class="val-lbl" style="min-width:36px">±0</span></div>
+<div class="cg-sep"></div>
+<div class="cg"><span class="lbl">G</span><input type="range" id="gain-slider" min="0" max="496" value="0"><span id="gain-val" class="val-lbl">Auto</span></div>
+<div class="cg-sep"></div>
+<div class="cg"><span class="lbl">Vol</span><input type="range" id="vol-slider" min="0" max="100" value="50"><span id="vol-val" class="val-lbl">50%</span></div>
+<div class="cg"><span class="lbl">Sql</span><input type="range" id="sql-slider" min="0" max="255" value="0"><span id="sql-val" class="val-lbl">0</span></div>
+<div class="cg-sep"></div>
+<div class="cg"><span class="lbl">Rng</span><input type="range" id="range-slider" min="10" max="120" value="80"><span id="range-val" class="val-lbl">80</span></div>
+<div class="cg"><span class="lbl">Ref</span><input type="range" id="ref-slider" min="-80" max="40" value="0"><span id="ref-val" class="val-lbl">0</span></div>
+<div class="cg-sep"></div>
+<div class="cg"><span class="lbl">Zoom</span><button class="ctrl-btn" id="zoom-out">−</button><span id="zoom-val" class="val-lbl" style="min-width:22px">1x</span><button class="ctrl-btn" id="zoom-in">+</button><button class="ctrl-btn" id="zoom-reset" style="font-size:10px;padding:1px 5px">1:1</button></div>
+<div class="cg-sep"></div>
+<div class="cg"><span class="lbl">Rate</span><select id="rate-select"><option value="250000">250k</option><option value="900001">900k</option><option value="1024000" selected>1.024M</option><option value="1200000">1.2M</option><option value="2048000">2.048M</option><option value="2400000">2.4M</option><option value="3200000">3.2M</option></select></div>
+<div class="cg"><span class="lbl">FFT</span><select id="fft-select"><option value="256">256</option><option value="512">512</option><option value="1024" selected>1024</option><option value="2048">2048</option><option value="4096">4096</option><option value="8192">8192</option><option value="16384">16384</option></select></div>
+<div class="cg-sep"></div>
+<div class="cg"><span class="lbl">WF</span><input type="range" id="wf-speed" min="5" max="100" value="50"><span id="wf-speed-val" class="val-lbl">50</span></div>
+<div class="cg"><button class="ctrl-btn" id="peak-clear" style="font-size:10px">Pk Clr</button></div>
 </div>
 </div>
 <script src="/sdr.js"></script>
