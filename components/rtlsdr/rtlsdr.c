@@ -182,57 +182,104 @@ static const int fir_default[] = {
     101, 156, 215, 273, 327, 372, 404, 421
 };
 
+static esp_err_t rtlsdr_set_fir(rtlsdr_dev_t *dev)
+{
+    /* Pack FIR coefficients: 8 x 8-bit then 8 x 12-bit */
+    uint8_t fir[20];
+    int i;
+
+    for (i = 0; i < 8; i++) {
+        fir[i] = (uint8_t)(fir_default[i] & 0xff);
+    }
+    for (i = 0; i < 8; i += 2) {
+        int val0 = fir_default[8 + i];
+        int val1 = fir_default[8 + i + 1];
+        fir[8 + i * 3 / 2]     = (val0 >> 4) & 0xff;
+        fir[8 + i * 3 / 2 + 1] = ((val0 << 4) & 0xf0) | ((val1 >> 8) & 0x0f);
+        fir[8 + i * 3 / 2 + 2] = val1 & 0xff;
+    }
+
+    /* Write FIR one byte at a time (as librtlsdr does) */
+    for (i = 0; i < (int)sizeof(fir); i++) {
+        esp_err_t ret = rtlsdr_demod_write_reg(dev, 1, 0x1c + i, fir[i], 1);
+        if (ret != ESP_OK) return ret;
+    }
+    return ESP_OK;
+}
+
 static esp_err_t rtlsdr_init_baseband(rtlsdr_dev_t *dev)
 {
     esp_err_t ret;
-
-    /* Initialize USB interface */
     uint8_t val;
 
-    /* Dummy write to test USB link */
+    /* USB_SYSCTL = 0x09 (test / reset) */
     val = 0x09;
     ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_USB, 0x2000, &val, 1);
-    ESP_RETURN_ON_ERROR(ret, TAG, "USB test write failed");
+    ESP_RETURN_ON_ERROR(ret, TAG, "USB SYSCTL write failed");
 
-    /* Demod init */
-    ret = rtlsdr_demod_write_reg(dev, 1, 0x01, 0x14, 1);  /* enable I2C repeater */
-    ESP_RETURN_ON_ERROR(ret, TAG, "Demod init 1 failed");
+    /* USB_EPA_MAXPKT = 0x0002 (512 bytes for HS) */
+    uint8_t maxpkt[2] = {0x00, 0x02};
+    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_USB, 0x0158, maxpkt, 2);
+    ESP_RETURN_ON_ERROR(ret, TAG, "EPA MAXPKT write failed");
 
-    ret = rtlsdr_demod_write_reg(dev, 1, 0x15, 0x01, 1);  /* IF mode = zero-IF */
-    ESP_RETURN_ON_ERROR(ret, TAG, "Demod init 2 failed");
+    /* USB_EPA_CTL = 0x1002 */
+    uint8_t epa_ctl[2] = {0x10, 0x02};
+    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_USB, 0x0148, epa_ctl, 2);
+    ESP_RETURN_ON_ERROR(ret, TAG, "EPA CTL write failed");
 
-    ret = rtlsdr_demod_write_reg(dev, 1, 0x16, 0x32, 1);  /* digital AGC */
-    ESP_RETURN_ON_ERROR(ret, TAG, "Demod init 3 failed");
+    /* DEMOD_CTL_1 = 0x22 */
+    val = 0x22;
+    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_SYS, 0x3000, &val, 1);
+    ESP_RETURN_ON_ERROR(ret, TAG, "DEMOD_CTL_1 failed");
 
-    /* Load FIR filter coefficients */
-    uint8_t fir[20];
-    for (int i = 0; i < 8; i++) {
-        fir[i] = fir_default[i] & 0xFF;
-    }
-    for (int i = 0; i < 8; i += 2) {
-        fir[8 + i] = ((fir_default[8 + i] >> 4) & 0x0F) | ((fir_default[8 + i + 1] << 4) & 0xF0);
-        fir[8 + i + 1] = (fir_default[8 + i + 1] >> 4) & 0xFF;
-    }
-    /* Write FIR coefficients in chunks */
-    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_DEMOD, 0x1C, fir, 16);
-    ESP_RETURN_ON_ERROR(ret, TAG, "FIR write failed");
+    /* DEMOD_CTL = 0xe8 (release reset, enable ADC-Q) */
+    val = 0xe8;
+    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_SYS, 0x3001, &val, 1);
+    ESP_RETURN_ON_ERROR(ret, TAG, "DEMOD_CTL failed");
 
-    /* Enable spectrum inversion */
-    ret = rtlsdr_demod_write_reg(dev, 1, 0x19, 0x05, 1);
+    /* Reset demod (reg 1:0x01 = 0x14, then 0x10) */
+    ret = rtlsdr_demod_write_reg(dev, 1, 0x01, 0x14, 1);
+    ESP_RETURN_ON_ERROR(ret, TAG, "Demod reset 1 failed");
+    ret = rtlsdr_demod_write_reg(dev, 1, 0x01, 0x10, 1);
+    ESP_RETURN_ON_ERROR(ret, TAG, "Demod reset 2 failed");
+
+    /* Disable zero-IF mode (reg 1:0x15 = 0x00) */
+    ret = rtlsdr_demod_write_reg(dev, 1, 0x15, 0x00, 1);
+    ESP_RETURN_ON_ERROR(ret, TAG, "Zero-IF disable failed");
+
+    /* Disable output ADC (reg 1:0x16 = 0x0000) */
+    ret = rtlsdr_demod_write_reg(dev, 1, 0x16, 0x0000, 2);
+    ESP_RETURN_ON_ERROR(ret, TAG, "ADC disable failed");
+
+    /* Load FIR filter */
+    ret = rtlsdr_set_fir(dev);
+    ESP_RETURN_ON_ERROR(ret, TAG, "FIR set failed");
+
+    /* Enable spectrum inversion (reg 0:0x19 = 0x05) */
+    ret = rtlsdr_demod_write_reg(dev, 0, 0x19, 0x05, 1);
     ESP_RETURN_ON_ERROR(ret, TAG, "Spectrum inv failed");
 
-    /* Enable digital AGC */
-    ret = rtlsdr_demod_write_reg(dev, 1, 0x11, 0x03, 1);
-    ESP_RETURN_ON_ERROR(ret, TAG, "DAGC enable failed");
+    /* Set IF filter calibration (reg 1:0x93 = 0xf0, 1:0x94 = 0x0f) */
+    ret = rtlsdr_demod_write_reg(dev, 1, 0x93, 0xf0, 1);
+    ESP_RETURN_ON_ERROR(ret, TAG, "IF cal 1 failed");
+    ret = rtlsdr_demod_write_reg(dev, 1, 0x94, 0x0f, 1);
+    ESP_RETURN_ON_ERROR(ret, TAG, "IF cal 2 failed");
 
     /* Set initial sample rate to 1.024 MSPS */
     uint32_t rsamp_ratio = ((uint64_t)RTL_XTAL_FREQ * (1 << 22)) / 1024000;
-    ret = rtlsdr_demod_write_reg(dev, 1, 0x9F, (rsamp_ratio >> 16) & 0xFFFF, 2);
+    rsamp_ratio &= 0x0ffffffc;
+    ret = rtlsdr_demod_write_reg(dev, 1, 0x9f, (rsamp_ratio >> 16) & 0xffff, 2);
     ESP_RETURN_ON_ERROR(ret, TAG, "Sample rate hi failed");
-    ret = rtlsdr_demod_write_reg(dev, 1, 0xA1, rsamp_ratio & 0xFFFF, 2);
+    ret = rtlsdr_demod_write_reg(dev, 1, 0xa1, rsamp_ratio & 0xffff, 2);
     ESP_RETURN_ON_ERROR(ret, TAG, "Sample rate lo failed");
 
-    ESP_LOGI(TAG, "Baseband initialized");
+    /* Reset demod again */
+    ret = rtlsdr_demod_write_reg(dev, 1, 0x01, 0x14, 1);
+    ESP_RETURN_ON_ERROR(ret, TAG, "Demod re-reset 1 failed");
+    ret = rtlsdr_demod_write_reg(dev, 1, 0x01, 0x10, 1);
+    ESP_RETURN_ON_ERROR(ret, TAG, "Demod re-reset 2 failed");
+
+    ESP_LOGI(TAG, "Baseband initialized (match librtlsdr sequence)");
     return ESP_OK;
 }
 
@@ -249,6 +296,19 @@ extern esp_err_t r82xx_set_bandwidth(rtlsdr_dev_t *dev, uint32_t bw);
 #define R820T_I2C_ADDR  0x34
 #define R828D_I2C_ADDR  0x74
 
+/* R82XX check register for tuner detection */
+#define R82XX_CHECK_ADDR    0x00
+#define R82XX_CHECK_VAL     0x69
+
+static esp_err_t rtlsdr_i2c_read_reg(rtlsdr_dev_t *dev, uint8_t i2c_addr,
+                                      uint8_t reg, uint8_t *val)
+{
+    /* Write register address, then read */
+    esp_err_t ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_IIC, i2c_addr, &reg, 1);
+    if (ret != ESP_OK) return ret;
+    return rtlsdr_read_reg(dev, RTLSDR_BLOCK_IIC, i2c_addr, val, 1);
+}
+
 static esp_err_t rtlsdr_probe_tuner(rtlsdr_dev_t *dev)
 {
     esp_err_t ret;
@@ -258,26 +318,26 @@ static esp_err_t rtlsdr_probe_tuner(rtlsdr_dev_t *dev)
     ret = rtlsdr_set_i2c_repeater(dev, true);
     ESP_RETURN_ON_ERROR(ret, TAG, "I2C repeater enable failed");
 
-    /* Try R820T at address 0x34 */
-    ret = rtlsdr_read_reg(dev, RTLSDR_BLOCK_IIC, R820T_I2C_ADDR, &val, 1);
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Found R820T/R820T2 tuner (reg0=0x%02x)", val);
-        dev->tuner_type = RTLSDR_TUNER_R820T;
-        rtlsdr_set_i2c_repeater(dev, false);
-        return ESP_OK;
-    }
-
-    /* Try R828D at address 0x74 */
-    ret = rtlsdr_read_reg(dev, RTLSDR_BLOCK_IIC, R828D_I2C_ADDR, &val, 1);
-    if (ret == ESP_OK) {
+    /* Try R828D at address 0x74 (check first — RTL-SDR V4 uses this) */
+    ret = rtlsdr_i2c_read_reg(dev, R828D_I2C_ADDR, R82XX_CHECK_ADDR, &val);
+    if (ret == ESP_OK && val == R82XX_CHECK_VAL) {
         ESP_LOGI(TAG, "Found R828D tuner (reg0=0x%02x)", val);
         dev->tuner_type = RTLSDR_TUNER_R828D;
         rtlsdr_set_i2c_repeater(dev, false);
         return ESP_OK;
     }
 
+    /* Try R820T at address 0x34 */
+    ret = rtlsdr_i2c_read_reg(dev, R820T_I2C_ADDR, R82XX_CHECK_ADDR, &val);
+    if (ret == ESP_OK && val == R82XX_CHECK_VAL) {
+        ESP_LOGI(TAG, "Found R820T/R820T2 tuner (reg0=0x%02x)", val);
+        dev->tuner_type = RTLSDR_TUNER_R820T;
+        rtlsdr_set_i2c_repeater(dev, false);
+        return ESP_OK;
+    }
+
     /* TODO: probe E4000, FC0012, FC0013, FC2580 */
-    ESP_LOGW(TAG, "No supported tuner found");
+    ESP_LOGW(TAG, "No supported tuner found (last read=0x%02x)", val);
     dev->tuner_type = RTLSDR_TUNER_UNKNOWN;
     rtlsdr_set_i2c_repeater(dev, false);
     return ESP_ERR_NOT_FOUND;
@@ -287,9 +347,13 @@ static esp_err_t rtlsdr_probe_tuner(rtlsdr_dev_t *dev)
 
 static bool rtlsdr_is_target_device(const usb_device_desc_t *desc)
 {
-    if (desc->idVendor != RTLSDR_USB_VID) return false;
-    return (desc->idProduct == RTLSDR_USB_PID_GENERIC ||
-            desc->idProduct == RTLSDR_USB_PID_BLOG);
+    if (desc->idVendor == RTLSDR_USB_VID) {
+        /* Match any known RTL2832U PID */
+        return (desc->idProduct == RTLSDR_USB_PID_GENERIC ||
+                desc->idProduct == RTLSDR_USB_PID_BLOG ||
+                desc->idProduct == 0x2838);  /* ezcap / Blog V4 */
+    }
+    return false;
 }
 
 static void usb_client_event_cb(const usb_host_client_event_msg_t *msg, void *arg)
@@ -653,10 +717,17 @@ const int *rtlsdr_get_tuner_gains(rtlsdr_dev_t *dev, int *count)
 esp_err_t rtlsdr_reset_buffer(rtlsdr_dev_t *dev)
 {
     esp_err_t ret;
-    ret = rtlsdr_demod_write_reg(dev, 1, 0x01, 0x14, 1);
-    ESP_RETURN_ON_ERROR(ret, TAG, "Reset buffer write failed");
-    ret = rtlsdr_demod_write_reg(dev, 1, 0x01, 0x10, 1);
-    ESP_RETURN_ON_ERROR(ret, TAG, "Reset buffer clear failed");
+    /* Reset EPA (USB endpoint) buffer — matches librtlsdr */
+    uint8_t epa_ctl[2];
+
+    epa_ctl[0] = 0x10; epa_ctl[1] = 0x02;
+    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_USB, 0x0148, epa_ctl, 2);
+    ESP_RETURN_ON_ERROR(ret, TAG, "EPA CTL reset set failed");
+
+    epa_ctl[0] = 0x00; epa_ctl[1] = 0x00;
+    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_USB, 0x0148, epa_ctl, 2);
+    ESP_RETURN_ON_ERROR(ret, TAG, "EPA CTL reset clear failed");
+
     return ESP_OK;
 }
 
