@@ -5,6 +5,7 @@ menu "RTL-SDR WiFi Bridge Configuration"
         default "myssid"
         help
             SSID of the WiFi network to connect to.
+            Set via: idf.py menuconfig
 
     config WIFI_PASSWORD
         string "WiFi Password"
