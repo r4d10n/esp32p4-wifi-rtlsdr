@@ -73,7 +73,11 @@ static inline float fast_log10f(float x)
 
 /* ──────────────────────── FFT Engine ──────────────────────── */
 
-#define FFT_MAX_SIZE    16384
+/* Max FFT size limited by internal RAM for aligned int16 buffers.
+ * 8192: 8192×2×2 = 32KB per buffer, 3 buffers = 96KB — fits.
+ * 16384: 16384×2×2 = 64KB per buffer, 3 buffers = 192KB — heap fragmentation risk.
+ * Use 8192 as safe max. For 16384, would need PSRAM-backed buffers. */
+#define FFT_MAX_SIZE    8192
 #define FFT_AVG_COUNT   4       /* Average this many FFT frames before output */
 
 /* Configurable dB range
