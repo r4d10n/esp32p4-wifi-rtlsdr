@@ -61,7 +61,22 @@ struct rtlsdr_dev {
     SemaphoreHandle_t   ctrl_sem;
     usb_transfer_t     *ctrl_xfer;
     esp_err_t           ctrl_status;
+
+    /* Client event processing task */
+    TaskHandle_t        client_task_hdl;
+    volatile bool       client_task_running;
 };
+
+/* Background task to pump USB client events (needed for control transfer callbacks) */
+static void usb_client_event_task(void *arg)
+{
+    rtlsdr_dev_t *dev = (rtlsdr_dev_t *)arg;
+    while (dev->client_task_running) {
+        usb_host_client_handle_events(dev->client_hdl, pdMS_TO_TICKS(50));
+    }
+    ESP_LOGI(TAG, "USB client event task stopped");
+    vTaskDelete(NULL);
+}
 
 /* ──────────────────────── USB Control Transfers ──────────────────────── */
 
@@ -111,6 +126,18 @@ static esp_err_t rtlsdr_ctrl_transfer(rtlsdr_dev_t *dev, uint8_t bmRequestType,
     }
 
     if (dev->ctrl_status != ESP_OK) {
+        ESP_LOGE(TAG, "Ctrl xfer fail: bmReqType=0x%02x wValue=0x%04x wIndex=0x%04x wLen=%d status=%d",
+                 ((usb_setup_packet_t *)xfer->data_buffer)->bmRequestType,
+                 ((usb_setup_packet_t *)xfer->data_buffer)->wValue,
+                 ((usb_setup_packet_t *)xfer->data_buffer)->wIndex,
+                 ((usb_setup_packet_t *)xfer->data_buffer)->wLength,
+                 xfer->status);
+        /* After a STALL, halt must be cleared before EP0 can be used again */
+        if (xfer->status == USB_TRANSFER_STATUS_STALL) {
+            usb_host_endpoint_halt(dev->dev_hdl, 0);
+            usb_host_endpoint_flush(dev->dev_hdl, 0);
+            usb_host_endpoint_clear(dev->dev_hdl, 0);
+        }
         return ESP_FAIL;
     }
 
@@ -121,11 +148,18 @@ static esp_err_t rtlsdr_ctrl_transfer(rtlsdr_dev_t *dev, uint8_t bmRequestType,
     return ESP_OK;
 }
 
+/*
+ * Register access — matches librtlsdr encoding exactly:
+ *   write_reg: wIndex = (block << 8) | 0x10, wValue = addr
+ *   read_reg:  wIndex = (block << 8),         wValue = addr
+ *   demod_write_reg: wIndex = page | 0x10,    wValue = (addr << 8) | 0x20
+ */
+
 /* Read a register block */
 esp_err_t rtlsdr_read_reg(rtlsdr_dev_t *dev, uint16_t block,
                            uint16_t addr, uint8_t *val, uint16_t len)
 {
-    uint16_t wIndex = block;
+    uint16_t wIndex = (block << 8);
     uint16_t wValue = addr;
     return rtlsdr_ctrl_transfer(dev, CTRL_IN, wValue, wIndex, val, len);
 }
@@ -134,37 +168,50 @@ esp_err_t rtlsdr_read_reg(rtlsdr_dev_t *dev, uint16_t block,
 esp_err_t rtlsdr_write_reg(rtlsdr_dev_t *dev, uint16_t block,
                             uint16_t addr, const uint8_t *val, uint16_t len)
 {
-    uint16_t wIndex = (block) | 0x10;
+    uint16_t wIndex = (block << 8) | 0x10;
     uint16_t wValue = addr;
+    ESP_LOGD(TAG, "write_reg: block=%d addr=0x%04x len=%d => wValue=0x%04x wIndex=0x%04x data[0]=0x%02x",
+             block, addr, len, wValue, wIndex, val[0]);
     return rtlsdr_ctrl_transfer(dev, CTRL_OUT, wValue, wIndex, (uint8_t *)val, len);
 }
 
-/* Write a single 16-bit value to demod register */
+/* Write to demod register — uses separate encoding from write_reg */
 static esp_err_t rtlsdr_demod_write_reg(rtlsdr_dev_t *dev, uint8_t page,
                                          uint16_t addr, uint16_t val, uint8_t len)
 {
     uint8_t data[2];
-    /* Set demod page */
-    uint8_t page_val = page;
-    esp_err_t ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_DEMOD, 0x00, &page_val, 1);
-    if (ret != ESP_OK) return ret;
+    uint16_t wValue = (addr << 8) | 0x20;
+    uint16_t wIndex = page | 0x10;
 
     if (len == 1) {
-        data[0] = val & 0xFF;
+        data[0] = val & 0xff;
     } else {
-        data[0] = (val >> 8) & 0xFF;
-        data[1] = val & 0xFF;
+        data[0] = (val >> 8) & 0xff;
     }
-    return rtlsdr_write_reg(dev, RTLSDR_BLOCK_DEMOD, addr, data, len);
+    data[1] = val & 0xff;
+
+    ESP_LOGD(TAG, "demod_write: page=%d addr=0x%04x val=0x%04x len=%d => wValue=0x%04x wIndex=0x%04x data=%02x%02x",
+             page, addr, val, len, wValue, wIndex, data[0], data[1]);
+
+    /* Always send 2 data bytes (as librtlsdr allocates data[2]) */
+    esp_err_t ret = rtlsdr_ctrl_transfer(dev, CTRL_OUT, wValue, wIndex, data, len);
+
+    /* Dummy read after demod write (as librtlsdr does) */
+    if (ret == ESP_OK) {
+        uint8_t dummy[2];
+        rtlsdr_ctrl_transfer(dev, CTRL_IN, (0x01 << 8) | 0x20, 0x0a, dummy, 1);
+    }
+
+    return ret;
 }
 
+/* Read from demod register */
 static esp_err_t rtlsdr_demod_read_reg(rtlsdr_dev_t *dev, uint8_t page,
                                         uint16_t addr, uint8_t *val, uint8_t len)
 {
-    uint8_t page_val = page;
-    esp_err_t ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_DEMOD, 0x00, &page_val, 1);
-    if (ret != ESP_OK) return ret;
-    return rtlsdr_read_reg(dev, RTLSDR_BLOCK_DEMOD, addr, val, len);
+    uint16_t wValue = (addr << 8) | 0x20;
+    uint16_t wIndex = page;
+    return rtlsdr_ctrl_transfer(dev, CTRL_IN, wValue, wIndex, val, len);
 }
 
 /* ──────────────────────── I2C Repeater (Tuner Access) ──────────────────────── */
@@ -227,21 +274,44 @@ static esp_err_t rtlsdr_init_baseband(rtlsdr_dev_t *dev)
     ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_USB, 0x0148, epa_ctl, 2);
     ESP_RETURN_ON_ERROR(ret, TAG, "EPA CTL write failed");
 
-    /* DEMOD_CTL_1 = 0x22 */
+    /* DEMOD_CTL_1 (0x300b) = 0x22 */
     val = 0x22;
-    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_SYS, 0x3000, &val, 1);
+    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_SYS, 0x300b, &val, 1);
     ESP_RETURN_ON_ERROR(ret, TAG, "DEMOD_CTL_1 failed");
 
-    /* DEMOD_CTL = 0xe8 (release reset, enable ADC-Q) */
+    /* DEMOD_CTL (0x3000) = 0xe8 (release reset, enable ADC-Q) */
     val = 0xe8;
-    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_SYS, 0x3001, &val, 1);
+    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_SYS, 0x3000, &val, 1);
     ESP_RETURN_ON_ERROR(ret, TAG, "DEMOD_CTL failed");
+
+    /* Allow demod to come out of reset */
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    /* Verify SYS block by reading back DEMOD_CTL */
+    {
+        uint8_t rd_val = 0;
+        ret = rtlsdr_read_reg(dev, RTLSDR_BLOCK_SYS, 0x3000, &rd_val, 1);
+        ESP_LOGI(TAG, "DEMOD_CTL readback: ret=%d val=0x%02x (expect 0xe8)", ret, rd_val);
+
+        rd_val = 0;
+        ret = rtlsdr_read_reg(dev, RTLSDR_BLOCK_SYS, 0x300b, &rd_val, 1);
+        ESP_LOGI(TAG, "DEMOD_CTL_1 readback: ret=%d val=0x%02x (expect 0x22)", ret, rd_val);
+
+        /* Also try reading USB_SYSCTL to verify reads work */
+        rd_val = 0;
+        ret = rtlsdr_read_reg(dev, RTLSDR_BLOCK_USB, 0x2000, &rd_val, 1);
+        ESP_LOGI(TAG, "USB_SYSCTL readback: ret=%d val=0x%02x (expect 0x09)", ret, rd_val);
+    }
 
     /* Reset demod (reg 1:0x01 = 0x14, then 0x10) */
     ret = rtlsdr_demod_write_reg(dev, 1, 0x01, 0x14, 1);
-    ESP_RETURN_ON_ERROR(ret, TAG, "Demod reset 1 failed");
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Demod reset 1 failed (ret=%d), continuing...", ret);
+    }
     ret = rtlsdr_demod_write_reg(dev, 1, 0x01, 0x10, 1);
-    ESP_RETURN_ON_ERROR(ret, TAG, "Demod reset 2 failed");
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Demod reset 2 failed (ret=%d), continuing...", ret);
+    }
 
     /* Disable zero-IF mode (reg 1:0x15 = 0x00) */
     ret = rtlsdr_demod_write_reg(dev, 1, 0x15, 0x00, 1);
@@ -303,7 +373,7 @@ extern esp_err_t r82xx_set_bandwidth(rtlsdr_dev_t *dev, uint32_t bw);
 static esp_err_t rtlsdr_i2c_read_reg(rtlsdr_dev_t *dev, uint8_t i2c_addr,
                                       uint8_t reg, uint8_t *val)
 {
-    /* Write register address, then read */
+    /* For I2C read on RTL2832U: write addr byte, then read data */
     esp_err_t ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_IIC, i2c_addr, &reg, 1);
     if (ret != ESP_OK) return ret;
     return rtlsdr_read_reg(dev, RTLSDR_BLOCK_IIC, i2c_addr, val, 1);
@@ -427,11 +497,16 @@ esp_err_t rtlsdr_init(rtlsdr_dev_t **out_dev)
     ret = usb_host_client_register(&client_config, &dev->client_hdl);
     ESP_GOTO_ON_ERROR(ret, err, TAG, "USB client register failed");
 
+    /* Start background task to pump client events (needed for ctrl xfer callbacks) */
+    dev->client_task_running = true;
+    xTaskCreatePinnedToCore(usb_client_event_task, "usb_client", 4096,
+                            dev, 10, &dev->client_task_hdl, 0);
+
     /* Wait for device to connect and find RTL-SDR */
     ESP_LOGI(TAG, "Waiting for RTL-SDR device...");
     bool found = false;
     while (!found) {
-        usb_host_client_handle_events(dev->client_hdl, pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(500));
 
         /* Enumerate connected devices */
         uint8_t dev_addr_list[8];
@@ -457,12 +532,54 @@ esp_err_t rtlsdr_init(rtlsdr_dev_t **out_dev)
         }
     }
 
-    /* Claim interface 0 */
+    /* Print device descriptors for debugging */
+    {
+        const usb_device_desc_t *ddesc;
+        usb_host_get_device_descriptor(dev->dev_hdl, &ddesc);
+        ESP_LOGI(TAG, "Device: VID=0x%04x PID=0x%04x class=%d subclass=%d proto=%d bcdUSB=0x%04x",
+                 ddesc->idVendor, ddesc->idProduct, ddesc->bDeviceClass,
+                 ddesc->bDeviceSubClass, ddesc->bDeviceProtocol, ddesc->bcdUSB);
+        ESP_LOGI(TAG, "  bNumConfigurations=%d bMaxPacketSize0=%d",
+                 ddesc->bNumConfigurations, ddesc->bMaxPacketSize0);
+
+        const usb_config_desc_t *cdesc;
+        ret = usb_host_get_active_config_descriptor(dev->dev_hdl, &cdesc);
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "Config: bNumInterfaces=%d bConfigurationValue=%d wTotalLength=%d",
+                     cdesc->bNumInterfaces, cdesc->bConfigurationValue, cdesc->wTotalLength);
+            /* Walk interfaces */
+            int offset = 0;
+            const uint8_t *p = (const uint8_t *)cdesc;
+            while (offset < cdesc->wTotalLength) {
+                uint8_t bLength = p[offset];
+                uint8_t bDescType = p[offset + 1];
+                if (bLength == 0) break;
+                if (bDescType == 0x04) { /* Interface */
+                    ESP_LOGI(TAG, "  Interface: num=%d alt=%d numEP=%d class=%d",
+                             p[offset+2], p[offset+3], p[offset+4], p[offset+5]);
+                } else if (bDescType == 0x05) { /* Endpoint */
+                    ESP_LOGI(TAG, "  Endpoint: addr=0x%02x attr=0x%02x maxpkt=%d",
+                             p[offset+2], p[offset+3], p[offset+4] | (p[offset+5] << 8));
+                }
+                offset += bLength;
+            }
+        }
+    }
+
+    /* Claim both interfaces (RTL2832U has 2 interfaces) */
     dev->iface_num = 0;
-    ret = usb_host_interface_claim(dev->client_hdl, dev->dev_hdl, dev->iface_num, 0);
-    ESP_GOTO_ON_ERROR(ret, err, TAG, "Interface claim failed");
-    dev->iface_claimed = true;
+    ret = usb_host_interface_claim(dev->client_hdl, dev->dev_hdl, 0, 0);
+    ESP_GOTO_ON_ERROR(ret, err, TAG, "Interface 0 claim failed");
     ESP_LOGI(TAG, "Interface 0 claimed");
+
+    /* Also claim interface 1 (needed for demod register access on some variants) */
+    ret = usb_host_interface_claim(dev->client_hdl, dev->dev_hdl, 1, 0);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Interface 1 claimed");
+    } else {
+        ESP_LOGW(TAG, "Interface 1 claim failed (ret=%d), continuing...", ret);
+    }
+    dev->iface_claimed = true;
 
     /* Initialize baseband */
     ret = rtlsdr_init_baseband(dev);
@@ -472,7 +589,10 @@ esp_err_t rtlsdr_init(rtlsdr_dev_t **out_dev)
     ret = rtlsdr_probe_tuner(dev);
     if (ret == ESP_OK && (dev->tuner_type == RTLSDR_TUNER_R820T ||
                           dev->tuner_type == RTLSDR_TUNER_R828D)) {
+        /* Enable I2C repeater for tuner access */
+        rtlsdr_set_i2c_repeater(dev, true);
         ret = r82xx_init(dev);
+        rtlsdr_set_i2c_repeater(dev, false);
         ESP_GOTO_ON_ERROR(ret, err, TAG, "Tuner init failed");
     }
 
@@ -508,6 +628,10 @@ esp_err_t rtlsdr_deinit(rtlsdr_dev_t *dev)
     if (!dev) return ESP_ERR_INVALID_ARG;
 
     rtlsdr_stop_async(dev);
+
+    /* Stop client event task */
+    dev->client_task_running = false;
+    vTaskDelay(pdMS_TO_TICKS(100));
 
     if (dev->iface_claimed) {
         usb_host_interface_release(dev->client_hdl, dev->dev_hdl, dev->iface_num);
@@ -784,9 +908,9 @@ esp_err_t rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_cb_t cb,
         }
     }
 
-    /* Process USB events until stopped */
+    /* Wait until stopped (USB events pumped by background client task) */
     while (dev->async_running) {
-        usb_host_client_handle_events(dev->client_hdl, pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 
     /* Wait for all transfers to complete/cancel */

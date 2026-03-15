@@ -80,23 +80,44 @@ static uint8_t r82xx_input = 0;
 
 /* ──────────────────────── I2C via RTL2832U IIC Block ──────────────────────── */
 
+/* Max I2C message length for RTL2832U I2C repeater.
+ * The USB control transfer data includes 1 byte for register address,
+ * so max data per write = MAX_I2C_MSG_LEN - 1. */
+#define MAX_I2C_MSG_LEN  8
+
 static esp_err_t r82xx_write(rtlsdr_dev_t *dev, uint8_t reg, const uint8_t *data, uint8_t len)
 {
-    uint8_t buf[32];
-    if (len + 1 > sizeof(buf)) return ESP_ERR_INVALID_SIZE;
+    esp_err_t ret;
+    uint8_t pos = 0;
 
-    buf[0] = reg;
-    memcpy(&buf[1], data, len);
+    while (pos < len) {
+        uint8_t chunk = len - pos;
+        if (chunk > MAX_I2C_MSG_LEN - 1) {
+            chunk = MAX_I2C_MSG_LEN - 1;
+        }
 
-    esp_err_t ret = rtlsdr_write_reg(dev, 0x0600, r82xx_i2c_addr, buf, len + 1);
-    if (ret == ESP_OK) {
-        for (uint8_t i = 0; i < len && (reg - REG_SHADOW_START + i) < NUM_REGS; i++) {
-            if (reg + i >= REG_SHADOW_START) {
-                r82xx_regs[reg - REG_SHADOW_START + i] = data[i];
+        uint8_t buf[MAX_I2C_MSG_LEN];
+        buf[0] = reg + pos;
+        memcpy(&buf[1], data + pos, chunk);
+
+        ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_IIC, r82xx_i2c_addr, buf, chunk + 1);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "I2C write failed at reg 0x%02x+%d", reg, pos);
+            return ret;
+        }
+
+        /* Update shadow regs */
+        for (uint8_t i = 0; i < chunk; i++) {
+            uint8_t r = reg + pos + i;
+            if (r >= REG_SHADOW_START && (r - REG_SHADOW_START) < NUM_REGS) {
+                r82xx_regs[r - REG_SHADOW_START] = data[pos + i];
             }
         }
+
+        pos += chunk;
     }
-    return ret;
+
+    return ESP_OK;
 }
 
 static esp_err_t r82xx_write_reg(rtlsdr_dev_t *dev, uint8_t reg, uint8_t val)
@@ -115,7 +136,7 @@ static esp_err_t r82xx_read(rtlsdr_dev_t *dev, uint8_t reg, uint8_t *data, uint8
 {
     /* R82xx uses read-from-zero, bits are MSB-reversed per byte */
     (void)reg; /* R82xx always reads from register 0 */
-    return rtlsdr_read_reg(dev, 0x0600, r82xx_i2c_addr, data, len);
+    return rtlsdr_read_reg(dev, RTLSDR_BLOCK_IIC, r82xx_i2c_addr, data, len);
 }
 
 /* ──────────────────────── PLL ──────────────────────── */

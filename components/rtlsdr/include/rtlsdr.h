@@ -25,14 +25,14 @@ extern "C" {
 #define RTLSDR_CTRL_TIMEOUT_MS  300
 #define RTLSDR_BULK_EP          0x81
 
-/* Register blocks for vendor control transfers */
-#define RTLSDR_BLOCK_DEMOD      0x000
-#define RTLSDR_BLOCK_USB        0x100
-#define RTLSDR_BLOCK_SYS        0x200
-#define RTLSDR_BLOCK_TUNER      0x300
-#define RTLSDR_BLOCK_ROM        0x400
-#define RTLSDR_BLOCK_IR         0x500
-#define RTLSDR_BLOCK_IIC        0x600
+/* Register blocks (matches librtlsdr enum blocks) */
+#define RTLSDR_BLOCK_DEMOD      0
+#define RTLSDR_BLOCK_USB        1
+#define RTLSDR_BLOCK_SYS        2
+#define RTLSDR_BLOCK_TUNER      3
+#define RTLSDR_BLOCK_ROM        4
+#define RTLSDR_BLOCK_IR         5
+#define RTLSDR_BLOCK_IIC        6
 
 /* Tuner types */
 typedef enum {
