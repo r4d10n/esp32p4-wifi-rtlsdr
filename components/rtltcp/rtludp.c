@@ -35,6 +35,7 @@ struct rtludp_server {
     socklen_t           client_addr_len;
     uint32_t            seq;
     int64_t             stream_start_us;
+    int64_t             last_subscribe_us;
     TaskHandle_t        recv_task;
     /* Pre-allocated send buffer: header + payload */
     uint8_t            *send_buf;
@@ -43,6 +44,7 @@ struct rtludp_server {
     uint32_t            accum_len;
     /* Stats */
     uint32_t            packets_sent;
+    uint32_t            packets_dropped;
     uint32_t            bytes_sent;
 };
 
@@ -130,7 +132,9 @@ static void udp_recv_task(void *arg)
                 srv->client_active = true;
                 srv->seq = 0;
                 srv->stream_start_us = esp_timer_get_time();
+                srv->last_subscribe_us = srv->stream_start_us;
                 srv->packets_sent = 0;
+                srv->packets_dropped = 0;
                 srv->bytes_sent = 0;
                 ESP_LOGI(TAG, "UDP client subscribed: %s:%d",
                          inet_ntoa(from_addr.sin_addr), ntohs(from_addr.sin_port));
@@ -184,6 +188,10 @@ esp_err_t rtludp_server_start(rtludp_server_t **out_server, const rtludp_config_
     /* Set recv timeout for non-blocking check */
     struct timeval tv = { .tv_sec = 0, .tv_usec = 100000 }; /* 100ms */
     setsockopt(srv->sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    /* Increase send buffer for high-rate streaming */
+    int sndbuf = 131072;
+    setsockopt(srv->sock_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
 
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
@@ -251,15 +259,22 @@ uint32_t rtludp_push_samples(rtludp_server_t *srv, const uint8_t *data, uint32_t
             memcpy(srv->send_buf + RTLUDP_HEADER_SIZE, srv->accum_buf, srv->payload_size);
 
             int sent = sendto(srv->sock_fd, srv->send_buf,
-                              RTLUDP_HEADER_SIZE + srv->payload_size, 0,
+                              RTLUDP_HEADER_SIZE + srv->payload_size,
+                              MSG_DONTWAIT,  /* Non-blocking send */
                               (struct sockaddr *)&srv->client_addr, srv->client_addr_len);
 
             if (sent < 0) {
-                if (errno == ENOMEM || errno == EAGAIN) {
-                    /* Network congestion — drop this packet */
-                } else {
-                    ESP_LOGW(TAG, "sendto error: %d", errno);
-                    srv->client_active = false;
+                /* Graceful degradation: NEVER disconnect on send errors.
+                 * Just drop the packet and continue. This ensures UDP
+                 * delivers what WiFi can handle at any sample rate. */
+                srv->packets_dropped++;
+                /* Log only occasionally to avoid flooding */
+                if (srv->packets_dropped <= 3 ||
+                    (srv->packets_dropped % 1000) == 0) {
+                    ESP_LOGW(TAG, "UDP drop #%lu (errno=%d, sent=%lu)",
+                             (unsigned long)srv->packets_dropped,
+                             errno,
+                             (unsigned long)srv->packets_sent);
                 }
             } else {
                 srv->packets_sent++;
