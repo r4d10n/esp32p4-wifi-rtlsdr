@@ -15,7 +15,25 @@
 #include <math.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "dsp.h"
+
+/* ──────────────────────── Performance Counters ──────────────────────── */
+/* Enable DSP_PERF_BENCH for cycle-accurate benchmarking, disable for production */
+#define DSP_PERF_BENCH 1
+
+#if DSP_PERF_BENCH
+static uint32_t perf_fft_count = 0;
+static uint64_t perf_fft_total_us = 0;
+static uint64_t perf_power_total_us = 0;
+static uint64_t perf_db_total_us = 0;
+#define PERF_LOG_INTERVAL 200  /* Log every N FFT output frames */
+#define PERF_START(var) int64_t var = esp_timer_get_time()
+#define PERF_END(var, accum) accum += (esp_timer_get_time() - var)
+#else
+#define PERF_START(var) (void)0
+#define PERF_END(var, accum) (void)0
+#endif
 
 /* esp-dsp functions
  * Note: On ESP32-P4, dsps_mul_f32/add_f32/mulc_f32/addc_f32 are ANSI C fallbacks
@@ -178,11 +196,17 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
             /* Copy to work buffer (FFT is in-place) */
             memcpy(fft_work, fft_input, fft_n * 2 * sizeof(float));
 
-            /* Run PIE-accelerated FFT */
+            PERF_START(t_fft);
+
+            /* Run hardware-loop accelerated FFT */
             dsps_fft2r_fc32(fft_work, fft_n);
 
             /* Bit-reverse reorder */
             dsps_bit_rev2r_fc32(fft_work, fft_n);
+
+            PERF_END(t_fft, perf_fft_total_us);
+
+            PERF_START(t_pwr);
 
             /* Fused power spectrum: single pass replaces 4 ANSI C dsps_* calls
              * Computes: fft_power[k] += re[k]² + im[k]²
@@ -197,6 +221,8 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
                 }
             }
 
+            PERF_END(t_pwr, perf_power_total_us);
+
             fft_avg_count++;
             fft_input_pos = 0;
 
@@ -209,6 +235,7 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
 
                 /* Convert power → dB → uint8, output into temp buffer first */
                 int half = fft_n / 2;
+                PERF_START(t_db);
 
                 /* Process first half → goes to second half of output (FFT shift) */
                 for (int k = 0; k < half; k++) {
@@ -227,6 +254,23 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
                     fft_out[k - half] = (uint8_t)((db - s_db_min) * scale + 0.5f);
                 }
                 *fft_out_len = fft_n;
+
+                PERF_END(t_db, perf_db_total_us);
+
+#if DSP_PERF_BENCH
+                perf_fft_count++;
+                if (perf_fft_count % PERF_LOG_INTERVAL == 0) {
+                    uint32_t n = perf_fft_count;
+                    ESP_LOGI(TAG, "DSP BENCH (%lu frames, %d-pt): "
+                             "FFT=%lluus/frame Power=%lluus/frame dB+shift=%lluus/frame "
+                             "Total=%lluus/frame",
+                             (unsigned long)n, fft_n,
+                             (unsigned long long)(perf_fft_total_us * FFT_AVG_COUNT / n),
+                             (unsigned long long)(perf_power_total_us * FFT_AVG_COUNT / n),
+                             (unsigned long long)(perf_db_total_us / n),
+                             (unsigned long long)((perf_fft_total_us + perf_power_total_us) * FFT_AVG_COUNT / n + perf_db_total_us / n));
+                }
+#endif
 
                 /* Reset accumulator */
                 memset(fft_power, 0, fft_n * sizeof(float));
