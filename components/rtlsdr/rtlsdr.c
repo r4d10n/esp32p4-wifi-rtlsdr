@@ -595,7 +595,7 @@ static void bulk_xfer_cb(usb_transfer_t *xfer)
         if (bulk_cb_count == 1) {
             bulk_start_tick = xTaskGetTickCount();
         }
-        if (bulk_cb_count <= 3 || (bulk_cb_count % 500) == 0) {
+        if (bulk_cb_count <= 3 || (bulk_cb_count % 5000) == 0) {
             uint32_t elapsed_ms = (xTaskGetTickCount() - bulk_start_tick) * portTICK_PERIOD_MS;
             if (elapsed_ms > 0) {
                 uint32_t rate_kbps = (uint32_t)((uint64_t)bulk_bytes_total * 1000 / 1024 / elapsed_ms);
