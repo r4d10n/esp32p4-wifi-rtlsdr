@@ -1,13 +1,31 @@
 /*
- * R820T/R820T2/R828D Tuner Driver for ESP32-P4
+ * Rafael Micro R820T/R828D driver
  *
- * Ported from librtlsdr tuner_r82xx.c (steve-m + rtl-sdr-blog fork)
- * Controls the tuner via I2C through RTL2832U's I2C repeater.
+ * Copyright (C) 2013 Mauro Carvalho Chehab <mchehab@redhat.com>
+ * Copyright (C) 2013 Steve Markgraf <steve@steve-m.de>
  *
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * This driver is a heavily modified version of the driver found in the
+ * Linux kernel:
+ * http://git.linuxtv.org/linux-2.6.git/history/HEAD:/drivers/media/tuners/r820t.c
+ *
+ * Ported to ESP-IDF for ESP32-P4 RTL-SDR USB host driver.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <string.h>
+#include <stdint.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -17,9 +35,19 @@
 
 static const char *TAG = "r82xx";
 
+/* ──────────────────────── Constants ──────────────────────── */
+
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
+#define MHZ(x)          ((uint32_t)((x) * 1000000UL))
+#define KHZ(x)          ((x) * 1000)
+
+#define HF  1
+#define VHF 2
+#define UHF 3
+
 /* I2C addresses */
-#define R820T_I2C_ADDR  0x34
-#define R828D_I2C_ADDR  0x74
+#define R820T_I2C_ADDR      0x34
+#define R828D_I2C_ADDR      0x74
 
 /* Detection register */
 #define R82XX_CHECK_ADDR    0x00
@@ -36,26 +64,265 @@ static const char *TAG = "r82xx";
 #define REG_SHADOW_START    5
 #define NUM_REGS            30
 
-#define MHZ(x) ((uint32_t)(x) * 1000000UL)
+#define VER_NUM             49
 
-/* Shadow registers */
-static uint8_t r82xx_regs[NUM_REGS];
+/* Max I2C message length for RTL2832U I2C repeater */
+#define MAX_I2C_MSG_LEN     8
 
-/* R82xx initial register values (regs 0x05 to 0x1f) */
-static const uint8_t r82xx_init_array[NUM_REGS - REG_SHADOW_START] = {
-    0x83, 0x32, 0x75,           /* 05 to 07 */
-    0xc0, 0x40, 0xd6, 0x6c,    /* 08 to 0b */
-    0xf5, 0x63, 0x75, 0x68,    /* 0c to 0f */
-    0x6c, 0x83, 0x80, 0x00,    /* 10 to 13 */
-    0x0f, 0x00, 0xc0, 0x30,    /* 14 to 17 */
-    0x48, 0xcc, 0x60, 0x00,    /* 18 to 1b */
-    0x54, 0xae, 0x4a, 0xc0,    /* 1c to 1f */
+/* Delivery systems */
+enum r82xx_delivery_system {
+    SYS_UNDEFINED = 0,
+    SYS_DVBT,
+    SYS_DVBT2,
+    SYS_ISDBT,
 };
 
-/* Gain step tables (cumulative, in tenths of dB) */
+/* Tuner types */
+enum r82xx_tuner_type {
+    TUNER_RADIO = 1,
+    TUNER_ANALOG_TV,
+    TUNER_DIGITAL_TV,
+};
+
+/* Xtal cap values */
+enum r82xx_xtal_cap_value {
+    XTAL_LOW_CAP_30P = 0,
+    XTAL_LOW_CAP_20P,
+    XTAL_LOW_CAP_10P,
+    XTAL_LOW_CAP_0P,
+    XTAL_HIGH_CAP_0P,
+};
+
+/* Chip types */
+enum r82xx_chip {
+    CHIP_R820T = 0,
+    CHIP_R620D,
+    CHIP_R828D,
+    CHIP_R828,
+    CHIP_R828S,
+    CHIP_R820C,
+};
+
+/* Frequency range entry */
+struct r82xx_freq_range {
+    uint32_t freq;
+    uint8_t  open_d;
+    uint8_t  rf_mux_ploy;
+    uint8_t  tf_c;
+    uint8_t  xtal_cap20p;
+    uint8_t  xtal_cap10p;
+    uint8_t  xtal_cap0p;
+};
+
+/* ──────────────────────── Extern declarations ──────────────────────── */
+
+extern esp_err_t rtlsdr_set_bias_tee_gpio(rtlsdr_dev_t *dev, int gpio, int on);
+extern int rtlsdr_is_blog_v4(rtlsdr_dev_t *dev);
+
+/* ──────────────────────── Static Constants ──────────────────────── */
+
+/* Initial register values starting from REG_SHADOW_START (reg 0x05) */
+static const uint8_t r82xx_init_array[NUM_REGS] = {
+    0x83, 0x30, 0x75,                   /* 05 to 07 */
+    0xc0, 0x40, 0xd6, 0x6c,            /* 08 to 0b */
+    0xf5, 0x63, 0x75, 0x68,            /* 0c to 0f */
+    0x6c, 0x83, 0x80, 0x00,            /* 10 to 13 */
+    0x0f, 0x00, 0xc0, 0x30,            /* 14 to 17 */
+    0x48, 0xcc, 0x60, 0x00,            /* 18 to 1b */
+    0x54, 0xae, 0x4a, 0xc0             /* 1c to 1f */
+};
+
+/* Tuner frequency ranges — all 21 entries from reference */
+static const struct r82xx_freq_range freq_ranges[] = {
+    {
+        /* .freq = */       0,      /* Start freq, in MHz */
+        /* .open_d = */     0x08,   /* low */
+        /* .rf_mux_ploy = */ 0x02,  /* R26[7:6]=0 (LPF)  R26[1:0]=2 (low) */
+        /* .tf_c = */       0xdf,   /* R27[7:0]  band2,band0 */
+        /* .xtal_cap20p = */ 0x02,  /* R16[1:0]  20pF (10)   */
+        /* .xtal_cap10p = */ 0x01,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       50,
+        /* .open_d = */     0x08,
+        /* .rf_mux_ploy = */ 0x02,
+        /* .tf_c = */       0xbe,   /* R27[7:0]  band4,band1  */
+        /* .xtal_cap20p = */ 0x02,
+        /* .xtal_cap10p = */ 0x01,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       55,
+        /* .open_d = */     0x08,
+        /* .rf_mux_ploy = */ 0x02,
+        /* .tf_c = */       0x8b,   /* R27[7:0]  band7,band4 */
+        /* .xtal_cap20p = */ 0x02,
+        /* .xtal_cap10p = */ 0x01,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       60,
+        /* .open_d = */     0x08,
+        /* .rf_mux_ploy = */ 0x02,
+        /* .tf_c = */       0x7b,   /* R27[7:0]  band8,band4 */
+        /* .xtal_cap20p = */ 0x02,
+        /* .xtal_cap10p = */ 0x01,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       65,
+        /* .open_d = */     0x08,
+        /* .rf_mux_ploy = */ 0x02,
+        /* .tf_c = */       0x69,   /* R27[7:0]  band9,band6 */
+        /* .xtal_cap20p = */ 0x02,
+        /* .xtal_cap10p = */ 0x01,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       70,
+        /* .open_d = */     0x08,
+        /* .rf_mux_ploy = */ 0x02,
+        /* .tf_c = */       0x58,   /* R27[7:0]  band10,band7 */
+        /* .xtal_cap20p = */ 0x02,
+        /* .xtal_cap10p = */ 0x01,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       75,
+        /* .open_d = */     0x00,   /* high */
+        /* .rf_mux_ploy = */ 0x02,
+        /* .tf_c = */       0x44,   /* R27[7:0]  band11,band11 */
+        /* .xtal_cap20p = */ 0x02,
+        /* .xtal_cap10p = */ 0x01,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       80,
+        /* .open_d = */     0x00,
+        /* .rf_mux_ploy = */ 0x02,
+        /* .tf_c = */       0x44,
+        /* .xtal_cap20p = */ 0x02,
+        /* .xtal_cap10p = */ 0x01,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       90,
+        /* .open_d = */     0x00,
+        /* .rf_mux_ploy = */ 0x02,
+        /* .tf_c = */       0x34,   /* R27[7:0]  band12,band11 */
+        /* .xtal_cap20p = */ 0x01,  /* R16[1:0]  10pF (01)   */
+        /* .xtal_cap10p = */ 0x01,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       100,
+        /* .open_d = */     0x00,
+        /* .rf_mux_ploy = */ 0x02,
+        /* .tf_c = */       0x34,
+        /* .xtal_cap20p = */ 0x01,
+        /* .xtal_cap10p = */ 0x01,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       110,
+        /* .open_d = */     0x00,
+        /* .rf_mux_ploy = */ 0x02,
+        /* .tf_c = */       0x24,   /* R27[7:0]  band13,band11 */
+        /* .xtal_cap20p = */ 0x01,
+        /* .xtal_cap10p = */ 0x01,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       120,
+        /* .open_d = */     0x00,
+        /* .rf_mux_ploy = */ 0x02,
+        /* .tf_c = */       0x24,
+        /* .xtal_cap20p = */ 0x01,
+        /* .xtal_cap10p = */ 0x01,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       140,
+        /* .open_d = */     0x00,
+        /* .rf_mux_ploy = */ 0x02,
+        /* .tf_c = */       0x14,   /* R27[7:0]  band14,band11 */
+        /* .xtal_cap20p = */ 0x01,
+        /* .xtal_cap10p = */ 0x01,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       180,
+        /* .open_d = */     0x00,
+        /* .rf_mux_ploy = */ 0x02,
+        /* .tf_c = */       0x13,   /* R27[7:0]  band14,band12 */
+        /* .xtal_cap20p = */ 0x00,  /* R16[1:0]  0pF (00)   */
+        /* .xtal_cap10p = */ 0x00,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       220,
+        /* .open_d = */     0x00,
+        /* .rf_mux_ploy = */ 0x02,
+        /* .tf_c = */       0x13,
+        /* .xtal_cap20p = */ 0x00,
+        /* .xtal_cap10p = */ 0x00,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       250,
+        /* .open_d = */     0x00,
+        /* .rf_mux_ploy = */ 0x02,
+        /* .tf_c = */       0x11,   /* R27[7:0]  highest,highest */
+        /* .xtal_cap20p = */ 0x00,
+        /* .xtal_cap10p = */ 0x00,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       280,
+        /* .open_d = */     0x00,
+        /* .rf_mux_ploy = */ 0x02,
+        /* .tf_c = */       0x00,
+        /* .xtal_cap20p = */ 0x00,
+        /* .xtal_cap10p = */ 0x00,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       310,
+        /* .open_d = */     0x00,
+        /* .rf_mux_ploy = */ 0x41,  /* R26[7:6]=1 (bypass)  R26[1:0]=1 (middle) */
+        /* .tf_c = */       0x00,
+        /* .xtal_cap20p = */ 0x00,
+        /* .xtal_cap10p = */ 0x00,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       450,
+        /* .open_d = */     0x00,
+        /* .rf_mux_ploy = */ 0x41,
+        /* .tf_c = */       0x00,
+        /* .xtal_cap20p = */ 0x00,
+        /* .xtal_cap10p = */ 0x00,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       588,
+        /* .open_d = */     0x00,
+        /* .rf_mux_ploy = */ 0x40,  /* R26[7:6]=1 (bypass)  R26[1:0]=0 (highest) */
+        /* .tf_c = */       0x00,
+        /* .xtal_cap20p = */ 0x00,
+        /* .xtal_cap10p = */ 0x00,
+        /* .xtal_cap0p = */ 0x00,
+    }, {
+        /* .freq = */       650,
+        /* .open_d = */     0x00,
+        /* .rf_mux_ploy = */ 0x40,
+        /* .tf_c = */       0x00,
+        /* .xtal_cap20p = */ 0x00,
+        /* .xtal_cap10p = */ 0x00,
+        /* .xtal_cap0p = */ 0x00,
+    }
+};
+
+static int r82xx_xtal_capacitor[][2] __attribute__((unused)) = {
+    { 0x0b, XTAL_LOW_CAP_30P },
+    { 0x02, XTAL_LOW_CAP_20P },
+    { 0x01, XTAL_LOW_CAP_10P },
+    { 0x00, XTAL_LOW_CAP_0P  },
+    { 0x10, XTAL_HIGH_CAP_0P },
+};
+
+/* Gain step tables */
+#define VGA_BASE_GAIN   -47
+static const int r82xx_vga_gain_steps[] __attribute__((unused)) = {
+    0, 26, 26, 30, 42, 35, 24, 13, 14, 32, 36, 34, 35, 37, 35, 36
+};
+
 static const int r82xx_lna_gain_steps[] = {
     0, 9, 13, 40, 38, 13, 31, 22, 26, 31, 26, 14, 19, 5, 35, 13
 };
+
 static const int r82xx_mixer_gain_steps[] = {
     0, 5, 10, 10, 19, 9, 10, 25, 17, 10, 8, 16, 13, 6, 3, -8
 };
@@ -68,238 +335,723 @@ static const int r82xx_gains[] = {
     445, 480, 496
 };
 
-/* Tuner state */
-static enum {
-    CHIP_R820T = 0,
-    CHIP_R828D,
-} r82xx_chip_type;
-static uint8_t r82xx_i2c_addr = R820T_I2C_ADDR;
+/* Bandwidth contribution by low-pass filter */
+static const int r82xx_if_low_pass_bw_table[] = {
+    1700000, 1600000, 1550000, 1450000, 1200000,
+    900000, 700000, 550000, 450000, 350000
+};
+
+#define FILT_HP_BW1 350000
+#define FILT_HP_BW2 380000
+
+/* ──────────────────────── Static State ──────────────────────── */
+
+static uint8_t  r82xx_regs[NUM_REGS];
+static uint8_t  r82xx_buf[NUM_REGS + 1];
+static enum r82xx_chip r82xx_chip_type = CHIP_R820T;
+static uint8_t  r82xx_i2c_addr = R820T_I2C_ADDR;
 static uint32_t r82xx_xtal_freq = RTL_XTAL_FREQ;
 static uint32_t r82xx_int_freq = R82XX_IF_FREQ;
-static uint8_t r82xx_input = 0;
+static uint8_t  r82xx_input = 0;
+static int      r82xx_has_lock = 0;
+static uint8_t  r82xx_fil_cal_code = 0;
+static int      r82xx_init_done = 0;
+static int      r82xx_is_blog_v4 = 0;
+static enum r82xx_xtal_cap_value r82xx_xtal_cap_sel = XTAL_HIGH_CAP_0P;
 
-/* ──────────────────────── I2C via RTL2832U IIC Block ──────────────────────── */
+/* ──────────────────────── I2C Shadow Register Logic ──────────────────────── */
 
-/* Max I2C message length for RTL2832U I2C repeater.
- * The USB control transfer data includes 1 byte for register address,
- * so max data per write = MAX_I2C_MSG_LEN - 1. */
-#define MAX_I2C_MSG_LEN  8
-
-static esp_err_t r82xx_write(rtlsdr_dev_t *dev, uint8_t reg, const uint8_t *data, uint8_t len)
+static void shadow_store(uint8_t reg, const uint8_t *val, int len)
 {
-    esp_err_t ret;
-    uint8_t pos = 0;
+    int r = reg - REG_SHADOW_START;
 
-    while (pos < len) {
-        uint8_t chunk = len - pos;
-        if (chunk > MAX_I2C_MSG_LEN - 1) {
-            chunk = MAX_I2C_MSG_LEN - 1;
-        }
-
-        uint8_t buf[MAX_I2C_MSG_LEN];
-        buf[0] = reg + pos;
-        memcpy(&buf[1], data + pos, chunk);
-
-        ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_IIC, r82xx_i2c_addr, buf, chunk + 1);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "I2C write failed at reg 0x%02x+%d", reg, pos);
-            return ret;
-        }
-
-        /* Update shadow regs */
-        for (uint8_t i = 0; i < chunk; i++) {
-            uint8_t r = reg + pos + i;
-            if (r >= REG_SHADOW_START && (r - REG_SHADOW_START) < NUM_REGS) {
-                r82xx_regs[r - REG_SHADOW_START] = data[pos + i];
-            }
-        }
-
-        pos += chunk;
+    if (r < 0) {
+        len += r;
+        r = 0;
     }
+    if (len <= 0)
+        return;
+    if (len > NUM_REGS - r)
+        len = NUM_REGS - r;
 
-    return ESP_OK;
+    memcpy(&r82xx_regs[r], val, len);
 }
 
-static esp_err_t r82xx_write_reg(rtlsdr_dev_t *dev, uint8_t reg, uint8_t val)
+/* ──────────────────────── I2C Read/Write ──────────────────────── */
+
+static int r82xx_write(rtlsdr_dev_t *dev, uint8_t reg, const uint8_t *val,
+                       unsigned int len)
+{
+    int rc;
+    unsigned int size, pos = 0;
+
+    /* Store the shadow registers */
+    shadow_store(reg, val, len);
+
+    do {
+        if (len > MAX_I2C_MSG_LEN - 1)
+            size = MAX_I2C_MSG_LEN - 1;
+        else
+            size = len;
+
+        /* Fill I2C buffer */
+        r82xx_buf[0] = reg;
+        memcpy(&r82xx_buf[1], &val[pos], size);
+
+        rc = rtlsdr_write_reg(dev, RTLSDR_BLOCK_IIC, r82xx_i2c_addr,
+                              r82xx_buf, size + 1);
+
+        if (rc != ESP_OK) {
+            ESP_LOGE(TAG, "i2c wr failed=%d reg=%02x len=%d", rc, reg, size);
+            return -1;
+        }
+
+        reg += size;
+        len -= size;
+        pos += size;
+    } while (len > 0);
+
+    return 0;
+}
+
+static int r82xx_write_reg(rtlsdr_dev_t *dev, uint8_t reg, uint8_t val)
 {
     return r82xx_write(dev, reg, &val, 1);
 }
 
-static esp_err_t r82xx_write_reg_mask(rtlsdr_dev_t *dev, uint8_t reg, uint8_t val, uint8_t mask)
+static int r82xx_read_cache_reg(int reg)
 {
-    uint8_t old = r82xx_regs[reg - REG_SHADOW_START];
-    uint8_t new_val = (old & ~mask) | (val & mask);
-    return r82xx_write_reg(dev, reg, new_val);
+    reg -= REG_SHADOW_START;
+
+    if (reg >= 0 && reg < NUM_REGS)
+        return r82xx_regs[reg];
+    else
+        return -1;
 }
 
-static esp_err_t r82xx_read(rtlsdr_dev_t *dev, uint8_t reg, uint8_t *data, uint8_t len)
+static int r82xx_write_reg_mask(rtlsdr_dev_t *dev, uint8_t reg, uint8_t val,
+                                uint8_t bit_mask)
 {
-    /* R82xx uses read-from-zero, bits are MSB-reversed per byte */
-    (void)reg; /* R82xx always reads from register 0 */
-    return rtlsdr_read_reg(dev, RTLSDR_BLOCK_IIC, r82xx_i2c_addr, data, len);
+    int rc = r82xx_read_cache_reg(reg);
+
+    if (rc < 0)
+        return rc;
+
+    val = (rc & ~bit_mask) | (val & bit_mask);
+
+    return r82xx_write(dev, reg, &val, 1);
 }
 
-/* ──────────────────────── PLL ──────────────────────── */
-
-static esp_err_t r82xx_set_pll(rtlsdr_dev_t *dev, uint32_t freq)
+static uint8_t r82xx_bitrev(uint8_t byte)
 {
-    esp_err_t ret;
-    uint32_t vco_freq;
+    const uint8_t lut[16] = { 0x0, 0x8, 0x4, 0xc, 0x2, 0xa, 0x6, 0xe,
+                              0x1, 0x9, 0x5, 0xd, 0x3, 0xb, 0x7, 0xf };
+
+    return (lut[byte & 0xf] << 4) | lut[byte >> 4];
+}
+
+static int r82xx_read(rtlsdr_dev_t *dev, uint8_t reg, uint8_t *val, int len)
+{
+    int rc, i;
+    uint8_t *p = &r82xx_buf[1];
+
+    r82xx_buf[0] = reg;
+
+    rc = rtlsdr_write_reg(dev, RTLSDR_BLOCK_IIC, r82xx_i2c_addr,
+                          r82xx_buf, 1);
+
+    if (rc != ESP_OK) {
+        ESP_LOGE(TAG, "i2c wr failed=%d reg=%02x len=%d", rc, reg, 1);
+        return -1;
+    }
+
+    rc = rtlsdr_read_reg(dev, RTLSDR_BLOCK_IIC, r82xx_i2c_addr, p, len);
+
+    if (rc != ESP_OK) {
+        ESP_LOGE(TAG, "i2c rd failed=%d reg=%02x len=%d", rc, reg, len);
+        return -1;
+    }
+
+    /* Copy data to the output buffer — R82xx reads need bit-reversal */
+    for (i = 0; i < len; i++)
+        val[i] = r82xx_bitrev(p[i]);
+
+    return 0;
+}
+
+/* ──────────────────────── Tuning Logic ──────────────────────── */
+
+static int r82xx_set_mux(rtlsdr_dev_t *dev, uint32_t freq)
+{
+    const struct r82xx_freq_range *range;
+    int rc;
+    unsigned int i;
+    uint8_t val;
+
+    /* Get the proper frequency range */
+    freq = freq / 1000000;
+    for (i = 0; i < ARRAY_SIZE(freq_ranges) - 1; i++) {
+        if (freq < freq_ranges[i + 1].freq)
+            break;
+    }
+    range = &freq_ranges[i];
+
+    /* Open Drain */
+    rc = r82xx_write_reg_mask(dev, 0x17, range->open_d, 0x08);
+    if (rc < 0)
+        return rc;
+
+    /* RF_MUX,Polymux */
+    rc = r82xx_write_reg_mask(dev, 0x1a, range->rf_mux_ploy, 0xc3);
+    if (rc < 0)
+        return rc;
+
+    /* TF BAND */
+    rc = r82xx_write_reg(dev, 0x1b, range->tf_c);
+    if (rc < 0)
+        return rc;
+
+    /* XTAL CAP & Drive */
+    switch (r82xx_xtal_cap_sel) {
+    case XTAL_LOW_CAP_30P:
+    case XTAL_LOW_CAP_20P:
+        val = range->xtal_cap20p | 0x08;
+        break;
+    case XTAL_LOW_CAP_10P:
+        val = range->xtal_cap10p | 0x08;
+        break;
+    case XTAL_HIGH_CAP_0P:
+        val = range->xtal_cap0p | 0x00;
+        break;
+    default:
+    case XTAL_LOW_CAP_0P:
+        val = range->xtal_cap0p | 0x08;
+        break;
+    }
+    rc = r82xx_write_reg_mask(dev, 0x10, val, 0x0b);
+    if (rc < 0)
+        return rc;
+
+    rc = r82xx_write_reg_mask(dev, 0x08, 0x00, 0x3f);
+    if (rc < 0)
+        return rc;
+
+    rc = r82xx_write_reg_mask(dev, 0x09, 0x00, 0x3f);
+
+    return rc;
+}
+
+static int r82xx_set_pll(rtlsdr_dev_t *dev, uint32_t freq)
+{
+    int rc, i;
+    uint64_t vco_freq;
+    uint32_t vco_fra;       /* VCO contribution by SDM (kHz) */
+    uint32_t vco_min = 1770000;
+    uint32_t vco_max = vco_min * 2;
+    uint32_t freq_khz, pll_ref, pll_ref_khz;
+    uint16_t n_sdm = 2;
+    uint16_t sdm = 0;
     uint8_t mix_div = 2;
+    uint8_t div_buf = 0;
     uint8_t div_num = 0;
-    uint32_t vco_min = 1770000000UL;
-    uint32_t pll_ref;
-    int vco_power_ref = (r82xx_chip_type == CHIP_R828D) ? 1 : 2;
+    uint8_t vco_power_ref = 2;
+    uint8_t refdiv2 = 0;
+    uint8_t ni, si, nint, vco_fine_tune, val;
+    uint8_t data[5];
 
-    /* Calculate VCO frequency and divider */
-    while (mix_div <= 64) {
-        vco_freq = (uint64_t)freq * mix_div;
-        if (vco_freq >= vco_min) break;
-        mix_div *= 2;
-        div_num++;
-    }
-
-    /* Set mixer divider — reg 0x10[7:5] */
-    ret = r82xx_write_reg_mask(dev, 0x10, (div_num << 5), 0xe0);
-    ESP_RETURN_ON_ERROR(ret, TAG, "PLL div_num write failed");
-
-    /* Calculate reference divider */
+    /* Frequency in kHz */
+    freq_khz = (freq + 500) / 1000;
     pll_ref = r82xx_xtal_freq;
+    pll_ref_khz = (r82xx_xtal_freq + 500) / 1000;
 
-    /* VCO current: reg 0x12 = 0x80 (auto) */
-    ret = r82xx_write_reg(dev, 0x12, 0x80);
-    ESP_RETURN_ON_ERROR(ret, TAG, "VCO current write failed");
+    rc = r82xx_write_reg_mask(dev, 0x10, refdiv2, 0x10);
+    if (rc < 0)
+        return rc;
 
-    /* PLL autotune: reg 0x1a[3] = 0 (128kHz step) */
-    ret = r82xx_write_reg_mask(dev, 0x1a, 0x00, 0x0c);
-    ESP_RETURN_ON_ERROR(ret, TAG, "PLL autotune write failed");
+    /* set pll autotune = 128kHz */
+    rc = r82xx_write_reg_mask(dev, 0x1a, 0x00, 0x0c);
+    if (rc < 0)
+        return rc;
 
-    /* Set PLL integer and fractional parts */
-    uint32_t n_sdm = (uint32_t)(vco_freq / (2 * pll_ref));
-    uint32_t nint = n_sdm - 13;
+    /* RTL-SDR Blog Modification: Set VCO current to MAX */
+    rc = r82xx_write_reg_mask(dev, 0x12, 0x06, 0xff);
+    if (rc < 0)
+        return rc;
 
-    /* Reg 0x14[6:0] = nint */
-    ret = r82xx_write_reg_mask(dev, 0x14, (uint8_t)(nint & 0x7f), 0x7f);
-    ESP_RETURN_ON_ERROR(ret, TAG, "PLL nint write failed");
-
-    /* Calculate SDM (sigma-delta modulator fractional) */
-    uint32_t vco_fra = vco_freq - 2 * pll_ref * n_sdm;
-    uint32_t sdm = 0;
-    if (vco_fra > 0) {
-        sdm = (uint32_t)(((uint64_t)vco_fra * 65536ULL) / (2 * pll_ref));
+    /* Calculate divider */
+    while (mix_div <= 64) {
+        if (((freq_khz * mix_div) >= vco_min) &&
+           ((freq_khz * mix_div) < vco_max)) {
+            div_buf = mix_div;
+            while (div_buf > 2) {
+                div_buf = div_buf >> 1;
+                div_num++;
+            }
+            break;
+        }
+        mix_div = mix_div << 1;
     }
 
-    /* Write SDM: reg 0x16 (hi), reg 0x15 (lo) */
-    ret = r82xx_write_reg(dev, 0x16, (sdm >> 8) & 0xff);
-    ESP_RETURN_ON_ERROR(ret, TAG, "SDM hi write failed");
-    ret = r82xx_write_reg(dev, 0x15, sdm & 0xff);
-    ESP_RETURN_ON_ERROR(ret, TAG, "SDM lo write failed");
+    rc = r82xx_read(dev, 0x00, data, sizeof(data));
+    if (rc < 0)
+        return rc;
 
-    /* Wait for PLL lock */
-    vTaskDelay(pdMS_TO_TICKS(10));
+    if (r82xx_chip_type == CHIP_R828D)
+        vco_power_ref = 1;
 
-    /* Check PLL lock: read reg 0x02[6] */
-    uint8_t data[3];
-    ret = r82xx_read(dev, 0x00, data, 3);
-    if (ret == ESP_OK) {
-        if (!(data[2] & 0x40)) {
-            ESP_LOGW(TAG, "PLL not locked (reg2=0x%02x), retrying with higher VCO current", data[2]);
-            /* Increase VCO current */
-            r82xx_write_reg(dev, 0x12, 0x60);
-            vTaskDelay(pdMS_TO_TICKS(10));
-            ret = r82xx_read(dev, 0x00, data, 3);
-            if (ret == ESP_OK && !(data[2] & 0x40)) {
-                ESP_LOGE(TAG, "PLL still not locked");
-            }
+    vco_fine_tune = (data[4] & 0x30) >> 4;
+
+    if (vco_fine_tune > vco_power_ref)
+        div_num = div_num - 1;
+    else if (vco_fine_tune < vco_power_ref)
+        div_num = div_num + 1;
+
+    rc = r82xx_write_reg_mask(dev, 0x10, div_num << 5, 0xe0);
+    if (rc < 0)
+        return rc;
+
+    vco_freq = (uint64_t)freq * (uint64_t)mix_div;
+    nint = vco_freq / (2 * pll_ref);
+    vco_fra = (vco_freq - 2 * pll_ref * nint) / 1000;
+
+    if (nint > ((128 / vco_power_ref) - 1)) {
+        ESP_LOGE(TAG, "No valid PLL values for %lu Hz!", (unsigned long)freq);
+        return -1;
+    }
+
+    ni = (nint - 13) / 4;
+    si = nint - 4 * ni - 13;
+
+    rc = r82xx_write_reg(dev, 0x14, ni + (si << 6));
+    if (rc < 0)
+        return rc;
+
+    /* pw_sdm */
+    if (!vco_fra)
+        val = 0x08;
+    else
+        val = 0x00;
+
+    rc = r82xx_write_reg_mask(dev, 0x12, val, 0x08);
+    if (rc < 0)
+        return rc;
+
+    /* sdm calculator */
+    while (vco_fra > 1) {
+        if (vco_fra > (2 * pll_ref_khz / n_sdm)) {
+            sdm = sdm + 32768 / (n_sdm / 2);
+            vco_fra = vco_fra - 2 * pll_ref_khz / n_sdm;
+            if (n_sdm >= 0x8000)
+                break;
+        }
+        n_sdm <<= 1;
+    }
+
+    rc = r82xx_write_reg(dev, 0x16, sdm >> 8);
+    if (rc < 0)
+        return rc;
+    rc = r82xx_write_reg(dev, 0x15, sdm & 0xff);
+    if (rc < 0)
+        return rc;
+
+    for (i = 0; i < 2; i++) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        /* Check if PLL has locked */
+        rc = r82xx_read(dev, 0x00, data, 3);
+        if (rc < 0)
+            return rc;
+        if (data[2] & 0x40)
+            break;
+
+        if (!i) {
+            /* Didn't lock. Increase VCO current */
+            /* RTL-SDR Blog Hack: Set max current */
+            rc = r82xx_write_reg_mask(dev, 0x12, 0x06, 0xff);
+            if (rc < 0)
+                return rc;
         }
     }
 
-    /* Set VCO power ref */
-    (void)vco_power_ref;
+    if (!(data[2] & 0x40)) {
+        ESP_LOGE(TAG, "PLL not locked!");
+        r82xx_has_lock = 0;
+        return 0;
+    }
 
-    ESP_LOGI(TAG, "PLL: freq=%lu vco=%lu mix_div=%d n=%lu sdm=%lu",
-             (unsigned long)freq, (unsigned long)vco_freq,
-             mix_div, (unsigned long)n_sdm, (unsigned long)sdm);
-    return ESP_OK;
+    r82xx_has_lock = 1;
+
+    /* set pll autotune = 8kHz */
+    rc = r82xx_write_reg_mask(dev, 0x1a, 0x08, 0x08);
+
+    return rc;
 }
 
-/* ──────────────────────── System Frequency Selection ──────────────────────── */
-
-static esp_err_t r82xx_sysfreq_sel(rtlsdr_dev_t *dev, uint32_t freq)
+static int r82xx_sysfreq_sel(rtlsdr_dev_t *dev, uint32_t freq,
+                             enum r82xx_tuner_type type,
+                             uint32_t delsys)
 {
-    esp_err_t ret;
+    int rc;
+    uint8_t mixer_top, lna_top, cp_cur, div_buf_cur, lna_vth_l, mixer_vth_l;
+    uint8_t air_cable1_in, cable2_in, pre_dect, lna_discharge, filter_cur;
 
-    /* LNA top current: reg 0x06[7:6] = 11 */
-    ret = r82xx_write_reg_mask(dev, 0x06, 0xc0, 0xc0);
-    ESP_RETURN_ON_ERROR(ret, TAG, "LNA top failed");
+    switch (delsys) {
+    case SYS_DVBT:
+        if ((freq == 506000000) || (freq == 666000000) ||
+           (freq == 818000000)) {
+            mixer_top = 0x14;   /* mixer top:14, top-1, low-discharge */
+            lna_top = 0xe5;     /* detect bw 3, lna top:4, predet top:2 */
+            cp_cur = 0x28;      /* 101, 0.2 */
+            div_buf_cur = 0x20; /* 10, 200u */
+        } else {
+            mixer_top = 0x24;   /* mixer top:13, top-1, low-discharge */
+            lna_top = 0xe5;     /* detect bw 3, lna top:4, predet top:2 */
+            cp_cur = 0x38;      /* 111, auto */
+            div_buf_cur = 0x30; /* 11, 150u */
+        }
+        lna_vth_l = 0x53;      /* lna vth 0.84, vtl 0.64 */
+        mixer_vth_l = 0x75;    /* mixer vth 1.04, vtl 0.84 */
+        air_cable1_in = 0x00;
+        cable2_in = 0x00;
+        pre_dect = 0x40;
+        lna_discharge = 14;
+        filter_cur = 0x40;     /* 10, low */
+        break;
+    case SYS_DVBT2:
+        mixer_top = 0x24;
+        lna_top = 0xe5;
+        lna_vth_l = 0x53;
+        mixer_vth_l = 0x75;
+        air_cable1_in = 0x00;
+        cable2_in = 0x00;
+        pre_dect = 0x40;
+        lna_discharge = 14;
+        cp_cur = 0x38;
+        div_buf_cur = 0x30;
+        filter_cur = 0x40;
+        break;
+    case SYS_ISDBT:
+        mixer_top = 0x24;
+        lna_top = 0xe5;
+        lna_vth_l = 0x75;
+        mixer_vth_l = 0x75;
+        air_cable1_in = 0x00;
+        cable2_in = 0x00;
+        pre_dect = 0x40;
+        lna_discharge = 14;
+        cp_cur = 0x38;
+        div_buf_cur = 0x30;
+        filter_cur = 0x40;
+        break;
+    default: /* DVB-T 8M / SDR */
+        mixer_top = 0x24;
+        lna_top = 0xe5;
+        lna_vth_l = 0x53;
+        mixer_vth_l = 0x75;
+        air_cable1_in = 0x00;
+        cable2_in = 0x00;
+        pre_dect = 0x40;
+        lna_discharge = 14;
+        cp_cur = 0x38;
+        div_buf_cur = 0x30;
+        filter_cur = 0x40;
+        break;
+    }
 
-    /* Mixer top current: reg 0x07[7:6] = 00 */
-    ret = r82xx_write_reg_mask(dev, 0x07, 0x00, 0xc0);
-    ESP_RETURN_ON_ERROR(ret, TAG, "Mixer top failed");
+    rc = r82xx_write_reg_mask(dev, 0x1d, lna_top, 0xc7);
+    if (rc < 0)
+        return rc;
+    rc = r82xx_write_reg_mask(dev, 0x1c, mixer_top, 0xf8);
+    if (rc < 0)
+        return rc;
+    rc = r82xx_write_reg(dev, 0x0d, lna_vth_l);
+    if (rc < 0)
+        return rc;
+    rc = r82xx_write_reg(dev, 0x0e, mixer_vth_l);
+    if (rc < 0)
+        return rc;
 
-    /* LNA discharge current: reg 0x1e[7:4] = 0100 */
-    ret = r82xx_write_reg_mask(dev, 0x1e, 0x40, 0xf0);
-    ESP_RETURN_ON_ERROR(ret, TAG, "LNA discharge failed");
+    r82xx_input = air_cable1_in;
 
-    /* AGC clk: reg 0x1a[5:4] = 00 (60Hz) */
-    ret = r82xx_write_reg_mask(dev, 0x1a, 0x00, 0x30);
-    ESP_RETURN_ON_ERROR(ret, TAG, "AGC clk failed");
+    /* Air-IN only for Astrometa */
+    rc = r82xx_write_reg_mask(dev, 0x05, air_cable1_in, 0x60);
+    if (rc < 0)
+        return rc;
+    rc = r82xx_write_reg_mask(dev, 0x06, cable2_in, 0x08);
+    if (rc < 0)
+        return rc;
 
-    return ESP_OK;
+    rc = r82xx_write_reg_mask(dev, 0x11, cp_cur, 0x38);
+    if (rc < 0)
+        return rc;
+
+    /* RTL-SDR Blog Hack. Improve L-band performance by setting PLL drop out to 2.0v */
+    div_buf_cur = 0xa0;
+
+    rc = r82xx_write_reg_mask(dev, 0x17, div_buf_cur, 0x30);
+    if (rc < 0)
+        return rc;
+    rc = r82xx_write_reg_mask(dev, 0x0a, filter_cur, 0x60);
+    if (rc < 0)
+        return rc;
+
+    /*
+     * Set LNA
+     */
+
+    if (type != TUNER_ANALOG_TV) {
+        /* LNA TOP: lowest */
+        rc = r82xx_write_reg_mask(dev, 0x1d, 0, 0x38);
+        if (rc < 0)
+            return rc;
+
+        /* 0: normal mode */
+        rc = r82xx_write_reg_mask(dev, 0x1c, 0, 0x04);
+        if (rc < 0)
+            return rc;
+
+        /* 0: PRE_DECT off */
+        rc = r82xx_write_reg_mask(dev, 0x06, 0, 0x40);
+        if (rc < 0)
+            return rc;
+
+        /* agc clk 250hz */
+        rc = r82xx_write_reg_mask(dev, 0x1a, 0x30, 0x30);
+        if (rc < 0)
+            return rc;
+
+        /* write LNA TOP = 3 */
+        rc = r82xx_write_reg_mask(dev, 0x1d, 0x18, 0x38);
+        if (rc < 0)
+            return rc;
+
+        /*
+         * write discharge mode
+         * FIXME: IMHO, the mask here is wrong, but it matches
+         * what's there at the original driver
+         */
+        rc = r82xx_write_reg_mask(dev, 0x1c, mixer_top, 0x04);
+        if (rc < 0)
+            return rc;
+
+        /* LNA discharge current */
+        rc = r82xx_write_reg_mask(dev, 0x1e, lna_discharge, 0x1f);
+        if (rc < 0)
+            return rc;
+
+        /* agc clk 60hz */
+        rc = r82xx_write_reg_mask(dev, 0x1a, 0x20, 0x30);
+        if (rc < 0)
+            return rc;
+    } else {
+        /* PRE_DECT off */
+        rc = r82xx_write_reg_mask(dev, 0x06, 0, 0x40);
+        if (rc < 0)
+            return rc;
+
+        /* write LNA TOP */
+        rc = r82xx_write_reg_mask(dev, 0x1d, lna_top, 0x38);
+        if (rc < 0)
+            return rc;
+
+        /*
+         * write discharge mode
+         * FIXME: IMHO, the mask here is wrong, but it matches
+         * what's there at the original driver
+         */
+        rc = r82xx_write_reg_mask(dev, 0x1c, mixer_top, 0x04);
+        if (rc < 0)
+            return rc;
+
+        /* LNA discharge current */
+        rc = r82xx_write_reg_mask(dev, 0x1e, lna_discharge, 0x1f);
+        if (rc < 0)
+            return rc;
+
+        /* agc clk 1Khz, external det1 cap 1u */
+        rc = r82xx_write_reg_mask(dev, 0x1a, 0x00, 0x30);
+        if (rc < 0)
+            return rc;
+
+        rc = r82xx_write_reg_mask(dev, 0x10, 0x00, 0x04);
+        if (rc < 0)
+            return rc;
+    }
+    return 0;
 }
 
-/* ──────────────────────── TV Standard (SDR mode) ──────────────────────── */
-
-static esp_err_t r82xx_set_tv_standard(rtlsdr_dev_t *dev)
+static int r82xx_set_tv_standard(rtlsdr_dev_t *dev,
+                                 unsigned bw,
+                                 enum r82xx_tuner_type type,
+                                 uint32_t delsys)
 {
-    esp_err_t ret;
+    int rc, i;
+    uint32_t if_khz, filt_cal_lo;
+    uint8_t data[5];
+    uint8_t filt_gain, img_r, filt_q, hp_cor, ext_enable, loop_through;
+    uint8_t lt_att, flt_ext_widest, polyfil_cur;
+    int need_calibration;
 
-    /* Set IF filter: reg 0x0a[3:0], reg 0x0b */
-    /* Default 6MHz bandwidth for SDR */
-    ret = r82xx_write_reg_mask(dev, 0x0a, 0x10, 0x1f);
-    ESP_RETURN_ON_ERROR(ret, TAG, "IF filter 0x0a failed");
+    /* BW < 6 MHz */
+    if_khz = 3570;
+    filt_cal_lo = 56000;        /* 52000->56000 */
+    filt_gain = 0x30;           /* +3db, 6mhz on */
+    img_r = 0x00;               /* image negative */
+    filt_q = 0x10;              /* r10[4]:low q(1'b1) */
+    hp_cor = 0x6b;              /* 1.7m disable, +2cap, 1.0mhz */
+    ext_enable = 0x60;          /* r30[6]=1 ext enable; r30[5]:1 ext at lna max-1 */
+    loop_through = 0x80;        /* r5[7], lt off */
+    lt_att = 0x00;              /* r31[7], lt att enable */
+    flt_ext_widest = 0x00;      /* r15[7]: flt_ext_wide off */
+    polyfil_cur = 0x60;         /* r25[6:5]:min */
 
-    ret = r82xx_write_reg(dev, 0x0b, 0x6b);
-    ESP_RETURN_ON_ERROR(ret, TAG, "IF filter 0x0b failed");
+    /* Initialize the shadow registers */
+    memcpy(r82xx_regs, r82xx_init_array, sizeof(r82xx_init_array));
 
-    r82xx_int_freq = R82XX_IF_FREQ;
+    /* Init Flag & Xtal_check Result */
+    rc = r82xx_write_reg_mask(dev, 0x0c, 0x00, 0x0f);
+    if (rc < 0)
+        return rc;
 
-    /* Filter bandwidth: reg 0x0a[4] */
-    ret = r82xx_write_reg_mask(dev, 0x0a, 0x10, 0x10);
-    ESP_RETURN_ON_ERROR(ret, TAG, "Filter BW failed");
+    /* version */
+    rc = r82xx_write_reg_mask(dev, 0x13, VER_NUM, 0x3f);
+    if (rc < 0)
+        return rc;
 
-    /* Pre-detect: reg 0x06[5:4] = 01 */
-    ret = r82xx_write_reg_mask(dev, 0x06, 0x10, 0x30);
-    ESP_RETURN_ON_ERROR(ret, TAG, "Pre-detect failed");
+    /* for LT Gain test */
+    if (type != TUNER_ANALOG_TV) {
+        rc = r82xx_write_reg_mask(dev, 0x1d, 0x00, 0x38);
+        if (rc < 0)
+            return rc;
+    }
+    r82xx_int_freq = if_khz * 1000;
 
-    /* Channel filter extension: reg 0x1e[0] = 1 */
-    ret = r82xx_write_reg_mask(dev, 0x1e, 0x01, 0x01);
-    ESP_RETURN_ON_ERROR(ret, TAG, "Chan filter ext failed");
+    /* Check if standard changed. If so, filter calibration is needed */
+    /* as we call this function only once in rtlsdr, force calibration */
+    need_calibration = 1;
 
-    /* Loop through: reg 0x05[7] = 0 */
-    ret = r82xx_write_reg_mask(dev, 0x05, 0x00, 0x80);
-    ESP_RETURN_ON_ERROR(ret, TAG, "Loop through failed");
+    if (need_calibration) {
+        for (i = 0; i < 2; i++) {
+            /* Set filt_cap */
+            rc = r82xx_write_reg_mask(dev, 0x0b, hp_cor, 0x60);
+            if (rc < 0)
+                return rc;
 
-    /* LT gain: reg 0x05[6:5] = 00 */
-    ret = r82xx_write_reg_mask(dev, 0x05, 0x00, 0x60);
-    ESP_RETURN_ON_ERROR(ret, TAG, "LT gain failed");
+            /* set cali clk =on */
+            rc = r82xx_write_reg_mask(dev, 0x0f, 0x04, 0x04);
+            if (rc < 0)
+                return rc;
 
-    return ESP_OK;
+            /* X'tal cap 0pF for PLL */
+            rc = r82xx_write_reg_mask(dev, 0x10, 0x00, 0x03);
+            if (rc < 0)
+                return rc;
+
+            rc = r82xx_set_pll(dev, filt_cal_lo * 1000);
+            if (rc < 0 || !r82xx_has_lock)
+                return rc;
+
+            /* Start Trigger */
+            rc = r82xx_write_reg_mask(dev, 0x0b, 0x10, 0x10);
+            if (rc < 0)
+                return rc;
+
+            vTaskDelay(pdMS_TO_TICKS(2));
+
+            /* Stop Trigger */
+            rc = r82xx_write_reg_mask(dev, 0x0b, 0x00, 0x10);
+            if (rc < 0)
+                return rc;
+
+            /* set cali clk =off */
+            rc = r82xx_write_reg_mask(dev, 0x0f, 0x00, 0x04);
+            if (rc < 0)
+                return rc;
+
+            /* Check if calibration worked */
+            rc = r82xx_read(dev, 0x00, data, sizeof(data));
+            if (rc < 0)
+                return rc;
+
+            r82xx_fil_cal_code = data[4] & 0x0f;
+            if (r82xx_fil_cal_code && r82xx_fil_cal_code != 0x0f)
+                break;
+        }
+        /* narrowest */
+        if (r82xx_fil_cal_code == 0x0f)
+            r82xx_fil_cal_code = 0;
+    }
+
+    rc = r82xx_write_reg_mask(dev, 0x0a,
+                              filt_q | r82xx_fil_cal_code, 0x1f);
+    if (rc < 0)
+        return rc;
+
+    /* Set BW, Filter_gain, & HP corner */
+    rc = r82xx_write_reg_mask(dev, 0x0b, hp_cor, 0xef);
+    if (rc < 0)
+        return rc;
+
+    /* Set Img_R */
+    rc = r82xx_write_reg_mask(dev, 0x07, img_r, 0x80);
+    if (rc < 0)
+        return rc;
+
+    /* Set filt_3dB, V6MHz */
+    rc = r82xx_write_reg_mask(dev, 0x06, filt_gain, 0x30);
+    if (rc < 0)
+        return rc;
+
+    /* channel filter extension */
+    rc = r82xx_write_reg_mask(dev, 0x1e, ext_enable, 0x60);
+    if (rc < 0)
+        return rc;
+
+    /* Loop through */
+    rc = r82xx_write_reg_mask(dev, 0x05, loop_through, 0x80);
+    if (rc < 0)
+        return rc;
+
+    /* Loop through attenuation */
+    rc = r82xx_write_reg_mask(dev, 0x1f, lt_att, 0x80);
+    if (rc < 0)
+        return rc;
+
+    /* filter extension widest */
+    rc = r82xx_write_reg_mask(dev, 0x0f, flt_ext_widest, 0x80);
+    if (rc < 0)
+        return rc;
+
+    /* RF poly filter current */
+    rc = r82xx_write_reg_mask(dev, 0x19, polyfil_cur, 0x60);
+    if (rc < 0)
+        return rc;
+
+    return 0;
+}
+
+/* ──────────────────────── VGA Gain ──────────────────────── */
+
+static int r82xx_set_vga_gain(rtlsdr_dev_t *dev)
+{
+    int rc;
+
+    /* set fixed VGA gain for now (16.3 dB) */
+    rc = r82xx_write_reg_mask(dev, 0x0c, 0x08, 0x9f);
+
+    return rc;
 }
 
 /* ──────────────────────── Public API ──────────────────────── */
 
 esp_err_t r82xx_init(rtlsdr_dev_t *dev)
 {
-    esp_err_t ret;
+    int rc;
     rtlsdr_tuner_t tuner = rtlsdr_get_tuner_type(dev);
 
     if (tuner == RTLSDR_TUNER_R828D) {
         r82xx_chip_type = CHIP_R828D;
         r82xx_i2c_addr = R828D_I2C_ADDR;
-        /* RTL-SDR Blog V4 uses 28.8 MHz xtal, standard R828D uses 16 MHz.
-         * Since we can't reliably detect Blog V4 from USB descriptors at
-         * this stage, default to 28.8 MHz (works for Blog V4). */
         r82xx_xtal_freq = RTL_XTAL_FREQ;
         ESP_LOGI(TAG, "Initializing R828D tuner (addr=0x%02x xtal=%luHz)",
                  r82xx_i2c_addr, (unsigned long)r82xx_xtal_freq);
@@ -310,180 +1062,321 @@ esp_err_t r82xx_init(rtlsdr_dev_t *dev)
         ESP_LOGI(TAG, "Initializing R820T tuner (addr=0x%02x)", r82xx_i2c_addr);
     }
 
-    /* Initialize shadow register array */
-    memset(r82xx_regs, 0, sizeof(r82xx_regs));
-    memcpy(r82xx_regs, r82xx_init_array, sizeof(r82xx_init_array));
+    /* Detect Blog V4 */
+    r82xx_is_blog_v4 = rtlsdr_is_blog_v4(dev);
 
-    /* Write initial register values (regs 0x05 to 0x1f) */
-    ret = r82xx_write(dev, 0x05, r82xx_init_array, sizeof(r82xx_init_array));
-    ESP_RETURN_ON_ERROR(ret, TAG, "Initial register write failed");
+    /* TODO: R828D might need r82xx_xtal_check() */
+    r82xx_xtal_cap_sel = XTAL_HIGH_CAP_0P;
 
-    /* Set TV standard for SDR mode */
-    ret = r82xx_set_tv_standard(dev);
-    ESP_RETURN_ON_ERROR(ret, TAG, "TV standard set failed");
+    /* Initialize registers — note: reg 0x06 = 0x30 (init_array[1]) */
+    rc = r82xx_write(dev, 0x05,
+                     r82xx_init_array, sizeof(r82xx_init_array));
 
-    /* System frequency selection */
-    ret = r82xx_sysfreq_sel(dev, 0);
-    ESP_RETURN_ON_ERROR(ret, TAG, "Sysfreq sel failed");
+    rc = r82xx_set_tv_standard(dev, 3, TUNER_DIGITAL_TV, 0);
+    if (rc < 0)
+        goto err;
 
-    ESP_LOGI(TAG, "R82xx tuner initialized successfully");
-    return ESP_OK;
+    rc = r82xx_sysfreq_sel(dev, 0, TUNER_DIGITAL_TV, SYS_DVBT);
+
+    r82xx_init_done = 1;
+
+err:
+    if (rc < 0)
+        ESP_LOGE(TAG, "r82xx_init failed=%d", rc);
+    return (rc < 0) ? ESP_FAIL : ESP_OK;
+}
+
+esp_err_t r82xx_standby(rtlsdr_dev_t *dev)
+{
+    int rc;
+
+    /* If device was not initialized yet, don't need to standby */
+    if (!r82xx_init_done)
+        return ESP_OK;
+
+    rc = r82xx_write_reg(dev, 0x06, 0xb1);
+    if (rc < 0)
+        return ESP_FAIL;
+    rc = r82xx_write_reg(dev, 0x05, 0xa0);
+    if (rc < 0)
+        return ESP_FAIL;
+    rc = r82xx_write_reg(dev, 0x07, 0x3a);
+    if (rc < 0)
+        return ESP_FAIL;
+    rc = r82xx_write_reg(dev, 0x08, 0x40);
+    if (rc < 0)
+        return ESP_FAIL;
+    rc = r82xx_write_reg(dev, 0x09, 0xc0);
+    if (rc < 0)
+        return ESP_FAIL;
+    rc = r82xx_write_reg(dev, 0x0a, 0x36);
+    if (rc < 0)
+        return ESP_FAIL;
+    rc = r82xx_write_reg(dev, 0x0c, 0x35);
+    if (rc < 0)
+        return ESP_FAIL;
+    rc = r82xx_write_reg(dev, 0x0f, 0x68);
+    if (rc < 0)
+        return ESP_FAIL;
+    rc = r82xx_write_reg(dev, 0x11, 0x03);
+    if (rc < 0)
+        return ESP_FAIL;
+    rc = r82xx_write_reg(dev, 0x17, 0xf4);
+    if (rc < 0)
+        return ESP_FAIL;
+    rc = r82xx_write_reg(dev, 0x19, 0x0c);
+
+    return (rc < 0) ? ESP_FAIL : ESP_OK;
 }
 
 esp_err_t r82xx_set_freq(rtlsdr_dev_t *dev, uint32_t freq)
 {
-    esp_err_t ret;
+    int rc = -1;
+    uint32_t lo_freq;
+    uint8_t air_cable1_in;
+    uint8_t open_d;
+    uint8_t band;
+    uint8_t cable_2_in;
+    uint8_t cable_1_in;
+    uint8_t air_in;
 
-    /* Handle R828D input switching */
-    if (r82xx_chip_type == CHIP_R828D) {
-        uint8_t air_cable1_in;
+    uint32_t upconvert_freq;
 
-        /* Standard R828D: switch at 345 MHz */
-        if (freq > MHZ(345)) {
-            air_cable1_in = 0x00;  /* Air input */
-        } else {
-            air_cable1_in = 0x60;  /* Cable1 input */
+    /* if it's an RTL-SDR Blog V4, automatically upconvert by 28.8 MHz if we tune to HF
+     * so that we don't need to manually set any upconvert offset in the SDR software */
+    upconvert_freq = r82xx_is_blog_v4 ? ((freq < MHZ(28)) ? (freq + MHZ(28)) : freq) : freq;
+
+    lo_freq = upconvert_freq + r82xx_int_freq;
+
+    rc = r82xx_set_mux(dev, lo_freq);
+    if (rc < 0)
+        goto err;
+
+    rc = r82xx_set_vga_gain(dev);
+    if (rc < 0)
+        goto err;
+
+    rc = r82xx_set_pll(dev, lo_freq);
+    if (rc < 0 || !r82xx_has_lock)
+        goto err;
+
+    if (r82xx_is_blog_v4) {
+        /* determine if notch filters should be on or off notches are turned OFF
+         * when tuned within the notch band and ON when tuned outside the notch band.
+         */
+        open_d = (freq <= MHZ(2) || (freq >= MHZ(85) && freq <= MHZ(112)) || (freq >= MHZ(172) && freq <= MHZ(242))) ? 0x00 : 0x08;
+        rc = r82xx_write_reg_mask(dev, 0x17, open_d, 0x08);
+
+        if (rc < 0)
+            return ESP_FAIL;
+
+        /* select tuner band based on frequency and only switch if there is a band change
+         * (to avoid excessive register writes when tuning rapidly)
+         */
+        band = (freq <= MHZ(28)) ? HF : ((freq > MHZ(28) && freq < MHZ(250)) ? VHF : UHF);
+
+        /* switch between tuner inputs on the RTL-SDR Blog V4 */
+        if (band != r82xx_input) {
+            r82xx_input = band;
+
+            /* activate cable 2 (HF input) */
+            cable_2_in = (band == HF) ? 0x08 : 0x00;
+            rc = r82xx_write_reg_mask(dev, 0x06, cable_2_in, 0x08);
+
+            if (rc < 0)
+                goto err;
+
+            /* Control upconverter GPIO switch on newer batches */
+            rc = rtlsdr_set_bias_tee_gpio(dev, 5, !cable_2_in);
+
+            if (rc < 0)
+                goto err;
+
+            /* activate cable 1 (VHF input) */
+            cable_1_in = (band == VHF) ? 0x40 : 0x00;
+            rc = r82xx_write_reg_mask(dev, 0x05, cable_1_in, 0x40);
+
+            if (rc < 0)
+                goto err;
+
+            /* activate air_in (UHF input) */
+            air_in = (band == UHF) ? 0x00 : 0x20;
+            rc = r82xx_write_reg_mask(dev, 0x05, air_in, 0x20);
+
+            if (rc < 0)
+                goto err;
         }
-
-        if (air_cable1_in != r82xx_input) {
-            r82xx_input = air_cable1_in;
-            ret = r82xx_write_reg_mask(dev, 0x05, air_cable1_in, 0x60);
-            ESP_RETURN_ON_ERROR(ret, TAG, "Input switch failed");
-        }
-    }
-
-    /* RF frequency = desired freq + IF offset */
-    uint32_t lo_freq = freq + r82xx_int_freq;
-
-    /* Set open drain: reg 0x17[3] */
-    uint8_t open_d = 0x08; /* Normal */
-    ret = r82xx_write_reg_mask(dev, 0x17, open_d, 0x08);
-    ESP_RETURN_ON_ERROR(ret, TAG, "Open drain failed");
-
-    /* Set RF MUX based on frequency */
-    /* RF_MUX: reg 0x1a[7:6] */
-    uint8_t rf_mux;
-    if (freq <= MHZ(50)) {
-        rf_mux = 0x80;
-    } else if (freq <= MHZ(340)) {
-        rf_mux = 0x40;
     } else {
-        rf_mux = 0x00;
+        /* Standard R828D dongle */
+        /* switch between 'Cable1' and 'Air-In' inputs on sticks with
+         * R828D tuner. We switch at 345 MHz, because that's where the
+         * noise-floor has about the same level with identical LNA
+         * settings. The original driver used 320 MHz. */
+        air_cable1_in = (freq > MHZ(345)) ? 0x00 : 0x60;
+
+        if ((r82xx_chip_type == CHIP_R828D) &&
+            (air_cable1_in != r82xx_input)) {
+            r82xx_input = air_cable1_in;
+            rc = r82xx_write_reg_mask(dev, 0x05, air_cable1_in, 0x60);
+        }
     }
-    ret = r82xx_write_reg_mask(dev, 0x1a, rf_mux, 0xc0);
-    ESP_RETURN_ON_ERROR(ret, TAG, "RF MUX failed");
 
-    /* Set PLL */
-    ret = r82xx_set_pll(dev, lo_freq);
-    ESP_RETURN_ON_ERROR(ret, TAG, "PLL set failed");
-
-    ESP_LOGI(TAG, "Freq: %lu Hz (LO=%lu Hz, IF=%lu Hz)",
-             (unsigned long)freq, (unsigned long)lo_freq, (unsigned long)r82xx_int_freq);
-    return ESP_OK;
+err:
+    if (rc < 0)
+        ESP_LOGE(TAG, "r82xx_set_freq failed=%d", rc);
+    return (rc < 0) ? ESP_FAIL : ESP_OK;
 }
 
 esp_err_t r82xx_set_gain(rtlsdr_dev_t *dev, int gain)
 {
-    esp_err_t ret;
+    int rc;
+    int i, total_gain = 0;
+    uint8_t mix_index = 0, lna_index = 0;
+    uint8_t data[4];
 
-    /* Find the nearest gain entry in the gain table */
-    int total_gain = 0;
-    int lna_index = 0;
-    int mix_index = 0;
+    /* LNA auto off */
+    rc = r82xx_write_reg_mask(dev, 0x05, 0x10, 0x10);
+    if (rc < 0)
+        return ESP_FAIL;
 
-    /* Find best LNA + mixer combination */
-    for (int i = 0; i < 16; i++) {
-        int lna_sum = 0;
-        for (int j = 0; j <= i && j < 16; j++) lna_sum += r82xx_lna_gain_steps[j];
+    /* Mixer auto off */
+    rc = r82xx_write_reg_mask(dev, 0x07, 0, 0x10);
+    if (rc < 0)
+        return ESP_FAIL;
 
-        for (int k = 0; k < 16; k++) {
-            int mix_sum = 0;
-            for (int j = 0; j <= k && j < 16; j++) mix_sum += r82xx_mixer_gain_steps[j];
+    rc = r82xx_read(dev, 0x00, data, sizeof(data));
+    if (rc < 0)
+        return ESP_FAIL;
 
-            int this_gain = lna_sum + mix_sum;
-            if (abs(this_gain - gain) < abs(total_gain - gain)) {
-                total_gain = this_gain;
-                lna_index = i;
-                mix_index = k;
-            }
-        }
+    rc = r82xx_set_vga_gain(dev);
+    if (rc < 0)
+        return ESP_FAIL;
+
+    for (i = 0; i < 15; i++) {
+        if (total_gain >= gain)
+            break;
+
+        total_gain += r82xx_lna_gain_steps[++lna_index];
+
+        if (total_gain >= gain)
+            break;
+
+        total_gain += r82xx_mixer_gain_steps[++mix_index];
     }
 
-    /* LNA gain: reg 0x05[3:0] */
-    ret = r82xx_write_reg_mask(dev, 0x05, lna_index, 0x0f);
-    ESP_RETURN_ON_ERROR(ret, TAG, "LNA gain write failed");
+    /* set LNA gain */
+    rc = r82xx_write_reg_mask(dev, 0x05, lna_index, 0x0f);
+    if (rc < 0)
+        return ESP_FAIL;
 
-    /* Mixer gain: reg 0x07[3:0] */
-    ret = r82xx_write_reg_mask(dev, 0x07, mix_index, 0x0f);
-    ESP_RETURN_ON_ERROR(ret, TAG, "Mixer gain write failed");
+    /* set Mixer gain */
+    rc = r82xx_write_reg_mask(dev, 0x07, mix_index, 0x0f);
+    if (rc < 0)
+        return ESP_FAIL;
 
-    ESP_LOGI(TAG, "Gain: requested=%d/10dB actual=%d/10dB (LNA=%d mixer=%d)",
-             gain, total_gain, lna_index, mix_index);
     return ESP_OK;
 }
 
 esp_err_t r82xx_set_gain_mode(rtlsdr_dev_t *dev, int manual)
 {
-    esp_err_t ret;
+    int rc;
 
-    /* LNA auto/manual: reg 0x05[4] */
-    ret = r82xx_write_reg_mask(dev, 0x05, manual ? 0x10 : 0x00, 0x10);
-    ESP_RETURN_ON_ERROR(ret, TAG, "LNA gain mode failed");
+    if (manual) {
+        /* LNA auto off */
+        rc = r82xx_write_reg_mask(dev, 0x05, 0x10, 0x10);
+        if (rc < 0)
+            return ESP_FAIL;
 
-    /* Mixer auto/manual: reg 0x07[4] */
-    ret = r82xx_write_reg_mask(dev, 0x07, manual ? 0x10 : 0x00, 0x10);
-    ESP_RETURN_ON_ERROR(ret, TAG, "Mixer gain mode failed");
-
-    ESP_LOGI(TAG, "Gain mode: %s", manual ? "manual" : "auto");
-    return ESP_OK;
-}
-
-esp_err_t r82xx_set_bandwidth(rtlsdr_dev_t *dev, uint32_t bw)
-{
-    esp_err_t ret;
-    uint8_t reg_0a, reg_0b;
-    uint32_t if_freq;
-
-    /* Bandwidth selection from librtlsdr */
-    if (bw > 7000000) {
-        reg_0a = 0x10; reg_0b = 0x0b;
-        if_freq = 4570000;
-    } else if (bw > 6000000) {
-        reg_0a = 0x10; reg_0b = 0x2a;
-        if_freq = 4570000;
-    } else if (bw > 2430000) {  /* 1700000 + 350000 + 380000 */
-        reg_0a = 0x10; reg_0b = 0x6b;
-        if_freq = 3570000;
-    } else if (bw > 1530000) {
-        reg_0a = 0x00; reg_0b = 0x2a;
-        if_freq = 3570000;
-    } else if (bw > 1230000) {
-        reg_0a = 0x00; reg_0b = 0x4a;
-        if_freq = 3570000;
-    } else if (bw > 930000) {
-        reg_0a = 0x00; reg_0b = 0x6a;
-        if_freq = 3570000;
-    } else if (bw > 730000) {
-        reg_0a = 0x00; reg_0b = 0x8a;
-        if_freq = 3570000;
+        /* Mixer auto off */
+        rc = r82xx_write_reg_mask(dev, 0x07, 0, 0x10);
+        if (rc < 0)
+            return ESP_FAIL;
     } else {
-        reg_0a = 0x00; reg_0b = 0xab;
-        if_freq = 3570000;
+        /* LNA auto on */
+        rc = r82xx_write_reg_mask(dev, 0x05, 0, 0x10);
+        if (rc < 0)
+            return ESP_FAIL;
+
+        /* Mixer auto on */
+        rc = r82xx_write_reg_mask(dev, 0x07, 0x10, 0x10);
+        if (rc < 0)
+            return ESP_FAIL;
+
+        /* set fixed VGA gain for now (26.5 dB) */
+        rc = r82xx_write_reg_mask(dev, 0x0c, 0x0b, 0x9f);
+        if (rc < 0)
+            return ESP_FAIL;
     }
 
-    ret = r82xx_write_reg_mask(dev, 0x0a, reg_0a, 0x1f);
-    ESP_RETURN_ON_ERROR(ret, TAG, "BW 0x0a failed");
-
-    ret = r82xx_write_reg(dev, 0x0b, reg_0b);
-    ESP_RETURN_ON_ERROR(ret, TAG, "BW 0x0b failed");
-
-    r82xx_int_freq = if_freq;
-
-    ESP_LOGI(TAG, "Bandwidth: %lu Hz (IF=%lu Hz)", (unsigned long)bw, (unsigned long)if_freq);
     return ESP_OK;
 }
 
-/* ──────────────────────── Gain Table Access ──────────────────────── */
+int r82xx_set_bandwidth(rtlsdr_dev_t *dev, int bw, uint32_t rate)
+{
+    int rc;
+    unsigned int i;
+    int real_bw = 0;
+    uint8_t reg_0a;
+    uint8_t reg_0b;
+
+    if (bw > 7000000) {
+        /* BW: 8 MHz */
+        reg_0a = 0x10;
+        reg_0b = 0x0b;
+        r82xx_int_freq = 4570000;
+    } else if (bw > 6000000) {
+        /* BW: 7 MHz */
+        reg_0a = 0x10;
+        reg_0b = 0x2a;
+        r82xx_int_freq = 4570000;
+    } else if (bw > r82xx_if_low_pass_bw_table[0] + FILT_HP_BW1 + FILT_HP_BW2) {
+        /* BW: 6 MHz */
+        reg_0a = 0x10;
+        reg_0b = 0x6b;
+        r82xx_int_freq = 3570000;
+    } else {
+        reg_0a = 0x00;
+        reg_0b = 0x80;
+        r82xx_int_freq = 2300000;
+
+        if (bw > r82xx_if_low_pass_bw_table[0] + FILT_HP_BW1) {
+            bw -= FILT_HP_BW2;
+            r82xx_int_freq += FILT_HP_BW2;
+            real_bw += FILT_HP_BW2;
+        } else {
+            reg_0b |= 0x20;
+        }
+
+        if (bw > r82xx_if_low_pass_bw_table[0]) {
+            bw -= FILT_HP_BW1;
+            r82xx_int_freq += FILT_HP_BW1;
+            real_bw += FILT_HP_BW1;
+        } else {
+            reg_0b |= 0x40;
+        }
+
+        /* find low-pass filter */
+        for (i = 0; i < ARRAY_SIZE(r82xx_if_low_pass_bw_table); ++i) {
+            if (bw > r82xx_if_low_pass_bw_table[i])
+                break;
+        }
+        --i;
+        reg_0b |= 15 - i;
+        real_bw += r82xx_if_low_pass_bw_table[i];
+
+        r82xx_int_freq -= real_bw / 2;
+    }
+
+    rc = r82xx_write_reg_mask(dev, 0x0a, reg_0a, 0x10);
+    if (rc < 0)
+        return rc;
+
+    rc = r82xx_write_reg_mask(dev, 0x0b, reg_0b, 0xef);
+    if (rc < 0)
+        return rc;
+
+    return r82xx_int_freq;
+}
 
 const int *r82xx_get_gains(int *count)
 {

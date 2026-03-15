@@ -495,7 +495,7 @@ extern esp_err_t r82xx_init(rtlsdr_dev_t *dev);
 extern esp_err_t r82xx_set_freq(rtlsdr_dev_t *dev, uint32_t freq);
 extern esp_err_t r82xx_set_gain(rtlsdr_dev_t *dev, int gain);
 extern esp_err_t r82xx_set_gain_mode(rtlsdr_dev_t *dev, int manual);
-extern esp_err_t r82xx_set_bandwidth(rtlsdr_dev_t *dev, uint32_t bw);
+extern int       r82xx_set_bandwidth(rtlsdr_dev_t *dev, int bw, uint32_t rate);
 
 /* R820T I2C address */
 #define R820T_I2C_ADDR  0x34
