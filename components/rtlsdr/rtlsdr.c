@@ -27,8 +27,8 @@ static const char *TAG = "rtlsdr";
 #define CTRL_OUT    (USB_BM_REQUEST_TYPE_TYPE_VENDOR | USB_BM_REQUEST_TYPE_DIR_OUT)
 
 /* Number of async bulk transfer buffers */
-#define DEFAULT_BUF_NUM     8
-#define DEFAULT_BUF_LEN     (32 * 512)  /* 16KB per transfer */
+#define DEFAULT_BUF_NUM     10
+#define DEFAULT_BUF_LEN     (64 * 512)  /* 32KB per transfer */
 
 /* Device state */
 struct rtlsdr_dev {
@@ -477,10 +477,14 @@ static void bulk_xfer_cb(usb_transfer_t *xfer)
     if (xfer->status == USB_TRANSFER_STATUS_COMPLETED && xfer->actual_num_bytes > 0) {
         bulk_cb_count++;
         bulk_bytes_total += xfer->actual_num_bytes;
-        if (bulk_cb_count <= 3 || (bulk_cb_count % 1000) == 0) {
-            ESP_LOGI(TAG, "Bulk IN #%lu: %d bytes (total %lu bytes)",
+        if (bulk_cb_count <= 3 || (bulk_cb_count % 500) == 0) {
+            uint32_t elapsed_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+            uint32_t rate_kbps = (bulk_bytes_total / 1024) * 1000 / (elapsed_ms ? elapsed_ms : 1);
+            ESP_LOGI(TAG, "Bulk IN #%lu: %d bytes (total %lu KB, ~%lu KB/s = %lu kSPS)",
                      (unsigned long)bulk_cb_count, xfer->actual_num_bytes,
-                     (unsigned long)bulk_bytes_total);
+                     (unsigned long)(bulk_bytes_total / 1024),
+                     (unsigned long)rate_kbps,
+                     (unsigned long)(rate_kbps * 1024 / 2 / 1000));
         }
         if (dev->async_cb) {
             dev->async_cb(xfer->data_buffer, xfer->actual_num_bytes, dev->async_ctx);

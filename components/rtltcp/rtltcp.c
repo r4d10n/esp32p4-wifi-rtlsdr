@@ -153,7 +153,7 @@ static void iq_sender_task(void *arg)
     while (srv->running && srv->client_connected) {
         size_t item_size = 0;
         uint8_t *data = xRingbufferReceiveUpTo(srv->ring_buf, &item_size,
-                                                pdMS_TO_TICKS(10), 16384);
+                                                pdMS_TO_TICKS(5), 32768);
         if (data && item_size > 0) {
             int sent = 0;
             while (sent < (int)item_size && srv->client_connected) {
@@ -232,8 +232,8 @@ static void listener_task(void *arg)
         opt = 0;
         setsockopt(srv->client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
 
-        /* Increase send buffer */
-        int sndbuf = 65536;
+        /* Maximize send buffer */
+        int sndbuf = 131072;
         setsockopt(srv->client_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
 
         ESP_LOGI(TAG, "Client connected from %s:%d",
@@ -247,8 +247,8 @@ static void listener_task(void *arg)
         /* Start command receiver and IQ sender tasks */
         xTaskCreatePinnedToCore(cmd_receiver_task, "rtltcp_cmd", 4096,
                                 srv, 5, &srv->cmd_task, 1);
-        xTaskCreatePinnedToCore(iq_sender_task, "rtltcp_iq", 8192,
-                                srv, 6, &srv->sender_task, 1);
+        xTaskCreatePinnedToCore(iq_sender_task, "rtltcp_iq", 16384,
+                                srv, 8, &srv->sender_task, 1);
 
         /* Wait for client disconnect */
         while (srv->client_connected && srv->running) {
