@@ -221,6 +221,120 @@ esp_err_t rtlsdr_set_i2c_repeater(rtlsdr_dev_t *dev, bool on)
     return rtlsdr_demod_write_reg(dev, 1, 0x01, on ? 0x18 : 0x10, 1);
 }
 
+/* Public wrapper for demod_write_reg (used by tuner during calibration) */
+esp_err_t rtlsdr_demod_write_reg_ext(rtlsdr_dev_t *dev, uint8_t page,
+                                      uint16_t addr, uint16_t val, uint8_t len)
+{
+    return rtlsdr_demod_write_reg(dev, page, addr, val, len);
+}
+
+/* ──────────────────────── IF Frequency ──────────────────────── */
+
+#define TWO_POW_22  (1 << 22)
+
+esp_err_t rtlsdr_set_if_freq(rtlsdr_dev_t *dev, uint32_t freq)
+{
+    uint32_t rtl_xtal = RTL_XTAL_FREQ;
+    int32_t if_freq;
+    uint8_t tmp;
+    esp_err_t ret;
+
+    if_freq = ((int64_t)freq * TWO_POW_22 / rtl_xtal) * (-1);
+
+    tmp = (if_freq >> 16) & 0x3f;
+    ret = rtlsdr_demod_write_reg(dev, 1, 0x19, tmp, 1);
+    if (ret != ESP_OK) return ret;
+
+    tmp = (if_freq >> 8) & 0xff;
+    ret = rtlsdr_demod_write_reg(dev, 1, 0x1a, tmp, 1);
+    if (ret != ESP_OK) return ret;
+
+    tmp = if_freq & 0xff;
+    ret = rtlsdr_demod_write_reg(dev, 1, 0x1b, tmp, 1);
+
+    ESP_LOGI(TAG, "IF freq: %lu Hz (if_reg=0x%06x)", (unsigned long)freq, if_freq & 0x3fffff);
+    return ret;
+}
+
+/* ──────────────────────── GPIO Control ──────────────────────── */
+
+/* SYS block GPIO register addresses */
+#define GPO   0x3001
+#define GPOE  0x3003
+#define GPD   0x3004
+
+esp_err_t rtlsdr_set_gpio_output(rtlsdr_dev_t *dev, uint8_t gpio)
+{
+    uint8_t val;
+    uint8_t mask = 1 << gpio;
+    esp_err_t ret;
+
+    /* Set GPIO direction to output: clear bit in GPD */
+    ret = rtlsdr_read_reg(dev, RTLSDR_BLOCK_SYS, GPD, &val, 1);
+    if (ret != ESP_OK) return ret;
+    val &= ~mask;
+    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_SYS, GPD, &val, 1);
+    if (ret != ESP_OK) return ret;
+
+    /* Enable GPIO output: set bit in GPOE */
+    ret = rtlsdr_read_reg(dev, RTLSDR_BLOCK_SYS, GPOE, &val, 1);
+    if (ret != ESP_OK) return ret;
+    val |= mask;
+    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_SYS, GPOE, &val, 1);
+
+    return ret;
+}
+
+esp_err_t rtlsdr_set_gpio_bit(rtlsdr_dev_t *dev, uint8_t gpio, int on)
+{
+    uint8_t val;
+    uint8_t mask = 1 << gpio;
+    esp_err_t ret;
+
+    ret = rtlsdr_read_reg(dev, RTLSDR_BLOCK_SYS, GPO, &val, 1);
+    if (ret != ESP_OK) return ret;
+
+    if (on) {
+        val |= mask;
+    } else {
+        val &= ~mask;
+    }
+
+    return rtlsdr_write_reg(dev, RTLSDR_BLOCK_SYS, GPO, &val, 1);
+}
+
+esp_err_t rtlsdr_set_bias_tee_gpio(rtlsdr_dev_t *dev, int gpio, int on)
+{
+    esp_err_t ret;
+    ret = rtlsdr_set_gpio_output(dev, (uint8_t)gpio);
+    if (ret != ESP_OK) return ret;
+    return rtlsdr_set_gpio_bit(dev, (uint8_t)gpio, on);
+}
+
+/* ──────────────────────── Blog V4 Detection ──────────────────────── */
+
+/* TODO: Read USB string descriptors for proper detection.
+ * For now, all R828D dongles are treated as Blog V4 (28.8 MHz xtal).
+ * This works for Blog V4 but is wrong for standard R828D (16 MHz xtal). */
+int rtlsdr_is_blog_v4(rtlsdr_dev_t *dev)
+{
+    /* R828D on Blog V4 uses same 28.8 MHz xtal as RTL2832U */
+    return (rtlsdr_get_tuner_type(dev) == RTLSDR_TUNER_R828D) ? 1 : 0;
+}
+
+/* ──────────────────────── Sample Freq Correction ──────────────────────── */
+
+static esp_err_t rtlsdr_set_sample_freq_correction(rtlsdr_dev_t *dev, int ppm)
+{
+    int16_t offs = (int16_t)(ppm * (-1) * TWO_POW_22 / 1000000);
+    esp_err_t ret;
+
+    ret = rtlsdr_demod_write_reg(dev, 1, 0x3f, offs & 0xff, 1);
+    if (ret != ESP_OK) return ret;
+    ret = rtlsdr_demod_write_reg(dev, 1, 0x3e, (offs >> 8) & 0x3f, 1);
+    return ret;
+}
+
 /* ──────────────────────── RTL2832U Baseband Init ──────────────────────── */
 
 /* FIR filter coefficients (default from librtlsdr) */
@@ -632,6 +746,16 @@ esp_err_t rtlsdr_init(rtlsdr_dev_t **out_dev)
     ret = rtlsdr_probe_tuner(dev);
     if (ret == ESP_OK && (dev->tuner_type == RTLSDR_TUNER_R820T ||
                           dev->tuner_type == RTLSDR_TUNER_R828D)) {
+
+        /* R820T/R828D post-detection demod config (from rtl-sdr-blog librtlsdr.c) */
+        rtlsdr_demod_write_reg(dev, 1, 0xb1, 0x1a, 1);  /* disable Zero-IF */
+        rtlsdr_demod_write_reg(dev, 0, 0x08, 0x4d, 1);  /* only In-phase ADC input */
+        rtlsdr_set_if_freq(dev, 3570000);                 /* R82XX IF = 3.57 MHz */
+        rtlsdr_demod_write_reg(dev, 1, 0x15, 0x01, 1);  /* enable spectrum inversion */
+
+        /* Initialize GPIO 4 as output (used by some dongles) */
+        rtlsdr_set_gpio_output(dev, 4);
+
         /* Enable I2C repeater for tuner access */
         rtlsdr_set_i2c_repeater(dev, true);
         ret = r82xx_init(dev);
@@ -717,25 +841,48 @@ esp_err_t rtlsdr_set_center_freq(rtlsdr_dev_t *dev, uint32_t freq)
 
 esp_err_t rtlsdr_set_sample_rate(rtlsdr_dev_t *dev, uint32_t rate)
 {
+    esp_err_t ret;
+
+    /* Set tuner bandwidth BEFORE sample rate (reference order) */
+    ret = rtlsdr_set_i2c_repeater(dev, true);
+    if (ret == ESP_OK && (dev->tuner_type == RTLSDR_TUNER_R820T || dev->tuner_type == RTLSDR_TUNER_R828D)) {
+        int if_freq = r82xx_set_bandwidth(dev, rate > 0 ? (int)rate : 1024000, rate);
+        rtlsdr_set_i2c_repeater(dev, false);
+
+        /* Update IF frequency if bandwidth changed it */
+        if (if_freq > 0) {
+            rtlsdr_set_if_freq(dev, (uint32_t)if_freq);
+        }
+    } else {
+        rtlsdr_set_i2c_repeater(dev, false);
+    }
+
     /* Compute resampling ratio */
     uint32_t rsamp_ratio = ((uint64_t)RTL_XTAL_FREQ * (1 << 22)) / rate;
-    uint32_t real_rate = ((uint64_t)RTL_XTAL_FREQ * (1 << 22)) / rsamp_ratio;
+    rsamp_ratio &= 0x0ffffffc;  /* Low 2 bits must be zero per hardware spec */
 
-    esp_err_t ret;
-    ret = rtlsdr_demod_write_reg(dev, 1, 0x9F, (rsamp_ratio >> 16) & 0xFFFF, 2);
+    uint32_t real_rsamp_ratio = rsamp_ratio | ((rsamp_ratio & 0x08000000) << 1);
+    uint32_t real_rate = ((uint64_t)RTL_XTAL_FREQ * (1 << 22)) / real_rsamp_ratio;
+
+    ret = rtlsdr_demod_write_reg(dev, 1, 0x9f, (rsamp_ratio >> 16) & 0xffff, 2);
     ESP_RETURN_ON_ERROR(ret, TAG, "Sample rate hi failed");
-    ret = rtlsdr_demod_write_reg(dev, 1, 0xA1, rsamp_ratio & 0xFFFF, 2);
+    ret = rtlsdr_demod_write_reg(dev, 1, 0xa1, rsamp_ratio & 0xffff, 2);
     ESP_RETURN_ON_ERROR(ret, TAG, "Sample rate lo failed");
+
+    /* Apply sample frequency correction */
+    rtlsdr_set_sample_freq_correction(dev, dev->freq_correction);
+
+    /* Demod soft-reset to apply new rate */
+    rtlsdr_demod_write_reg(dev, 1, 0x01, 0x14, 1);
+    rtlsdr_demod_write_reg(dev, 1, 0x01, 0x10, 1);
 
     dev->sample_rate = real_rate;
     ESP_LOGI(TAG, "Sample rate: %lu Hz (requested %lu)", (unsigned long)real_rate, (unsigned long)rate);
 
-    /* Set IF bandwidth on tuner */
-    ret = rtlsdr_set_i2c_repeater(dev, true);
-    if (ret == ESP_OK && (dev->tuner_type == RTLSDR_TUNER_R820T || dev->tuner_type == RTLSDR_TUNER_R828D)) {
-        r82xx_set_bandwidth(dev, rate);
+    /* Retune center freq after rate change */
+    if (dev->center_freq > 0) {
+        rtlsdr_set_center_freq(dev, dev->center_freq);
     }
-    rtlsdr_set_i2c_repeater(dev, false);
 
     return ESP_OK;
 }
@@ -801,18 +948,8 @@ esp_err_t rtlsdr_set_offset_tuning(rtlsdr_dev_t *dev, bool on)
 
 esp_err_t rtlsdr_set_bias_tee(rtlsdr_dev_t *dev, bool on)
 {
-    /* GPIO 0 control via USB register */
-    uint8_t val;
-    esp_err_t ret = rtlsdr_read_reg(dev, RTLSDR_BLOCK_SYS, 0x0000, &val, 1);
-    ESP_RETURN_ON_ERROR(ret, TAG, "GPIO read failed");
-
-    if (on) {
-        val |= 0x08;  /* Set GPIO 0 high */
-    } else {
-        val &= ~0x08; /* Set GPIO 0 low */
-    }
-
-    ret = rtlsdr_write_reg(dev, RTLSDR_BLOCK_SYS, 0x0000, &val, 1);
+    /* Bias tee is on GPIO 0 */
+    esp_err_t ret = rtlsdr_set_bias_tee_gpio(dev, 0, on ? 1 : 0);
     if (ret == ESP_OK) {
         dev->bias_tee = on;
         ESP_LOGI(TAG, "Bias tee: %s", on ? "ON" : "OFF");
