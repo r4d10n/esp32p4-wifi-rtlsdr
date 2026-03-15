@@ -1,0 +1,41 @@
+menu "RTL-SDR WiFi Bridge Configuration"
+
+    config WIFI_SSID
+        string "WiFi SSID"
+        default "myssid"
+        help
+            SSID of the WiFi network to connect to.
+
+    config WIFI_PASSWORD
+        string "WiFi Password"
+        default "mypassword"
+        help
+            Password for the WiFi network.
+
+    config RTLSDR_DEFAULT_FREQ
+        int "Default center frequency (Hz)"
+        default 100000000
+        help
+            Default RTL-SDR center frequency in Hz (100 MHz).
+
+    config RTLSDR_DEFAULT_SAMPLE_RATE
+        int "Default sample rate (Hz)"
+        default 1024000
+        help
+            Default sample rate in Hz. WiFi can sustain up to ~1 MSPS reliably.
+            Use Ethernet for higher rates.
+
+    config RTLTCP_PORT
+        int "RTL-TCP server port"
+        default 1234
+        help
+            TCP port for the rtl_tcp server.
+
+    config RTLTCP_RING_BUF_SIZE_KB
+        int "Ring buffer size (KB)"
+        default 2048
+        help
+            Size of the IQ sample ring buffer in KB.
+            Stored in PSRAM. Larger = more resilience to WiFi jitter.
+
+endmenu
