@@ -13,10 +13,10 @@
 
 /* ──────────────────────── FFT Engine ──────────────────────── */
 
-#define FFT_MAX_SIZE    4096
+#define FFT_MAX_SIZE    1024
 #define FFT_AVG_COUNT   4       /* Average this many FFT frames before output */
-#define DB_MIN          (-100.0f)
-#define DB_MAX          (0.0f)
+#define DB_MIN          (-40.0f)
+#define DB_MAX          (40.0f)
 
 static int      fft_n = 1024;
 static float    fft_window[FFT_MAX_SIZE];
@@ -115,8 +115,8 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
         i += 2;
 
         if (fft_input_pos >= fft_n) {
-            /* Run FFT */
-            float work_re[FFT_MAX_SIZE], work_im[FFT_MAX_SIZE];
+            /* Run FFT — use static buffers to avoid stack overflow */
+            static float work_re[FFT_MAX_SIZE], work_im[FFT_MAX_SIZE];
             memcpy(work_re, fft_input_re, fft_n * sizeof(float));
             memcpy(work_im, fft_input_im, fft_n * sizeof(float));
             fft_radix2(work_re, work_im, fft_n);

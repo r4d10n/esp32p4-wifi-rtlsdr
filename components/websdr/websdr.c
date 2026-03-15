@@ -34,7 +34,7 @@ extern const uint8_t sdr_css_end[]      asm("_binary_sdr_css_end");
 /* ──────────────────────── Constants ──────────────────────── */
 
 #define MAX_WS_CLIENTS      4
-#define IQ_BUF_SIZE         (128 * 1024)    /* Shared IQ ring for FFT input */
+#define IQ_BUF_SIZE         (32 * 1024)     /* Shared IQ ring for FFT input (reduced for RAM) */
 #define DDC_OUT_BUF_SIZE    4096
 
 /* ──────────────────────── Server State ──────────────────────── */

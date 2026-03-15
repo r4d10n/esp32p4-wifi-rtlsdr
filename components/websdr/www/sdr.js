@@ -102,26 +102,36 @@
         var port = location.port || '8080';
         var url = 'ws://' + host + ':' + port + '/ws';
 
+        console.log('[SDR] Connecting to ' + url);
         ws = new WebSocket(url);
         ws.binaryType = 'arraybuffer';
 
         ws.onopen = function () {
+            console.log('[SDR] WebSocket connected');
             elStatus.textContent = 'Connected';
             elStatus.className = 'connected';
         };
 
-        ws.onclose = function () {
+        ws.onclose = function (e) {
+            console.log('[SDR] WebSocket closed: code=' + e.code + ' reason=' + e.reason);
             elStatus.textContent = 'Disconnected';
             elStatus.className = 'disconnected';
             iqSubscribed = false;
             setTimeout(wsConnect, 2000);
         };
 
-        ws.onerror = function () {
+        ws.onerror = function (e) {
+            console.error('[SDR] WebSocket error:', e);
             ws.close();
         };
 
+        var msgCount = 0;
         ws.onmessage = function (evt) {
+            msgCount++;
+            if (msgCount <= 5 || msgCount % 100 === 0) {
+                var dtype = typeof evt.data === 'string' ? 'text(' + evt.data.length + ')' : 'binary(' + evt.data.byteLength + ')';
+                console.log('[SDR] Message #' + msgCount + ': ' + dtype);
+            }
             if (typeof evt.data === 'string') {
                 handleTextMessage(evt.data);
             } else {
@@ -131,8 +141,9 @@
     }
 
     function handleTextMessage(text) {
+        console.log('[SDR] Text msg: ' + text.substring(0, 200));
         var msg;
-        try { msg = JSON.parse(text); } catch (e) { return; }
+        try { msg = JSON.parse(text); } catch (e) { console.error('[SDR] JSON parse error:', e); return; }
 
         if (msg.type === 'info') {
             centerFreq = msg.freq || centerFreq;
@@ -561,8 +572,12 @@
     });
 
     /* ── Init ── */
+    console.log('[SDR] Initializing...');
     resizeCanvases();
+    console.log('[SDR] Canvas sizes: spec=' + specCanvas.width + 'x' + specCanvas.height +
+                ' wf=' + wfCanvas.width + 'x' + wfCanvas.height);
     updateDisplay();
     wsConnect();
+    console.log('[SDR] Init complete');
 
 })();

@@ -27,8 +27,8 @@ static const char *TAG = "rtlsdr";
 #define CTRL_OUT    (USB_BM_REQUEST_TYPE_TYPE_VENDOR | USB_BM_REQUEST_TYPE_DIR_OUT)
 
 /* Number of async bulk transfer buffers */
-#define DEFAULT_BUF_NUM     10
-#define DEFAULT_BUF_LEN     (64 * 512)  /* 32KB per transfer */
+#define DEFAULT_BUF_NUM     6
+#define DEFAULT_BUF_LEN     (32 * 512)  /* 16KB per transfer */
 
 /* Device state */
 struct rtlsdr_dev {
