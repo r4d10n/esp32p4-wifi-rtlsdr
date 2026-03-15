@@ -59,6 +59,7 @@ struct rtlsdr_dev {
 
     /* Control transfer synchronization */
     SemaphoreHandle_t   ctrl_sem;
+    SemaphoreHandle_t   ctrl_mutex;
     usb_transfer_t     *ctrl_xfer;
     esp_err_t           ctrl_status;
 
@@ -92,6 +93,7 @@ static esp_err_t rtlsdr_ctrl_transfer(rtlsdr_dev_t *dev, uint8_t bmRequestType,
                                        uint16_t wValue, uint16_t wIndex,
                                        uint8_t *data, uint16_t wLength)
 {
+    xSemaphoreTake(dev->ctrl_mutex, portMAX_DELAY);
     usb_transfer_t *xfer = dev->ctrl_xfer;
 
     xfer->device_handle = dev->dev_hdl;
@@ -117,11 +119,13 @@ static esp_err_t rtlsdr_ctrl_transfer(rtlsdr_dev_t *dev, uint8_t bmRequestType,
     esp_err_t ret = usb_host_transfer_submit_control(dev->client_hdl, xfer);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Control transfer submit failed: %s", esp_err_to_name(ret));
+        xSemaphoreGive(dev->ctrl_mutex);
         return ret;
     }
 
     if (xSemaphoreTake(dev->ctrl_sem, pdMS_TO_TICKS(RTLSDR_CTRL_TIMEOUT_MS + 100)) != pdTRUE) {
         ESP_LOGE(TAG, "Control transfer timeout");
+        xSemaphoreGive(dev->ctrl_mutex);
         return ESP_ERR_TIMEOUT;
     }
 
@@ -138,6 +142,7 @@ static esp_err_t rtlsdr_ctrl_transfer(rtlsdr_dev_t *dev, uint8_t bmRequestType,
             usb_host_endpoint_flush(dev->dev_hdl, 0);
             usb_host_endpoint_clear(dev->dev_hdl, 0);
         }
+        xSemaphoreGive(dev->ctrl_mutex);
         return ESP_FAIL;
     }
 
@@ -145,6 +150,7 @@ static esp_err_t rtlsdr_ctrl_transfer(rtlsdr_dev_t *dev, uint8_t bmRequestType,
         memcpy(data, xfer->data_buffer + sizeof(usb_setup_packet_t), wLength);
     }
 
+    xSemaphoreGive(dev->ctrl_mutex);
     return ESP_OK;
 }
 
@@ -636,6 +642,7 @@ esp_err_t rtlsdr_init(rtlsdr_dev_t **out_dev)
     ESP_RETURN_ON_FALSE(dev, ESP_ERR_NO_MEM, TAG, "alloc failed");
 
     dev->ctrl_sem = xSemaphoreCreateBinary();
+    dev->ctrl_mutex = xSemaphoreCreateMutex();
     dev->xfer_sem = xSemaphoreCreateCounting(DEFAULT_BUF_NUM, 0);
 
     /* Allocate control transfer buffer */
@@ -784,6 +791,7 @@ err:
     if (dev->ctrl_xfer) {
         usb_host_transfer_free(dev->ctrl_xfer);
     }
+    if (dev->ctrl_mutex) vSemaphoreDelete(dev->ctrl_mutex);
     if (dev->ctrl_sem) vSemaphoreDelete(dev->ctrl_sem);
     if (dev->xfer_sem) vSemaphoreDelete(dev->xfer_sem);
     free(dev);
@@ -812,6 +820,7 @@ esp_err_t rtlsdr_deinit(rtlsdr_dev_t *dev)
     if (dev->ctrl_xfer) {
         usb_host_transfer_free(dev->ctrl_xfer);
     }
+    vSemaphoreDelete(dev->ctrl_mutex);
     vSemaphoreDelete(dev->ctrl_sem);
     vSemaphoreDelete(dev->xfer_sem);
     free(dev);
@@ -842,6 +851,11 @@ esp_err_t rtlsdr_set_center_freq(rtlsdr_dev_t *dev, uint32_t freq)
 esp_err_t rtlsdr_set_sample_rate(rtlsdr_dev_t *dev, uint32_t rate)
 {
     esp_err_t ret;
+
+    if (rate == 0 || rate > 3200000) {
+        ESP_LOGE(TAG, "Invalid sample rate: %lu", (unsigned long)rate);
+        return ESP_ERR_INVALID_ARG;
+    }
 
     /* Set tuner bandwidth BEFORE sample rate (reference order) */
     ret = rtlsdr_set_i2c_repeater(dev, true);

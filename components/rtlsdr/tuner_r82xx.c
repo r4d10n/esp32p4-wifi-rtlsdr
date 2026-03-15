@@ -1071,12 +1071,16 @@ esp_err_t r82xx_init(rtlsdr_dev_t *dev)
     /* Initialize registers — note: reg 0x06 = 0x30 (init_array[1]) */
     rc = r82xx_write(dev, 0x05,
                      r82xx_init_array, sizeof(r82xx_init_array));
+    if (rc < 0)
+        goto err;
 
     rc = r82xx_set_tv_standard(dev, 3, TUNER_DIGITAL_TV, 0);
     if (rc < 0)
         goto err;
 
     rc = r82xx_sysfreq_sel(dev, 0, TUNER_DIGITAL_TV, SYS_DVBT);
+    if (rc < 0)
+        goto err;
 
     r82xx_init_done = 1;
 

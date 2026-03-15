@@ -10,6 +10,7 @@
 #include <string.h>
 #include <math.h>
 #include <unistd.h>
+#include <stdatomic.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -33,7 +34,7 @@ extern const uint8_t sdr_css_end[]      asm("_binary_sdr_css_end");
 
 /* ──────────────────────── Constants ──────────────────────── */
 
-#define MAX_WS_CLIENTS      4
+#define MAX_WS_CLIENTS      3
 #define IQ_BUF_SIZE         (256 * 1024)    /* IQ ring — 125ms at 1MSPS, PSRAM backed */
 #define TASK_PERIOD_MS      10              /* Internal loop rate (100Hz) for DDC throughput */
 #define DDC_OUT_BUF_SIZE    8192
@@ -65,11 +66,14 @@ struct websdr_server {
 
     /* IQ sample buffer (producer: push_samples, consumer: FFT task) */
     uint8_t            *iq_buf;
-    volatile uint32_t   iq_write_pos;
-    volatile uint32_t   iq_read_pos;
+    _Atomic uint32_t    iq_write_pos;
+    _Atomic uint32_t    iq_read_pos;
 
     /* FFT output buffer */
     uint8_t            *fft_out;
+
+    /* Deferred FFT size change (applied in task loop to avoid race) */
+    volatile int        pending_fft_size;
 
     /* Processing task */
     TaskHandle_t        fft_task;
@@ -80,8 +84,8 @@ struct websdr_server {
 
 static uint32_t iq_ring_available(websdr_server_t *srv)
 {
-    uint32_t w = srv->iq_write_pos;
-    uint32_t r = srv->iq_read_pos;
+    uint32_t w = atomic_load_explicit(&srv->iq_write_pos, memory_order_acquire);
+    uint32_t r = atomic_load_explicit(&srv->iq_read_pos, memory_order_acquire);
     if (w >= r) return w - r;
     return IQ_BUF_SIZE - r + w;
 }
@@ -92,7 +96,7 @@ static uint32_t iq_ring_read(websdr_server_t *srv, uint8_t *dst, uint32_t len)
     if (len > avail) len = avail;
     if (len == 0) return 0;
 
-    uint32_t r = srv->iq_read_pos;
+    uint32_t r = atomic_load_explicit(&srv->iq_read_pos, memory_order_acquire);
     uint32_t first = IQ_BUF_SIZE - r;
     if (first > len) first = len;
 
@@ -100,7 +104,7 @@ static uint32_t iq_ring_read(websdr_server_t *srv, uint8_t *dst, uint32_t len)
     if (len > first) {
         memcpy(dst + first, srv->iq_buf, len - first);
     }
-    srv->iq_read_pos = (r + len) % IQ_BUF_SIZE;
+    atomic_store_explicit(&srv->iq_read_pos, (r + len) % IQ_BUF_SIZE, memory_order_release);
     return len;
 }
 
@@ -252,19 +256,8 @@ static void handle_ws_command(websdr_server_t *srv, ws_client_t *client,
             int new_size = (int)val->valuedouble;
             /* Validate: must be power of 2 in range 256..16384 */
             if (new_size >= 256 && new_size <= 16384 && (new_size & (new_size - 1)) == 0) {
-                ESP_LOGI(TAG, "Set FFT size: %d", new_size);
-
-                /* Reinitialize DSP FFT engine */
-                dsp_fft_init(new_size);
-                srv->fft_size = dsp_fft_get_size();
-
-                /* Reallocate FFT output buffer */
-                uint8_t *new_fft_out = realloc(srv->fft_out, srv->fft_size);
-                if (new_fft_out) {
-                    srv->fft_out = new_fft_out;
-                }
-
-                send_config_to_all(srv);
+                ESP_LOGI(TAG, "Set FFT size: %d (deferred to task loop)", new_size);
+                srv->pending_fft_size = new_size;
             }
         }
     } else if (strcmp(cmd_str, "db_range") == 0) {
@@ -386,6 +379,11 @@ static esp_err_t ws_handler(httpd_req_t *req)
 
     if (frame.len == 0) return ESP_OK;
 
+    if (frame.len > 1024) {
+        ESP_LOGW(TAG, "WS frame too large: %d bytes", frame.len);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
     /* Allocate buffer and receive payload */
     uint8_t *buf = malloc(frame.len + 1);
     if (!buf) return ESP_ERR_NO_MEM;
@@ -485,6 +483,23 @@ static void fft_process_task(void *arg)
 
     while (srv->running) {
         TickType_t start = xTaskGetTickCount();
+
+        /* Apply deferred FFT size change safely within the task context */
+        int pend = srv->pending_fft_size;
+        if (pend > 0) {
+            srv->pending_fft_size = 0;
+            ESP_LOGI(TAG, "Applying deferred FFT size: %d", pend);
+            dsp_fft_init(pend);
+            srv->fft_size = dsp_fft_get_size();
+
+            /* Reallocate FFT output buffer */
+            uint8_t *new_fft_out = realloc(srv->fft_out, srv->fft_size);
+            if (new_fft_out) {
+                srv->fft_out = new_fft_out;
+            }
+
+            send_config_to_all(srv);
+        }
 
         /* Read all available IQ data from ring */
         uint32_t avail = iq_ring_available(srv);
@@ -670,7 +685,7 @@ void websdr_push_samples(websdr_server_t *srv, const uint8_t *iq_data, uint32_t 
     if (!srv || !srv->running) return;
 
     /* Write to ring buffer using memcpy (overwrite old data if full) */
-    uint32_t w = srv->iq_write_pos;
+    uint32_t w = atomic_load_explicit(&srv->iq_write_pos, memory_order_acquire);
     uint32_t first = IQ_BUF_SIZE - w;
     if (first > len) first = len;
 
@@ -678,5 +693,5 @@ void websdr_push_samples(websdr_server_t *srv, const uint8_t *iq_data, uint32_t 
     if (len > first) {
         memcpy(srv->iq_buf, iq_data + first, len - first);
     }
-    srv->iq_write_pos = (w + len) % IQ_BUF_SIZE;
+    atomic_store_explicit(&srv->iq_write_pos, (w + len) % IQ_BUF_SIZE, memory_order_release);
 }
