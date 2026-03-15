@@ -1,7 +1,11 @@
 /*
  * DSP Engine for ESP32-P4 WebSDR
  *
- * Radix-2 Cooley-Tukey FFT and simple DDC (NCO mixer + CIC-like decimator).
+ * Uses Espressif esp-dsp library with PIE (Processor Instruction Extensions)
+ * hardware acceleration for FFT and signal processing on ESP32-P4's RISC-V core.
+ *
+ * PIE provides 128-bit SIMD operations on 8x16-bit or 4x32-bit vectors,
+ * giving ~2-8x speedup over ANSI C for FFT, windowing, and multiply operations.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -9,45 +13,53 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include "esp_log.h"
 #include "dsp.h"
 
-/* ──────────────────────── FFT Engine ──────────────────────── */
+/* esp-dsp PIE-optimized functions */
+#include "dsps_fft2r.h"
+#include "dsps_wind_hann.h"
 
-#define FFT_MAX_SIZE    1024
+static const char *TAG = "dsp";
+
+/* ──────────────────────── FFT Engine (esp-dsp accelerated) ──────────────────────── */
+
+#define FFT_SIZE        1024
 #define FFT_AVG_COUNT   4       /* Average this many FFT frames before output */
 #define DB_MIN          (-40.0f)
 #define DB_MAX          (40.0f)
+#define DB_RANGE        (DB_MAX - DB_MIN)
 
-static int      fft_n = 1024;
-static float    fft_window[FFT_MAX_SIZE];
-static float    fft_twiddle_re[FFT_MAX_SIZE / 2];
-static float    fft_twiddle_im[FFT_MAX_SIZE / 2];
-static float    fft_power[FFT_MAX_SIZE];
-static int      fft_avg_count;
-static float    fft_input_re[FFT_MAX_SIZE];
-static float    fft_input_im[FFT_MAX_SIZE];
-static int      fft_input_pos;
+/* All buffers aligned to 16 bytes for PIE 128-bit access */
+static float __attribute__((aligned(16))) fft_window[FFT_SIZE];
+static float __attribute__((aligned(16))) fft_work[FFT_SIZE * 2];    /* interleaved [re,im,re,im,...] */
+static float __attribute__((aligned(16))) fft_power[FFT_SIZE];
+static int      fft_n = FFT_SIZE;
+static int      fft_avg_count = 0;
+static int      fft_input_pos = 0;
+/* Accumulate IQ as interleaved float pairs for esp-dsp format */
+static float __attribute__((aligned(16))) fft_input[FFT_SIZE * 2];
 
 void dsp_fft_init(int fft_size)
 {
-    if (fft_size > FFT_MAX_SIZE) fft_size = FFT_MAX_SIZE;
+    if (fft_size > FFT_SIZE) fft_size = FFT_SIZE;
     /* Clamp to power of 2 */
     int n = 1;
     while (n < fft_size) n <<= 1;
+    if (n > FFT_SIZE) n = FFT_SIZE;
     fft_n = n;
 
-    /* Hanning window */
-    for (int i = 0; i < fft_n; i++) {
-        fft_window[i] = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * i / (fft_n - 1)));
+    /* Generate Hann window using esp-dsp (hardware-optimized) */
+    dsps_wind_hann_f32(fft_window, fft_n);
+
+    /* Initialize esp-dsp FFT tables (allocates twiddle factors internally) */
+    esp_err_t ret = dsps_fft2r_init_fc32(NULL, CONFIG_DSP_MAX_FFT_SIZE);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp-dsp FFT init failed: %s", esp_err_to_name(ret));
+        return;
     }
 
-    /* Twiddle factors for radix-2 FFT */
-    for (int i = 0; i < fft_n / 2; i++) {
-        float angle = -2.0f * (float)M_PI * i / fft_n;
-        fft_twiddle_re[i] = cosf(angle);
-        fft_twiddle_im[i] = sinf(angle);
-    }
-
+    ESP_LOGI(TAG, "FFT initialized: %d-point, esp-dsp PIE-accelerated", fft_n);
     dsp_fft_reset();
 }
 
@@ -58,73 +70,41 @@ void dsp_fft_reset(void)
     fft_input_pos = 0;
 }
 
-/* In-place radix-2 DIT FFT */
-static void fft_radix2(float *re, float *im, int n)
-{
-    /* Bit-reversal permutation */
-    int j = 0;
-    for (int i = 0; i < n - 1; i++) {
-        if (i < j) {
-            float tmp;
-            tmp = re[i]; re[i] = re[j]; re[j] = tmp;
-            tmp = im[i]; im[i] = im[j]; im[j] = tmp;
-        }
-        int m = n >> 1;
-        while (m >= 1 && j >= m) {
-            j -= m;
-            m >>= 1;
-        }
-        j += m;
-    }
-
-    /* Butterfly stages */
-    for (int stage = 1; stage < n; stage <<= 1) {
-        int step = stage << 1;
-        int tw_step = n / step;
-        for (int k = 0; k < n; k += step) {
-            for (int s = 0; s < stage; s++) {
-                int tw_idx = s * tw_step;
-                float wr = fft_twiddle_re[tw_idx];
-                float wi = fft_twiddle_im[tw_idx];
-                int a = k + s;
-                int b = a + stage;
-                float tr = wr * re[b] - wi * im[b];
-                float ti = wr * im[b] + wi * re[b];
-                re[b] = re[a] - tr;
-                im[b] = im[a] - ti;
-                re[a] += tr;
-                im[a] += ti;
-            }
-        }
-    }
-}
-
 void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
                      uint8_t *fft_out, int *fft_out_len)
 {
     *fft_out_len = 0;
 
-    /* Accumulate IQ samples into input buffer */
+    /* Accumulate IQ samples into interleaved float buffer
+     * Format: [re0, im0, re1, im1, ...] as esp-dsp expects */
     uint32_t i = 0;
     while (i + 1 < len) {
         float fi = (iq_data[i]     - 127.5f) / 127.5f;
         float fq = (iq_data[i + 1] - 127.5f) / 127.5f;
-        fft_input_re[fft_input_pos] = fi * fft_window[fft_input_pos];
-        fft_input_im[fft_input_pos] = fq * fft_window[fft_input_pos];
+
+        /* Apply window during accumulation */
+        float w = fft_window[fft_input_pos];
+        fft_input[fft_input_pos * 2]     = fi * w;
+        fft_input[fft_input_pos * 2 + 1] = fq * w;
         fft_input_pos++;
         i += 2;
 
         if (fft_input_pos >= fft_n) {
-            /* Run FFT — use static buffers to avoid stack overflow */
-            static float work_re[FFT_MAX_SIZE], work_im[FFT_MAX_SIZE];
-            memcpy(work_re, fft_input_re, fft_n * sizeof(float));
-            memcpy(work_im, fft_input_im, fft_n * sizeof(float));
-            fft_radix2(work_re, work_im, fft_n);
+            /* Copy to work buffer (FFT is in-place) */
+            memcpy(fft_work, fft_input, fft_n * 2 * sizeof(float));
+
+            /* Run PIE-accelerated FFT
+             * dsps_fft2r_fc32 auto-selects arp4 (PIE) on ESP32-P4 */
+            dsps_fft2r_fc32(fft_work, fft_n);
+
+            /* Bit-reverse reorder */
+            dsps_bit_rev2r_fc32(fft_work, fft_n);
 
             /* Accumulate power spectrum */
             for (int k = 0; k < fft_n; k++) {
-                float pwr = work_re[k] * work_re[k] + work_im[k] * work_im[k];
-                fft_power[k] += pwr;
+                float re = fft_work[k * 2];
+                float im = fft_work[k * 2 + 1];
+                fft_power[k] += re * re + im * im;
             }
             fft_avg_count++;
             fft_input_pos = 0;
@@ -143,10 +123,9 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
                     /* Clamp and scale to 0-255 */
                     if (db < DB_MIN) db = DB_MIN;
                     if (db > DB_MAX) db = DB_MAX;
-                    float scaled = (db - DB_MIN) / (DB_MAX - DB_MIN) * 255.0f;
+                    float scaled = (db - DB_MIN) / DB_RANGE * 255.0f;
 
-                    /* FFT output is in natural order: DC at bin 0.
-                     * Rearrange so DC is in the center (fftshift). */
+                    /* FFT shift: move DC to center */
                     int dst = (k + fft_n / 2) % fft_n;
                     fft_out[dst] = (uint8_t)(scaled + 0.5f);
                 }
@@ -160,77 +139,61 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
     }
 }
 
-/* ──────────────────────── DDC Engine ──────────────────────── */
-
-#define NCO_TABLE_SIZE  1024
+/* ──────────────────────── DDC (Digital Down Converter) ──────────────────────── */
 
 struct dsp_ddc {
     uint32_t    sample_rate;
-    int32_t     offset_hz;
+    int32_t     center_offset;
     uint32_t    output_bw;
-    int         decim_ratio;
+    uint32_t    decim_ratio;
 
-    /* NCO (Numerically Controlled Oscillator) */
-    float       nco_re[NCO_TABLE_SIZE];
-    float       nco_im[NCO_TABLE_SIZE];
-    uint32_t    nco_phase;      /* Phase accumulator (fractional index * 2^16) */
-    uint32_t    nco_step;       /* Phase increment per sample */
+    /* NCO (Numerically Controlled Oscillator) — precomputed for PIE alignment */
+    float __attribute__((aligned(16))) nco_re[FFT_SIZE];
+    float __attribute__((aligned(16))) nco_im[FFT_SIZE];
+    uint32_t    nco_len;        /* Length of one NCO period */
+    uint32_t    nco_pos;        /* Current position in NCO table */
 
-    /* CIC-like accumulator */
-    float       acc_re;
-    float       acc_im;
-    int         acc_count;
+    /* CIC-like decimator accumulator */
+    float       accum_re;
+    float       accum_im;
+    uint32_t    accum_count;
 };
-
-/* Round up to nearest power of 2 */
-static int next_pow2(int v)
-{
-    int p = 1;
-    while (p < v) p <<= 1;
-    return p;
-}
 
 dsp_ddc_t *dsp_ddc_create(uint32_t sample_rate, uint32_t center_offset_hz,
                            uint32_t output_bw_hz)
 {
-    if (sample_rate == 0 || output_bw_hz == 0) return NULL;
-
     dsp_ddc_t *ddc = calloc(1, sizeof(dsp_ddc_t));
     if (!ddc) return NULL;
 
     ddc->sample_rate = sample_rate;
-    ddc->offset_hz = (int32_t)center_offset_hz;
+    ddc->center_offset = (int32_t)center_offset_hz;
     ddc->output_bw = output_bw_hz;
 
-    /* Compute decimation ratio (clamp to power of 2) */
-    int ratio = (int)(sample_rate / output_bw_hz);
+    /* Decimation ratio (nearest power of 2) */
+    uint32_t ratio = sample_rate / output_bw_hz;
     if (ratio < 1) ratio = 1;
-    ddc->decim_ratio = next_pow2(ratio);
-    /* Don't decimate more than input rate allows */
-    if (ddc->decim_ratio > (int)(sample_rate / 1000)) {
-        ddc->decim_ratio = next_pow2(sample_rate / 1000);
+    /* Round down to power of 2 */
+    uint32_t p2 = 1;
+    while (p2 * 2 <= ratio) p2 *= 2;
+    ddc->decim_ratio = p2;
+
+    /* Precompute NCO table for one period
+     * We compute enough samples for efficient batch processing */
+    ddc->nco_len = FFT_SIZE;  /* Use full FFT_SIZE for batch processing */
+    double phase_inc = 2.0 * M_PI * (double)center_offset_hz / (double)sample_rate;
+    for (uint32_t i = 0; i < ddc->nco_len; i++) {
+        double phase = phase_inc * i;
+        ddc->nco_re[i] = (float)cos(phase);
+        ddc->nco_im[i] = (float)(-sin(phase)); /* Negative for downconversion */
     }
-    if (ddc->decim_ratio < 1) ddc->decim_ratio = 1;
+    ddc->nco_pos = 0;
+    ddc->accum_re = 0;
+    ddc->accum_im = 0;
+    ddc->accum_count = 0;
 
-    /* Precompute NCO table (one full cycle) */
-    for (int i = 0; i < NCO_TABLE_SIZE; i++) {
-        float angle = -2.0f * (float)M_PI * i / NCO_TABLE_SIZE;
-        ddc->nco_re[i] = cosf(angle);
-        ddc->nco_im[i] = sinf(angle);
-    }
-
-    /* NCO phase step: offset_hz cycles per sample, mapped to table */
-    /* step = (offset / sample_rate) * TABLE_SIZE * 65536 (fixed-point) */
-    double step = ((double)ddc->offset_hz / (double)sample_rate)
-                  * NCO_TABLE_SIZE * 65536.0;
-    /* Handle negative offsets via unsigned wrap */
-    ddc->nco_step = (uint32_t)(int32_t)step;
-    ddc->nco_phase = 0;
-
-    ddc->acc_re = 0;
-    ddc->acc_im = 0;
-    ddc->acc_count = 0;
-
+    ESP_LOGI(TAG, "DDC created: offset=%ldHz bw=%luHz decim=%lu",
+             (long)ddc->center_offset, (unsigned long)output_bw_hz,
+             (unsigned long)ddc->decim_ratio);
     return ddc;
 }
 
@@ -242,56 +205,43 @@ void dsp_ddc_free(dsp_ddc_t *ddc)
 int dsp_ddc_process(dsp_ddc_t *ddc, const uint8_t *iq_in, uint32_t in_len,
                     uint8_t *iq_out, uint32_t *out_len)
 {
-    if (!ddc || !iq_in || !iq_out || !out_len) return -1;
+    uint32_t max_out = *out_len;
+    uint32_t out_pos = 0;
 
-    uint32_t capacity = *out_len;
-    uint32_t written = 0;
-    int decim = ddc->decim_ratio;
-    float inv_decim = 1.0f / decim;
+    for (uint32_t i = 0; i + 1 < in_len && out_pos + 1 < max_out; i += 2) {
+        /* Convert uint8 IQ to float */
+        float in_re = (iq_in[i]     - 127.5f) / 127.5f;
+        float in_im = (iq_in[i + 1] - 127.5f) / 127.5f;
 
-    for (uint32_t i = 0; i + 1 < in_len; i += 2) {
-        /* Convert to float */
-        float si = (iq_in[i]     - 127.5f) / 127.5f;
-        float sq = (iq_in[i + 1] - 127.5f) / 127.5f;
+        /* Complex multiply with NCO (frequency shift) */
+        float nco_r = ddc->nco_re[ddc->nco_pos];
+        float nco_i = ddc->nco_im[ddc->nco_pos];
+        float mix_re = in_re * nco_r - in_im * nco_i;
+        float mix_im = in_re * nco_i + in_im * nco_r;
 
-        /* Mix with NCO (complex multiply) */
-        uint32_t idx = (ddc->nco_phase >> 16) & (NCO_TABLE_SIZE - 1);
-        float nre = ddc->nco_re[idx];
-        float nim = ddc->nco_im[idx];
-        ddc->nco_phase += ddc->nco_step;
+        ddc->nco_pos = (ddc->nco_pos + 1) % ddc->nco_len;
 
-        float mixed_re = si * nre - sq * nim;
-        float mixed_im = si * nim + sq * nre;
+        /* Accumulate for CIC decimation */
+        ddc->accum_re += mix_re;
+        ddc->accum_im += mix_im;
+        ddc->accum_count++;
 
-        /* Accumulate (CIC-like decimation) */
-        ddc->acc_re += mixed_re;
-        ddc->acc_im += mixed_im;
-        ddc->acc_count++;
-
-        if (ddc->acc_count >= decim) {
-            /* Output decimated sample */
-            float out_re = ddc->acc_re * inv_decim;
-            float out_im = ddc->acc_im * inv_decim;
+        /* Output decimated sample */
+        if (ddc->accum_count >= ddc->decim_ratio) {
+            float out_re = ddc->accum_re / ddc->decim_ratio;
+            float out_im = ddc->accum_im / ddc->decim_ratio;
 
             /* Convert back to uint8 */
-            int ival = (int)(out_re * 127.5f + 127.5f);
-            int qval = (int)(out_im * 127.5f + 127.5f);
-            if (ival < 0) ival = 0;
-            if (ival > 255) ival = 255;
-            if (qval < 0) qval = 0;
-            if (qval > 255) qval = 255;
+            iq_out[out_pos]     = (uint8_t)((out_re * 127.5f) + 127.5f);
+            iq_out[out_pos + 1] = (uint8_t)((out_im * 127.5f) + 127.5f);
+            out_pos += 2;
 
-            if (written + 1 < capacity) {
-                iq_out[written++] = (uint8_t)ival;
-                iq_out[written++] = (uint8_t)qval;
-            }
-
-            ddc->acc_re = 0;
-            ddc->acc_im = 0;
-            ddc->acc_count = 0;
+            ddc->accum_re = 0;
+            ddc->accum_im = 0;
+            ddc->accum_count = 0;
         }
     }
 
-    *out_len = written;
+    *out_len = out_pos;
     return 0;
 }

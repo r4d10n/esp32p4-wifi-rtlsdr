@@ -1,4 +1,5 @@
 dependencies:
-  idf: ">=5.5.0"
-  espressif/mdns: "*"
-  espressif/esp_wifi_remote: "*"
+  idf: '>=5.5.0'
+  espressif/mdns: '*'
+  espressif/esp_wifi_remote: '*'
+  espressif/esp-dsp: '*'
