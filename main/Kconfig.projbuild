@@ -5,7 +5,7 @@ menu "RTL-SDR WiFi Bridge Configuration"
         default "myssid"
         help
             SSID of the WiFi network to connect to.
-            Set via: idf.py menuconfig
+            Set your credentials via: idf.py menuconfig
 
     config WIFI_PASSWORD
         string "WiFi Password"
@@ -77,5 +77,56 @@ menu "RTL-SDR WiFi Bridge Configuration"
         help
             Increase SDIO clock from 25 MHz to 40 MHz for higher WiFi throughput.
             May not work on all PCB layouts. Test with your board.
+
+    config RTLSDR_ETHERNET_ENABLE
+        bool "Enable Ethernet (100 Mbps, e.g. Olimex ESP32-P4 board)"
+        default n
+        help
+            Enable the on-board Ethernet port (IP101 PHY, RMII).
+            Provides ~11 MB/s TCP throughput for 2.4+ MSPS streaming.
+            Runs alongside WiFi — both interfaces active simultaneously.
+
+    config RTLSDR_ETH_PHY_ADDR
+        int "Ethernet PHY address"
+        default 1
+        depends on RTLSDR_ETHERNET_ENABLE
+        help
+            I2C address of the Ethernet PHY chip. Default 1 for IP101.
+
+    config RTLSDR_ETH_MDC_GPIO
+        int "Ethernet MDC GPIO"
+        default 31
+        depends on RTLSDR_ETHERNET_ENABLE
+
+    config RTLSDR_ETH_MDIO_GPIO
+        int "Ethernet MDIO GPIO"
+        default 27
+        depends on RTLSDR_ETHERNET_ENABLE
+
+    config RTLSDR_ETH_PHY_RST_GPIO
+        int "Ethernet PHY Reset GPIO (-1 to disable)"
+        default -1
+        depends on RTLSDR_ETHERNET_ENABLE
+
+    config RTLSDR_MULTICAST_ENABLE
+        bool "Enable UDP Multicast (one-to-many on Ethernet)"
+        default n
+        depends on RTLSDR_TRANSPORT_UDP || RTLSDR_TRANSPORT_BOTH
+        help
+            Send IQ data to a multicast group instead of unicast.
+            Only useful on Ethernet — WiFi multicast is very slow.
+            Multiple clients can receive the same IQ stream.
+
+    config RTLSDR_MULTICAST_GROUP
+        string "Multicast group address"
+        default "239.1.2.3"
+        depends on RTLSDR_MULTICAST_ENABLE
+        help
+            IPv4 multicast group for IQ data. Use 239.x.x.x range.
+
+    config RTLSDR_MULTICAST_PORT
+        int "Multicast port"
+        default 1236
+        depends on RTLSDR_MULTICAST_ENABLE
 
 endmenu

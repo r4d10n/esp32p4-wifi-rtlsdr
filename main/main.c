@@ -18,6 +18,9 @@
 #include "nvs_flash.h"
 #include "usb/usb_host.h"
 #include "mdns.h"
+#include "esp_eth.h"
+#include "esp_eth_driver.h"
+#include "driver/gpio.h"
 #include "rtlsdr.h"
 #include "rtltcp.h"
 #include "rtludp.h"
@@ -91,6 +94,144 @@ static esp_err_t wifi_init_sta(void)
     return ESP_OK;
 }
 
+/* ──────────────────────── Ethernet Init ──────────────────────── */
+
+#ifdef CONFIG_RTLSDR_ETHERNET_ENABLE
+static void eth_event_handler(void *arg, esp_event_base_t event_base,
+                               int32_t event_id, void *event_data)
+{
+    uint8_t mac[6];
+    esp_eth_handle_t eth_handle = *(esp_eth_handle_t *)event_data;
+
+    switch (event_id) {
+    case ETHERNET_EVENT_CONNECTED:
+        esp_eth_ioctl(eth_handle, ETH_CMD_G_MAC_ADDR, mac);
+        ESP_LOGI(TAG, "Ethernet Link Up (MAC: %02x:%02x:%02x:%02x:%02x:%02x)",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        break;
+    case ETHERNET_EVENT_DISCONNECTED:
+        ESP_LOGW(TAG, "Ethernet Link Down");
+        break;
+    case ETHERNET_EVENT_START:
+        ESP_LOGI(TAG, "Ethernet Started");
+        break;
+    case ETHERNET_EVENT_STOP:
+        ESP_LOGI(TAG, "Ethernet Stopped");
+        break;
+    default:
+        break;
+    }
+}
+
+static void eth_got_ip_handler(void *arg, esp_event_base_t event_base,
+                                int32_t event_id, void *event_data)
+{
+    ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+    ESP_LOGI(TAG, "Ethernet Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+}
+
+static esp_err_t ethernet_init(void)
+{
+    ESP_LOGI(TAG, "Initializing Ethernet (IP101 PHY, RMII)...");
+
+    /* EMAC config */
+    eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
+    eth_esp32_emac_config_t esp32_emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
+    esp32_emac_config.smi_gpio.mdc_num = CONFIG_RTLSDR_ETH_MDC_GPIO;
+    esp32_emac_config.smi_gpio.mdio_num = CONFIG_RTLSDR_ETH_MDIO_GPIO;
+
+    esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&esp32_emac_config, &mac_config);
+    ESP_RETURN_ON_FALSE(mac, ESP_FAIL, TAG, "MAC create failed");
+
+    /* PHY config (IP101) */
+    eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
+    phy_config.phy_addr = CONFIG_RTLSDR_ETH_PHY_ADDR;
+    phy_config.reset_gpio_num = CONFIG_RTLSDR_ETH_PHY_RST_GPIO;
+
+    esp_eth_phy_t *phy = esp_eth_phy_new_ip101(&phy_config);
+    ESP_RETURN_ON_FALSE(phy, ESP_FAIL, TAG, "PHY create failed");
+
+    /* Ethernet driver */
+    esp_eth_config_t eth_config = ETH_DEFAULT_CONFIG(mac, phy);
+    esp_eth_handle_t eth_handle = NULL;
+    ESP_RETURN_ON_ERROR(esp_eth_driver_install(&eth_config, &eth_handle),
+                        TAG, "ETH driver install failed");
+
+    /* Attach to TCP/IP stack */
+    esp_netif_config_t netif_config = ESP_NETIF_DEFAULT_ETH();
+    esp_netif_t *eth_netif = esp_netif_new(&netif_config);
+
+    esp_eth_netif_glue_handle_t eth_glue = esp_eth_new_netif_glue(eth_handle);
+    ESP_RETURN_ON_ERROR(esp_netif_attach(eth_netif, eth_glue),
+                        TAG, "Netif attach failed");
+
+    /* Register event handlers */
+    esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL);
+    esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &eth_got_ip_handler, NULL);
+
+    /* Start Ethernet */
+    ESP_RETURN_ON_ERROR(esp_eth_start(eth_handle), TAG, "ETH start failed");
+
+    ESP_LOGI(TAG, "Ethernet initialized (MDC=%d MDIO=%d PHY_ADDR=%d)",
+             CONFIG_RTLSDR_ETH_MDC_GPIO, CONFIG_RTLSDR_ETH_MDIO_GPIO,
+             CONFIG_RTLSDR_ETH_PHY_ADDR);
+    return ESP_OK;
+}
+#endif /* CONFIG_RTLSDR_ETHERNET_ENABLE */
+
+/* ──────────────────────── Multicast Setup ──────────────────────── */
+
+#ifdef CONFIG_RTLSDR_MULTICAST_ENABLE
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+static int multicast_fd = -1;
+static struct sockaddr_in multicast_addr;
+
+static esp_err_t multicast_init(void)
+{
+    ESP_LOGI(TAG, "Initializing Multicast UDP to %s:%d",
+             CONFIG_RTLSDR_MULTICAST_GROUP, CONFIG_RTLSDR_MULTICAST_PORT);
+
+    multicast_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    ESP_RETURN_ON_FALSE(multicast_fd >= 0, ESP_FAIL, TAG, "Multicast socket failed");
+
+    /* Set TTL for multicast */
+    int ttl = 4;
+    setsockopt(multicast_fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
+
+    /* Enable loopback so local listeners can receive too */
+    int loop = 1;
+    setsockopt(multicast_fd, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop));
+
+    /* Destination */
+    memset(&multicast_addr, 0, sizeof(multicast_addr));
+    multicast_addr.sin_family = AF_INET;
+    multicast_addr.sin_port = htons(CONFIG_RTLSDR_MULTICAST_PORT);
+    inet_aton(CONFIG_RTLSDR_MULTICAST_GROUP, &multicast_addr.sin_addr);
+
+    ESP_LOGI(TAG, "Multicast ready: %s:%d (TTL=%d)",
+             CONFIG_RTLSDR_MULTICAST_GROUP, CONFIG_RTLSDR_MULTICAST_PORT, ttl);
+    return ESP_OK;
+}
+
+/* Called from IQ callback to send multicast */
+static void multicast_push_samples(const uint8_t *data, uint32_t len)
+{
+    if (multicast_fd < 0) return;
+
+    /* Send raw IQ in 1024-byte chunks */
+    uint32_t offset = 0;
+    while (offset < len) {
+        uint32_t chunk = (len - offset > 1024) ? 1024 : (len - offset);
+        sendto(multicast_fd, data + offset, chunk, MSG_DONTWAIT,
+               (struct sockaddr *)&multicast_addr, sizeof(multicast_addr));
+        offset += chunk;
+    }
+}
+#endif /* CONFIG_RTLSDR_MULTICAST_ENABLE */
+
 /* ──────────────────────── mDNS Service ──────────────────────── */
 
 static void mdns_init_service(void)
@@ -130,6 +271,9 @@ static void iq_data_cb(uint8_t *buf, uint32_t len, void *ctx)
     if (udp_srv) {
         rtludp_push_samples(udp_srv, buf, len);
     }
+#ifdef CONFIG_RTLSDR_MULTICAST_ENABLE
+    multicast_push_samples(buf, len);
+#endif
 }
 
 /* ──────────────────────── SDR Streaming Task ──────────────────────── */
@@ -167,9 +311,22 @@ void app_main(void)
     /* Initialize WiFi */
     ESP_ERROR_CHECK(wifi_init_sta());
 
-    /* Wait for IP address */
-    ESP_LOGI(TAG, "Waiting for WiFi connection...");
+#ifdef CONFIG_RTLSDR_ETHERNET_ENABLE
+    /* Initialize Ethernet (runs alongside WiFi) */
+    ret = ethernet_init();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Ethernet init failed: %s (WiFi still active)", esp_err_to_name(ret));
+    }
+#endif
+
+    /* Wait for IP address (WiFi or Ethernet) */
+    ESP_LOGI(TAG, "Waiting for network connection...");
     vTaskDelay(pdMS_TO_TICKS(5000));
+
+#ifdef CONFIG_RTLSDR_MULTICAST_ENABLE
+    /* Initialize Multicast (best on Ethernet) */
+    multicast_init();
+#endif
 
     /* Start mDNS */
     mdns_init_service();
