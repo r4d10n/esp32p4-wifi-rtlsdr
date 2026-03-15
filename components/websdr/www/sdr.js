@@ -24,7 +24,7 @@ var eNS=$('range-slider'),eNV=$('range-val'),eLS=$('ref-slider'),eLV=$('ref-val'
 var eZV=$('zoom-val'),eWS=$('wf-speed'),eWV=$('wf-speed-val');
 var eTK=$('tune-slider'),eTL=$('tune-lbl'),eBW=$('bw-val');
 var sC=spCv.getContext('2d'),wC=wfCv.getContext('2d'),wI=null,pkBuf=null;
-var cm=new Array(256),aCtx=null,sN=null,aQ=[],pI=0,pQ=0;
+var cm=new Array(256),aCtx=null,sN=null,aQ=[],pI=0,pQ=0,iqRate=0;
 var modeBW={NFM:12500,AM:10000,WBFM:150000,USB:3000,LSB:3000};
 (function(){for(var i=0;i<256;i++){var t=i/255,r,g,b;
 if(t<.25){r=0;g=t/.25*255|0;b=255;}
@@ -82,11 +82,12 @@ tunedFreq=cFreq;tuneOff=0;sC2();uD();}
 else if(m.type==='freq'){cFreq=m.value;tunedFreq=cFreq;tuneOff=0;uD();}
 else if(m.type==='config'){fftSz=m.fft_size||fftSz;sRate=m.sample_rate||sRate;
 if(m.db_min!=null)dbMin=m.db_min;if(m.db_max!=null)dbMax=m.db_max;
-wI=null;pkBuf=null;sC2();uD();}}
+wI=null;pkBuf=null;sC2();uD();}
+else if(m.type==='iq_start'){iqRate=m.rate||0;console.log('[SDR] IQ stream started, DDC output rate='+iqRate+'Hz');}}
 function oB(buf){var d=new Uint8Array(buf);if(d.length<2)return;
 var t=d[0],p=d.subarray(1);
 if(t===1){dSp(p);var n=performance.now();if(n-wfLast>=wfSpd){dWf(p);wfLast=n;}uSm(p);}
-else if(t===2&&audOn)aQ.push(p.slice());}
+else if(t===2){if(audOn)aQ.push(p.slice());}}
 function gVF(){var n=fftSz,v=vB(n),sf=cFreq-sRate/2;
 var vs=sf+(v.s/n)*sRate,ve=sf+(v.e/n)*sRate;
 return{s:vs,e:ve,bw:ve-vs};}
@@ -139,19 +140,36 @@ if(m==='USB'||m==='LSB'){var u=m==='USB';for(n=0;n<q.length-1;n+=2){i=S(q,n);j=S
 for(n=0;n<q.length-3;n+=2){i=S(q,n);j=S(q,n+1);r.push(Math.atan2(j*pI-i*pQ,i*pI+j*pQ)/Math.PI);pI=i;pQ=j;}return r;}
 function stA(){if(aCtx)return;
 aCtx=new(window.AudioContext||window.webkitAudioContext)({sampleRate:48000});
+aCtx.resume().then(function(){console.log('[SDR] AudioContext state='+aCtx.state);});
 var g=aCtx.createGain();g.gain.value=vol;g.connect(aCtx.destination);
 sN=aCtx.createScriptProcessor(4096,1,1);
+var rBuf=[],logCnt=0;
 sN.onaudioprocess=function(e){var o=e.outputBuffer.getChannelData(0),p=0;
-while(p<o.length&&aQ.length>0){var s=dm(aQ.shift()),pw=0,sl=s.length;
-for(var i=0;i<sl;i++)pw+=s[i]*s[i];pw/=sl||1;
+/* Demodulate queued IQ frames into rBuf (resampled to 48kHz) */
+while(aQ.length>0&&rBuf.length<o.length*2){
+var s=dm(aQ.shift()),sl=s.length;
+/* Resample from DDC output rate to 48kHz */
+var sr=iqRate||48000,ratio=sr/48000;
+if(ratio>1.01){/* Downsample */
+for(var k=0,pos=0;pos<sl;k++,pos+=ratio)rBuf.push(s[pos|0]);}
+else if(ratio<0.99){/* Upsample */
+for(var k=0;k<sl/ratio;k++){var fi=k*ratio,lo=fi|0;
+rBuf.push(lo+1<sl?s[lo]+(s[lo+1]-s[lo])*(fi-lo):s[lo]);}}
+else{for(var k=0;k<sl;k++)rBuf.push(s[k]);}}
+/* Write resampled audio to output, apply squelch + volume */
+var pw=0,chunk=MN(rBuf.length,o.length);
+for(var i=0;i<chunk;i++)pw+=rBuf[i]*rBuf[i];pw/=chunk||1;
 var mute=sql>0&&pw<sql/255*.01;
-for(var i=0;i<sl&&p<o.length;i++,p++)o[p]=mute?0:s[i]*.8;}
-while(p<o.length)o[p++]=0;};
+for(;p<chunk;p++)o[p]=mute?0:rBuf[p]*.8;
+rBuf=chunk<rBuf.length?rBuf.slice(chunk):[];
+while(p<o.length)o[p++]=0;
+if(++logCnt%200===1)console.log('[SDR] audio: qLen='+aQ.length+' rBuf='+rBuf.length+' iqRate='+iqRate+' state='+aCtx.state);};
 sN.connect(g);sN._g=g;audOn=true;subIQ();
-eAB[TC]='Stop';eAB.classList.add('active');}
+eAB[TC]='Stop';eAB.classList.add('active');
+console.log('[SDR] Audio started, ctx='+aCtx.state);}
 function spA(){audOn=false;if(ws&&ws.readyState===1)tx('unsubscribe_iq',{});
 if(sN){sN.disconnect();if(sN._g)sN._g.disconnect();sN=null;}
-if(aCtx){aCtx.close();aCtx=null;}aQ=[];pI=pQ=0;
+if(aCtx){aCtx.close();aCtx=null;}aQ=[];pI=pQ=0;iqRate=0;
 eAB[TC]='Audio';eAB.classList.remove('active');}
 function nrEdge(x,W){var vf=gVF(),fl=f2x(tunedFreq-filterBW/2,W,vf),fr=f2x(tunedFreq+filterBW/2,W,vf);
 if(MA(x-fl)<7)return'left';if(MA(x-fr)<7)return'right';return null;}

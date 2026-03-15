@@ -71,6 +71,11 @@ dsp_ddc_t *dsp_ddc_create(uint32_t sample_rate, uint32_t center_offset_hz,
 void dsp_ddc_free(dsp_ddc_t *ddc);
 
 /**
+ * Get the DDC output sample rate (= input_rate / decimation_ratio).
+ */
+uint32_t dsp_ddc_get_output_rate(dsp_ddc_t *ddc);
+
+/**
  * Process IQ data through the DDC.
  *
  * @param ddc       DDC handle

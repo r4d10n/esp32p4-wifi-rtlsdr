@@ -34,8 +34,9 @@ extern const uint8_t sdr_css_end[]      asm("_binary_sdr_css_end");
 /* ──────────────────────── Constants ──────────────────────── */
 
 #define MAX_WS_CLIENTS      4
-#define IQ_BUF_SIZE         (32 * 1024)     /* Shared IQ ring for FFT input (reduced for RAM) */
-#define DDC_OUT_BUF_SIZE    4096
+#define IQ_BUF_SIZE         (256 * 1024)    /* IQ ring — 125ms at 1MSPS, PSRAM backed */
+#define TASK_PERIOD_MS      10              /* Internal loop rate (100Hz) for DDC throughput */
+#define DDC_OUT_BUF_SIZE    8192
 
 /* ──────────────────────── Server State ──────────────────────── */
 
@@ -302,10 +303,11 @@ static void handle_ws_command(websdr_server_t *srv, ws_client_t *client,
         xSemaphoreGive(srv->client_mutex);
 
         if (client->iq_subscribed) {
-            char buf[128];
+            uint32_t out_rate = dsp_ddc_get_output_rate(client->ddc);
+            char buf[160];
             snprintf(buf, sizeof(buf),
-                     "{\"type\":\"iq_start\",\"offset\":%ld,\"bw\":%lu}",
-                     (long)off_hz, (unsigned long)bw_hz);
+                     "{\"type\":\"iq_start\",\"offset\":%ld,\"bw\":%lu,\"rate\":%lu}",
+                     (long)off_hz, (unsigned long)bw_hz, (unsigned long)out_rate);
             send_ws_text(srv->httpd, client->fd, buf);
         }
     } else if (strcmp(cmd_str, "unsubscribe_iq") == 0) {
@@ -447,96 +449,75 @@ websdr_server_t *g_websdr_srv = NULL;
 static void fft_process_task(void *arg)
 {
     websdr_server_t *srv = (websdr_server_t *)arg;
-    uint32_t period_ms = 1000 / srv->fft_rate;
-    if (period_ms < 10) period_ms = 10;
 
-    /* Temporary buffer for reading IQ from ring */
-    uint32_t chunk_size = srv->fft_size * 2 * 4;  /* enough for a few FFT frames */
+    /* Internal loop runs at TASK_PERIOD_MS (10ms = 100Hz) for DDC throughput.
+     * FFT frames are only broadcast at the configured display rate (fft_rate). */
+    uint32_t fft_interval_ms = 1000 / srv->fft_rate;
+    if (fft_interval_ms < TASK_PERIOD_MS) fft_interval_ms = TASK_PERIOD_MS;
+
+    /* Buffer large enough for one full task period of IQ data.
+     * At 3.2MSPS max: 10ms × 3.2M × 2 = 64KB. Use 3/4 of ring. */
+    uint32_t chunk_size = (IQ_BUF_SIZE * 3) / 4;
     uint8_t *iq_tmp = malloc(chunk_size);
     if (!iq_tmp) {
-        ESP_LOGE(TAG, "Failed to allocate FFT IQ buffer");
+        ESP_LOGE(TAG, "Failed to allocate IQ buffer (%lu)", (unsigned long)chunk_size);
         vTaskDelete(NULL);
         return;
     }
 
-    /* DDC output buffer */
     uint8_t *ddc_out = malloc(DDC_OUT_BUF_SIZE);
-    if (!ddc_out) {
-        free(iq_tmp);
-        ESP_LOGE(TAG, "Failed to allocate DDC output buffer");
-        vTaskDelete(NULL);
-        return;
-    }
-
-    /* FFT frame buffer: type byte + fft data (allocate for max possible) */
-    uint32_t fft_frame_cap = 1 + 16384;
-    uint8_t *fft_frame = malloc(fft_frame_cap);
-    if (!fft_frame) {
-        free(iq_tmp);
-        free(ddc_out);
+    uint8_t *fft_frame = malloc(1 + 16384);
+    uint8_t *iq_frame = malloc(1 + DDC_OUT_BUF_SIZE);
+    if (!ddc_out || !fft_frame || !iq_frame) {
+        free(iq_tmp); free(ddc_out); free(fft_frame); free(iq_frame);
+        ESP_LOGE(TAG, "Failed to allocate task buffers");
         vTaskDelete(NULL);
         return;
     }
     fft_frame[0] = WEBSDR_MSG_FFT;
-
-    /* IQ frame header buffer */
-    uint8_t *iq_frame = malloc(1 + DDC_OUT_BUF_SIZE);
-    if (!iq_frame) {
-        free(iq_tmp);
-        free(ddc_out);
-        free(fft_frame);
-        vTaskDelete(NULL);
-        return;
-    }
     iq_frame[0] = WEBSDR_MSG_IQ;
 
-    ESP_LOGI(TAG, "FFT task started (size=%lu rate=%lu Hz period=%lu ms)",
+    ESP_LOGI(TAG, "DSP task started (FFT %lu bins @ %lu Hz, DDC loop %d ms)",
              (unsigned long)srv->fft_size, (unsigned long)srv->fft_rate,
-             (unsigned long)period_ms);
+             TASK_PERIOD_MS);
+
+    TickType_t last_fft_send = xTaskGetTickCount();
 
     while (srv->running) {
         TickType_t start = xTaskGetTickCount();
 
-        /* Recompute chunk_size if fft_size changed */
-        uint32_t cur_fft = srv->fft_size;
-        uint32_t needed = cur_fft * 2 * 4;
-        if (needed > chunk_size) {
-            uint8_t *new_tmp = realloc(iq_tmp, needed);
-            if (new_tmp) {
-                iq_tmp = new_tmp;
-                chunk_size = needed;
-            }
-        }
-
-        /* Read available IQ data from ring */
+        /* Read all available IQ data from ring */
         uint32_t avail = iq_ring_available(srv);
         if (avail > chunk_size) avail = chunk_size;
-        /* Align to IQ pairs */
-        avail &= ~1u;
+        avail &= ~1u;  /* align to IQ pairs */
 
         if (avail > 0) {
             uint32_t got = iq_ring_read(srv, iq_tmp, avail);
 
-            /* Compute FFT */
+            /* ── FFT: always feed data (internal accumulation) ── */
             int fft_len = 0;
             dsp_fft_compute(iq_tmp, got, srv->fft_out, &fft_len);
 
+            /* Broadcast FFT frame at display rate only */
             if (fft_len > 0) {
-                /* Pack FFT frame and broadcast */
-                memcpy(fft_frame + 1, srv->fft_out, fft_len);
-                size_t frame_len = 1 + fft_len;
+                TickType_t now = xTaskGetTickCount();
+                if ((now - last_fft_send) >= pdMS_TO_TICKS(fft_interval_ms)) {
+                    last_fft_send = now;
+                    memcpy(fft_frame + 1, srv->fft_out, fft_len);
+                    size_t frame_len = 1 + fft_len;
 
-                xSemaphoreTake(srv->client_mutex, portMAX_DELAY);
-                for (int i = 0; i < MAX_WS_CLIENTS; i++) {
-                    if (srv->clients[i].active) {
-                        send_ws_binary(srv->httpd, srv->clients[i].fd,
-                                       fft_frame, frame_len);
+                    xSemaphoreTake(srv->client_mutex, portMAX_DELAY);
+                    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+                        if (srv->clients[i].active) {
+                            send_ws_binary(srv->httpd, srv->clients[i].fd,
+                                           fft_frame, frame_len);
+                        }
                     }
+                    xSemaphoreGive(srv->client_mutex);
                 }
-                xSemaphoreGive(srv->client_mutex);
             }
 
-            /* Process DDC for subscribed clients */
+            /* ── DDC: runs every cycle for full audio throughput ── */
             xSemaphoreTake(srv->client_mutex, portMAX_DELAY);
             for (int i = 0; i < MAX_WS_CLIENTS; i++) {
                 ws_client_t *c = &srv->clients[i];
@@ -552,9 +533,9 @@ static void fft_process_task(void *arg)
             xSemaphoreGive(srv->client_mutex);
         }
 
-        /* Sleep for remainder of period */
+        /* Sleep for remainder of 10ms period */
         TickType_t elapsed = xTaskGetTickCount() - start;
-        TickType_t target = pdMS_TO_TICKS(period_ms);
+        TickType_t target = pdMS_TO_TICKS(TASK_PERIOD_MS);
         if (elapsed < target) {
             vTaskDelay(target - elapsed);
         }
@@ -564,7 +545,7 @@ static void fft_process_task(void *arg)
     free(ddc_out);
     free(fft_frame);
     free(iq_frame);
-    ESP_LOGI(TAG, "FFT task stopped");
+    ESP_LOGI(TAG, "DSP task stopped");
     vTaskDelete(NULL);
 }
 
@@ -688,9 +669,14 @@ void websdr_push_samples(websdr_server_t *srv, const uint8_t *iq_data, uint32_t 
 {
     if (!srv || !srv->running) return;
 
-    /* Write to ring buffer (overwrite old data if full) */
-    for (uint32_t i = 0; i < len; i++) {
-        srv->iq_buf[srv->iq_write_pos] = iq_data[i];
-        srv->iq_write_pos = (srv->iq_write_pos + 1) % IQ_BUF_SIZE;
+    /* Write to ring buffer using memcpy (overwrite old data if full) */
+    uint32_t w = srv->iq_write_pos;
+    uint32_t first = IQ_BUF_SIZE - w;
+    if (first > len) first = len;
+
+    memcpy(srv->iq_buf + w, iq_data, first);
+    if (len > first) {
+        memcpy(srv->iq_buf, iq_data + first, len - first);
     }
+    srv->iq_write_pos = (w + len) % IQ_BUF_SIZE;
 }

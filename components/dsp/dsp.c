@@ -389,6 +389,12 @@ dsp_ddc_t *dsp_ddc_create(uint32_t sample_rate, uint32_t center_offset_hz,
     return ddc;
 }
 
+uint32_t dsp_ddc_get_output_rate(dsp_ddc_t *ddc)
+{
+    if (!ddc || ddc->decim_ratio == 0) return 0;
+    return ddc->sample_rate / ddc->decim_ratio;
+}
+
 void dsp_ddc_free(dsp_ddc_t *ddc)
 {
     if (!ddc) return;
