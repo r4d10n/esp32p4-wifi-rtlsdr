@@ -28,7 +28,7 @@ static const char *TAG = "rtlsdr";
 
 /* Number of async bulk transfer buffers */
 #define DEFAULT_BUF_NUM     8
-#define DEFAULT_BUF_LEN     (16 * 512)  /* 8KB per transfer */
+#define DEFAULT_BUF_LEN     (32 * 512)  /* 16KB per transfer */
 
 /* Device state */
 struct rtlsdr_dev {

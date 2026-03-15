@@ -153,7 +153,7 @@ static void iq_sender_task(void *arg)
     while (srv->running && srv->client_connected) {
         size_t item_size = 0;
         uint8_t *data = xRingbufferReceiveUpTo(srv->ring_buf, &item_size,
-                                                pdMS_TO_TICKS(100), 4096);
+                                                pdMS_TO_TICKS(10), 16384);
         if (data && item_size > 0) {
             int sent = 0;
             while (sent < (int)item_size && srv->client_connected) {
@@ -228,8 +228,8 @@ static void listener_task(void *arg)
             continue;
         }
 
-        /* Set TCP_NODELAY for low-latency streaming */
-        opt = 1;
+        /* Disable TCP_NODELAY — let Nagle batch for throughput */
+        opt = 0;
         setsockopt(srv->client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
 
         /* Increase send buffer */

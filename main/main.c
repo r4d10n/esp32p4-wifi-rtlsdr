@@ -132,7 +132,7 @@ static void sdr_stream_task(void *arg)
              (unsigned long)rtlsdr_get_center_freq(sdr_dev));
 
     /* This blocks until rtlsdr_stop_async() is called */
-    esp_err_t ret = rtlsdr_read_async(sdr_dev, iq_data_cb, tcp_srv, 8, 16 * 512);
+    esp_err_t ret = rtlsdr_read_async(sdr_dev, iq_data_cb, tcp_srv, 0, 0); /* use defaults: 12 x 64KB */
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Async read ended with error: %s", esp_err_to_name(ret));
     }
