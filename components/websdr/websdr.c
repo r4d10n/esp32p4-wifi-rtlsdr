@@ -54,6 +54,10 @@ struct websdr_server {
     uint32_t            fft_size;
     uint32_t            fft_rate;
 
+    /* Configurable dB range */
+    float               db_min;
+    float               db_max;
+
     /* WebSocket clients */
     ws_client_t         clients[MAX_WS_CLIENTS];
     SemaphoreHandle_t   client_mutex;
@@ -158,12 +162,33 @@ static void send_device_info(websdr_server_t *srv, int fd)
 {
     char buf[256];
     snprintf(buf, sizeof(buf),
-             "{\"type\":\"info\",\"freq\":%lu,\"rate\":%lu,\"gain\":%d,\"fft_size\":%lu}",
+             "{\"type\":\"info\",\"freq\":%lu,\"rate\":%lu,\"gain\":%d,"
+             "\"fft_size\":%lu,\"db_min\":%.1f,\"db_max\":%.1f}",
              (unsigned long)rtlsdr_get_center_freq(srv->dev),
              (unsigned long)rtlsdr_get_sample_rate(srv->dev),
              rtlsdr_get_tuner_gain(srv->dev),
-             (unsigned long)srv->fft_size);
+             (unsigned long)srv->fft_size,
+             (double)srv->db_min, (double)srv->db_max);
     send_ws_text(srv->httpd, fd, buf);
+}
+
+static void send_config_to_all(websdr_server_t *srv)
+{
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "{\"type\":\"config\",\"fft_size\":%lu,\"sample_rate\":%lu,"
+             "\"db_min\":%.1f,\"db_max\":%.1f}",
+             (unsigned long)srv->fft_size,
+             (unsigned long)rtlsdr_get_sample_rate(srv->dev),
+             (double)srv->db_min, (double)srv->db_max);
+
+    xSemaphoreTake(srv->client_mutex, portMAX_DELAY);
+    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+        if (srv->clients[i].active) {
+            send_ws_text(srv->httpd, srv->clients[i].fd, buf);
+        }
+    }
+    xSemaphoreGive(srv->client_mutex);
 }
 
 /* ──────────────────────── WebSocket Command Handler ──────────────────────── */
@@ -211,12 +236,49 @@ static void handle_ws_command(websdr_server_t *srv, ws_client_t *client,
             rtlsdr_set_tuner_gain_mode(srv->dev, 1);
             rtlsdr_set_tuner_gain(srv->dev, gain);
         }
-    } else if (strcmp(cmd_str, "rate") == 0) {
+    } else if (strcmp(cmd_str, "rate") == 0 || strcmp(cmd_str, "sample_rate") == 0) {
         cJSON *val = cJSON_GetObjectItem(root, "value");
         if (val && cJSON_IsNumber(val)) {
             uint32_t rate = (uint32_t)val->valuedouble;
             ESP_LOGI(TAG, "Set sample rate: %lu", (unsigned long)rate);
             rtlsdr_set_sample_rate(srv->dev, rate);
+            dsp_fft_reset();
+            send_config_to_all(srv);
+        }
+    } else if (strcmp(cmd_str, "fft_size") == 0) {
+        cJSON *val = cJSON_GetObjectItem(root, "value");
+        if (val && cJSON_IsNumber(val)) {
+            int new_size = (int)val->valuedouble;
+            /* Validate: must be power of 2 in range 256..16384 */
+            if (new_size >= 256 && new_size <= 16384 && (new_size & (new_size - 1)) == 0) {
+                ESP_LOGI(TAG, "Set FFT size: %d", new_size);
+
+                /* Reinitialize DSP FFT engine */
+                dsp_fft_init(new_size);
+                srv->fft_size = dsp_fft_get_size();
+
+                /* Reallocate FFT output buffer */
+                uint8_t *new_fft_out = realloc(srv->fft_out, srv->fft_size);
+                if (new_fft_out) {
+                    srv->fft_out = new_fft_out;
+                }
+
+                send_config_to_all(srv);
+            }
+        }
+    } else if (strcmp(cmd_str, "db_range") == 0) {
+        cJSON *jmin = cJSON_GetObjectItem(root, "min");
+        cJSON *jmax = cJSON_GetObjectItem(root, "max");
+        if (jmin && cJSON_IsNumber(jmin) && jmax && cJSON_IsNumber(jmax)) {
+            float db_min = (float)jmin->valuedouble;
+            float db_max = (float)jmax->valuedouble;
+            if (db_min < db_max) {
+                srv->db_min = db_min;
+                srv->db_max = db_max;
+                dsp_fft_set_range(db_min, db_max);
+                ESP_LOGI(TAG, "Set dB range: %.1f to %.1f", (double)db_min, (double)db_max);
+                send_config_to_all(srv);
+            }
         }
     } else if (strcmp(cmd_str, "subscribe_iq") == 0) {
         cJSON *offset = cJSON_GetObjectItem(root, "offset");
@@ -406,8 +468,9 @@ static void fft_process_task(void *arg)
         return;
     }
 
-    /* FFT frame buffer: type byte + fft data */
-    uint8_t *fft_frame = malloc(1 + srv->fft_size);
+    /* FFT frame buffer: type byte + fft data (allocate for max possible) */
+    uint32_t fft_frame_cap = 1 + 16384;
+    uint8_t *fft_frame = malloc(fft_frame_cap);
     if (!fft_frame) {
         free(iq_tmp);
         free(ddc_out);
@@ -433,6 +496,17 @@ static void fft_process_task(void *arg)
 
     while (srv->running) {
         TickType_t start = xTaskGetTickCount();
+
+        /* Recompute chunk_size if fft_size changed */
+        uint32_t cur_fft = srv->fft_size;
+        uint32_t needed = cur_fft * 2 * 4;
+        if (needed > chunk_size) {
+            uint8_t *new_tmp = realloc(iq_tmp, needed);
+            if (new_tmp) {
+                iq_tmp = new_tmp;
+                chunk_size = needed;
+            }
+        }
 
         /* Read available IQ data from ring */
         uint32_t avail = iq_ring_available(srv);
@@ -507,6 +581,8 @@ esp_err_t websdr_server_start(websdr_server_t **out_server, const websdr_config_
     srv->dev = config->dev;
     srv->fft_size = config->fft_size ? config->fft_size : WEBSDR_DEFAULT_FFT_SIZE;
     srv->fft_rate = config->fft_rate ? config->fft_rate : WEBSDR_DEFAULT_FFT_RATE;
+    srv->db_min = -40.0f;
+    srv->db_max = 40.0f;
     srv->running = true;
 
     srv->client_mutex = xSemaphoreCreateMutex();
@@ -518,8 +594,8 @@ esp_err_t websdr_server_start(websdr_server_t **out_server, const websdr_config_
     srv->iq_write_pos = 0;
     srv->iq_read_pos = 0;
 
-    /* Allocate FFT output buffer */
-    srv->fft_out = malloc(srv->fft_size);
+    /* Allocate FFT output buffer (max possible size for runtime changes) */
+    srv->fft_out = malloc(16384);
     ESP_GOTO_ON_FALSE(srv->fft_out, ESP_ERR_NO_MEM, err, TAG, "FFT out alloc failed");
 
     /* Initialize DSP FFT engine */

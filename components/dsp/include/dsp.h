@@ -18,10 +18,16 @@ extern "C" {
 /* ──────────────────────── FFT ──────────────────────── */
 
 /**
- * Initialize FFT engine with given size (must be power of 2, typically 1024).
- * Precomputes twiddle factors and Hanning window.
+ * Initialize FFT engine with given size (must be power of 2).
+ * Supported sizes: 256, 512, 1024, 2048, 4096, 8192, 16384.
+ * Dynamically allocates aligned buffers.  Call dsp_fft_reset() implicitly.
  */
 void dsp_fft_init(int fft_size);
+
+/**
+ * Reset FFT accumulator (call when switching parameters).
+ */
+void dsp_fft_reset(void);
 
 /**
  * Feed IQ data and compute FFT when enough samples are accumulated.
@@ -35,9 +41,14 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
                      uint8_t *fft_out, int *fft_out_len);
 
 /**
- * Reset FFT accumulator (call when switching parameters).
+ * Set the dB range used for 0-255 scaling in FFT output.
  */
-void dsp_fft_reset(void);
+void dsp_fft_set_range(float db_min, float db_max);
+
+/**
+ * Return the current FFT size.
+ */
+int dsp_fft_get_size(void);
 
 /* ──────────────────────── DDC ──────────────────────── */
 

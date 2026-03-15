@@ -122,6 +122,15 @@ body {
     accent-color: #0f0;
 }
 
+.ctrl-group select {
+    background: #1a1a1a;
+    border: 1px solid #444;
+    color: #0f0;
+    padding: 3px 6px;
+    font-family: inherit;
+    font-size: 12px;
+}
+
 .ctrl-group button, #audio-btn {
     background: #1a1a1a;
     border: 1px solid #444;
@@ -158,6 +167,13 @@ body {
     border-color: #0f0;
 }
 
+#zoom-val {
+    font-size: 12px;
+    color: #0f0;
+    min-width: 24px;
+    text-align: center;
+}
+
 /* Mobile responsive */
 @media (max-width: 600px) {
     #header h1 { font-size: 13px; }
@@ -166,4 +182,5 @@ body {
     #controls { gap: 4px; padding: 4px 6px; }
     .ctrl-group input[type="range"] { width: 60px; }
     .ctrl-group input[type="number"] { width: 70px; }
+    .ctrl-group select { font-size: 11px; }
 }
