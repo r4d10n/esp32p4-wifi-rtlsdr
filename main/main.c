@@ -24,6 +24,7 @@
 #include "rtlsdr.h"
 #include "rtltcp.h"
 #include "rtludp.h"
+#include "websdr.h"
 
 static const char *TAG = "main";
 
@@ -38,6 +39,7 @@ static const char *TAG = "main";
 static rtlsdr_dev_t    *sdr_dev = NULL;
 static rtltcp_server_t *tcp_srv = NULL;
 static rtludp_server_t *udp_srv = NULL;
+static websdr_server_t *websdr_srv = NULL;
 
 /* ──────────────────────── WiFi Event Handler ──────────────────────── */
 
@@ -271,6 +273,10 @@ static void iq_data_cb(uint8_t *buf, uint32_t len, void *ctx)
     if (udp_srv) {
         rtludp_push_samples(udp_srv, buf, len);
     }
+    /* Push to WebSDR server if running */
+    if (websdr_srv) {
+        websdr_push_samples(websdr_srv, buf, len);
+    }
 #ifdef CONFIG_RTLSDR_MULTICAST_ENABLE
     multicast_push_samples(buf, len);
 #endif
@@ -365,11 +371,17 @@ void app_main(void)
     udp_config.dev = sdr_dev;
     ESP_ERROR_CHECK(rtludp_server_start(&udp_srv, &udp_config));
 
+    /* Start WebSDR server */
+    websdr_config_t websdr_config = WEBSDR_CONFIG_DEFAULT();
+    websdr_config.dev = sdr_dev;
+    ESP_ERROR_CHECK(websdr_server_start(&websdr_srv, &websdr_config));
+
     /* Start SDR streaming task on Core 0 (with USB) */
     xTaskCreatePinnedToCore(sdr_stream_task, "sdr_stream", 8192, NULL, 8, NULL, 0);
 
     ESP_LOGI(TAG, "=== RTL-TCP server ready on port %d ===", RTLTCP_DEFAULT_PORT);
     ESP_LOGI(TAG, "=== RTL-UDP server ready on port %d ===", RTLUDP_DEFAULT_PORT);
+    ESP_LOGI(TAG, "=== WebSDR server ready on port %d ===", WEBSDR_DEFAULT_PORT);
     ESP_LOGI(TAG, "Connect TCP: SDR++ / GQRX → rtl_tcp at port %d", RTLTCP_DEFAULT_PORT);
     ESP_LOGI(TAG, "Connect UDP: send any packet to port %d to subscribe", RTLUDP_DEFAULT_PORT);
 

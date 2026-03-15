@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32-P4 WebSDR</title>
+<link rel="stylesheet" href="/sdr.css">
+</head>
+<body>
+<div id="app">
+  <div id="header">
+    <h1>ESP32-P4 WebSDR</h1>
+    <span id="status" class="disconnected">Disconnected</span>
+  </div>
+
+  <div id="info-bar">
+    <span id="freq-display">--- MHz</span>
+    <span id="rate-display">---</span>
+    <span id="smeter">S0</span>
+  </div>
+
+  <div id="display">
+    <canvas id="spectrum"></canvas>
+    <canvas id="waterfall"></canvas>
+  </div>
+
+  <div id="controls">
+    <div class="ctrl-group">
+      <label>Frequency (MHz)</label>
+      <input type="number" id="freq-input" step="0.001" min="24" max="1766" value="100.000">
+      <button id="freq-set">Set</button>
+    </div>
+
+    <div class="ctrl-group">
+      <label>Mode</label>
+      <div id="mode-btns">
+        <button class="mode-btn" data-mode="NFM">NFM</button>
+        <button class="mode-btn" data-mode="AM">AM</button>
+        <button class="mode-btn active" data-mode="WBFM">WBFM</button>
+        <button class="mode-btn" data-mode="USB">USB</button>
+        <button class="mode-btn" data-mode="LSB">LSB</button>
+      </div>
+    </div>
+
+    <div class="ctrl-group">
+      <label>Gain: <span id="gain-val">Auto</span></label>
+      <input type="range" id="gain-slider" min="0" max="496" step="1" value="0">
+    </div>
+
+    <div class="ctrl-group">
+      <label>Volume: <span id="vol-val">50%</span></label>
+      <input type="range" id="vol-slider" min="0" max="100" step="1" value="50">
+    </div>
+
+    <div class="ctrl-group">
+      <label>Squelch: <span id="sql-val">0</span></label>
+      <input type="range" id="sql-slider" min="0" max="255" step="1" value="0">
+    </div>
+
+    <div class="ctrl-group">
+      <button id="audio-btn">Start Audio</button>
+    </div>
+  </div>
+</div>
+<script src="/sdr.js"></script>
+</body>
+</html>

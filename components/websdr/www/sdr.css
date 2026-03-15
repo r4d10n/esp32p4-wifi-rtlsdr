@@ -1,0 +1,169 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    background: #0a0a0a;
+    color: #00e0e0;
+    font-family: 'Courier New', monospace;
+    font-size: 14px;
+    overflow-x: hidden;
+}
+
+#app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    width: 100%;
+}
+
+#header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 12px;
+    background: #111;
+    border-bottom: 1px solid #333;
+}
+
+#header h1 {
+    font-size: 16px;
+    color: #0f0;
+    font-weight: normal;
+}
+
+#status {
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 3px;
+}
+
+#status.connected { background: #040; color: #0f0; }
+#status.disconnected { background: #400; color: #f44; }
+
+#info-bar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 4px 12px;
+    background: #0d0d0d;
+    border-bottom: 1px solid #222;
+    font-size: 13px;
+}
+
+#freq-display {
+    font-size: 22px;
+    color: #0f0;
+    font-weight: bold;
+    letter-spacing: 1px;
+}
+
+#rate-display { color: #888; }
+
+#smeter {
+    color: #ff0;
+    font-weight: bold;
+    margin-left: auto;
+}
+
+#display {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    position: relative;
+}
+
+#spectrum {
+    width: 100%;
+    height: 120px;
+    cursor: crosshair;
+}
+
+#waterfall {
+    width: 100%;
+    flex: 1;
+    cursor: crosshair;
+    min-height: 100px;
+}
+
+#controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 6px 10px;
+    background: #111;
+    border-top: 1px solid #333;
+    align-items: center;
+}
+
+.ctrl-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.ctrl-group label {
+    font-size: 12px;
+    color: #888;
+    white-space: nowrap;
+}
+
+.ctrl-group input[type="number"] {
+    width: 90px;
+    background: #1a1a1a;
+    border: 1px solid #444;
+    color: #0f0;
+    padding: 3px 6px;
+    font-family: inherit;
+    font-size: 13px;
+}
+
+.ctrl-group input[type="range"] {
+    width: 80px;
+    accent-color: #0f0;
+}
+
+.ctrl-group button, #audio-btn {
+    background: #1a1a1a;
+    border: 1px solid #444;
+    color: #0f0;
+    padding: 3px 10px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+}
+
+.ctrl-group button:hover, #audio-btn:hover {
+    background: #2a2a2a;
+    border-color: #0f0;
+}
+
+#mode-btns {
+    display: flex;
+    gap: 2px;
+}
+
+.mode-btn {
+    padding: 3px 8px !important;
+    font-size: 11px !important;
+}
+
+.mode-btn.active {
+    background: #003300 !important;
+    border-color: #0f0 !important;
+    color: #0f0 !important;
+}
+
+#audio-btn.active {
+    background: #003300;
+    border-color: #0f0;
+}
+
+/* Mobile responsive */
+@media (max-width: 600px) {
+    #header h1 { font-size: 13px; }
+    #freq-display { font-size: 18px; }
+    #spectrum { height: 80px; }
+    #controls { gap: 4px; padding: 4px 6px; }
+    .ctrl-group input[type="range"] { width: 60px; }
+    .ctrl-group input[type="number"] { width: 70px; }
+}
