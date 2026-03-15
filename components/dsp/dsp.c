@@ -20,7 +20,7 @@
 
 /* ──────────────────────── Performance Counters ──────────────────────── */
 /* Enable DSP_PERF_BENCH for cycle-accurate benchmarking, disable for production */
-#define DSP_PERF_BENCH 1
+#define DSP_PERF_BENCH 0  /* Set to 1 for benchmarking */
 
 #if DSP_PERF_BENCH
 static uint32_t perf_fft_count = 0;
@@ -76,19 +76,23 @@ static inline float fast_log10f(float x)
 #define FFT_MAX_SIZE    16384
 #define FFT_AVG_COUNT   4       /* Average this many FFT frames before output */
 
-/* Configurable dB range */
-static float s_db_min = -40.0f;
-static float s_db_max =  40.0f;
+/* Configurable dB range
+ * Note: int16 FFT with <<8 scaling produces power values ~48 dB higher
+ * than float FFT normalized to [-1,1]. Adjust range accordingly. */
+static float s_db_min =  10.0f;
+static float s_db_max =  90.0f;
 
 /* Dynamically allocated, 16-byte aligned buffers */
-static float *fft_window  = NULL;   /* [fft_n] */
-static float *fft_work    = NULL;   /* [fft_n * 2] interleaved */
-static float *fft_power   = NULL;   /* [fft_n] */
-static float *fft_input   = NULL;   /* [fft_n * 2] interleaved */
+static float *fft_power   = NULL;   /* [fft_n] — accumulated power spectrum */
 
-/* Scratch buffers (kept for DDC, unused by FFT after fused power spectrum) */
-static float *fft_tmp_a   = NULL;   /* [fft_n] — used by DDC batch ops */
-static float *fft_tmp_b   = NULL;   /* [fft_n] — used by DDC batch ops */
+/* INT16 FFT path (PIE SIMD accelerated — 4.3-4.8x faster than float) */
+static int16_t *fft_sc16_window = NULL;  /* [fft_n] — Hann window as Q15 */
+static int16_t *fft_sc16_input  = NULL;  /* [fft_n * 2] — interleaved I,Q */
+static int16_t *fft_sc16_work   = NULL;  /* [fft_n * 2] — FFT work buffer */
+
+/* DDC still uses float — keep these for DDC batch ops */
+static float *fft_tmp_a   = NULL;   /* [fft_n] — used by DDC */
+static float *fft_tmp_b   = NULL;   /* [fft_n] — used by DDC */
 
 static int      fft_n = 0;
 static int      fft_avg_count = 0;
@@ -96,12 +100,12 @@ static int      fft_input_pos = 0;
 
 static void fft_free_buffers(void)
 {
-    if (fft_window) { free(fft_window); fft_window = NULL; }
-    if (fft_work)   { free(fft_work);   fft_work   = NULL; }
-    if (fft_power)  { free(fft_power);  fft_power  = NULL; }
-    if (fft_input)  { free(fft_input);  fft_input  = NULL; }
-    if (fft_tmp_a)  { free(fft_tmp_a);  fft_tmp_a  = NULL; }
-    if (fft_tmp_b)  { free(fft_tmp_b);  fft_tmp_b  = NULL; }
+    if (fft_power)       { free(fft_power);       fft_power       = NULL; }
+    if (fft_sc16_window) { free(fft_sc16_window); fft_sc16_window = NULL; }
+    if (fft_sc16_input)  { free(fft_sc16_input);  fft_sc16_input  = NULL; }
+    if (fft_sc16_work)   { free(fft_sc16_work);   fft_sc16_work   = NULL; }
+    if (fft_tmp_a)       { free(fft_tmp_a);       fft_tmp_a       = NULL; }
+    if (fft_tmp_b)       { free(fft_tmp_b);       fft_tmp_b       = NULL; }
 }
 
 void dsp_fft_init(int fft_size)
@@ -117,15 +121,15 @@ void dsp_fft_init(int fft_size)
 
     fft_n = n;
 
-    /* Allocate 16-byte aligned buffers for PIE SIMD */
-    fft_window = heap_caps_aligned_alloc(16, n * sizeof(float), MALLOC_CAP_DEFAULT);
-    fft_work   = heap_caps_aligned_alloc(16, n * 2 * sizeof(float), MALLOC_CAP_DEFAULT);
-    fft_power  = heap_caps_aligned_alloc(16, n * sizeof(float), MALLOC_CAP_DEFAULT);
-    fft_input  = heap_caps_aligned_alloc(16, n * 2 * sizeof(float), MALLOC_CAP_DEFAULT);
-    fft_tmp_a  = heap_caps_aligned_alloc(16, n * sizeof(float), MALLOC_CAP_DEFAULT);
-    fft_tmp_b  = heap_caps_aligned_alloc(16, n * sizeof(float), MALLOC_CAP_DEFAULT);
+    /* Allocate 16-byte aligned buffers */
+    fft_power       = heap_caps_aligned_alloc(16, n * sizeof(float), MALLOC_CAP_DEFAULT);
+    fft_sc16_window = heap_caps_aligned_alloc(16, n * sizeof(int16_t), MALLOC_CAP_DEFAULT);
+    fft_sc16_input  = heap_caps_aligned_alloc(16, n * 2 * sizeof(int16_t), MALLOC_CAP_DEFAULT);
+    fft_sc16_work   = heap_caps_aligned_alloc(16, n * 2 * sizeof(int16_t), MALLOC_CAP_DEFAULT);
+    fft_tmp_a       = heap_caps_aligned_alloc(16, n * sizeof(float), MALLOC_CAP_DEFAULT);
+    fft_tmp_b       = heap_caps_aligned_alloc(16, n * sizeof(float), MALLOC_CAP_DEFAULT);
 
-    if (!fft_window || !fft_work || !fft_power || !fft_input ||
+    if (!fft_power || !fft_sc16_window || !fft_sc16_input || !fft_sc16_work ||
         !fft_tmp_a || !fft_tmp_b) {
         ESP_LOGE(TAG, "Failed to allocate FFT buffers for size %d", n);
         fft_free_buffers();
@@ -133,19 +137,29 @@ void dsp_fft_init(int fft_size)
         return;
     }
 
-    /* Generate Hann window using esp-dsp (hardware-optimized) */
-    dsps_wind_hann_f32(fft_window, fft_n);
+    /* Generate Hann window as Q15 int16 for PIE sc16 FFT path
+     * Use esp-dsp to generate float, then convert to int16 */
+    {
+        float *tmp_win = malloc(n * sizeof(float));
+        if (tmp_win) {
+            dsps_wind_hann_f32(tmp_win, n);
+            for (int j = 0; j < n; j++) {
+                fft_sc16_window[j] = (int16_t)(tmp_win[j] * 32767.0f);
+            }
+            free(tmp_win);
+        }
+    }
 
-    /* Initialize esp-dsp FFT tables (allocates twiddle factors internally) */
-    esp_err_t ret = dsps_fft2r_init_fc32(NULL, CONFIG_DSP_MAX_FFT_SIZE);
+    /* Initialize esp-dsp FFT tables for int16 path */
+    esp_err_t ret = dsps_fft2r_init_sc16(NULL, CONFIG_DSP_MAX_FFT_SIZE);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "esp-dsp FFT init failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "esp-dsp sc16 FFT init failed: %s", esp_err_to_name(ret));
         fft_free_buffers();
         fft_n = 0;
         return;
     }
 
-    ESP_LOGI(TAG, "FFT initialized: %d-point, esp-dsp PIE-accelerated", fft_n);
+    ESP_LOGI(TAG, "FFT initialized: %d-point, int16 PIE SIMD (4.3-4.8x faster)", fft_n);
     dsp_fft_reset();
 }
 
@@ -176,47 +190,53 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
 {
     *fft_out_len = 0;
 
-    if (fft_n == 0 || !fft_input || !fft_work || !fft_power) return;
+    if (fft_n == 0 || !fft_sc16_input || !fft_sc16_work || !fft_power) return;
 
-    /* Accumulate IQ samples into interleaved float buffer
-     * Format: [re0, im0, re1, im1, ...] as esp-dsp expects */
+    /* Accumulate IQ samples into int16 interleaved buffer
+     * Convert uint8 IQ to int16 with window application:
+     *   sc16 = (uint8 - 128) * window_sc16 >> 15  (Q15 multiply) */
     uint32_t i = 0;
     while (i + 1 < len) {
-        float fi = (iq_data[i]     - 127.5f) / 127.5f;
-        float fq = (iq_data[i + 1] - 127.5f) / 127.5f;
+        /* Convert uint8 to int16: center at 0, scale up for dynamic range
+         * uint8 range [0,255] → int16 range [-128*256, +127*256] = [-32768, +32512]
+         * This gives full Q15 range for the FFT */
+        int16_t si = ((int16_t)iq_data[i] - 128) << 8;
+        int16_t sq = ((int16_t)iq_data[i + 1] - 128) << 8;
 
-        /* Apply window during accumulation */
-        float w = fft_window[fft_input_pos];
-        fft_input[fft_input_pos * 2]     = fi * w;
-        fft_input[fft_input_pos * 2 + 1] = fq * w;
+        /* Apply window: (sample * window_q15) >> 15
+         * window is Q15 [0, 32767], sample is [-32768, 32512]
+         * result fits in int16 */
+        int32_t wi = fft_sc16_window[fft_input_pos];
+        fft_sc16_input[fft_input_pos * 2]     = (int16_t)((si * wi) >> 15);
+        fft_sc16_input[fft_input_pos * 2 + 1] = (int16_t)((sq * wi) >> 15);
         fft_input_pos++;
         i += 2;
 
         if (fft_input_pos >= fft_n) {
             /* Copy to work buffer (FFT is in-place) */
-            memcpy(fft_work, fft_input, fft_n * 2 * sizeof(float));
+            memcpy(fft_sc16_work, fft_sc16_input, fft_n * 2 * sizeof(int16_t));
 
             PERF_START(t_fft);
 
-            /* Run hardware-loop accelerated FFT */
-            dsps_fft2r_fc32(fft_work, fft_n);
+            /* Run PIE SIMD int16 FFT — 4.3-4.8x faster than float! */
+            dsps_fft2r_sc16(fft_sc16_work, fft_n);
 
             /* Bit-reverse reorder */
-            dsps_bit_rev2r_fc32(fft_work, fft_n);
+            dsps_bit_rev_sc16_ansi(fft_sc16_work, fft_n);
 
             PERF_END(t_fft, perf_fft_total_us);
 
             PERF_START(t_pwr);
 
-            /* Fused power spectrum: single pass replaces 4 ANSI C dsps_* calls
-             * Computes: fft_power[k] += re[k]² + im[k]²
-             * Uses FMA (fused multiply-add) — 1 pass instead of 3 separate loops */
+            /* Power spectrum from int16 FFT output
+             * Accumulate raw int16 power — normalize at output time.
+             * No division per sample = faster accumulation */
             {
-                const float *w = fft_work;
+                const int16_t *w16 = fft_sc16_work;
                 float *pwr = fft_power;
                 for (int k = 0; k < fft_n; k++) {
-                    float re = w[k * 2];
-                    float im = w[k * 2 + 1];
+                    float re = (float)w16[k * 2];
+                    float im = (float)w16[k * 2 + 1];
                     pwr[k] += re * re + im * im;
                 }
             }

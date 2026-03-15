@@ -306,8 +306,8 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "ESP32-P4 RTL-SDR WiFi Bridge starting...");
 
-    /* Run FFT benchmark at startup (disable for production) */
-#if 1
+    /* Run FFT benchmark at startup (set to 1 to enable) */
+#if 0
     extern void bench_fft_all(void);
     bench_fft_all();
 #endif
