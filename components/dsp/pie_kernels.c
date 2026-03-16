@@ -11,6 +11,23 @@
 
 #include "sdkconfig.h"
 #include <stdlib.h>
+
+#if CONFIG_IDF_TARGET_ESP32P4 && CONFIG_DSP_OPTIMIZED
+extern void pie_power_spectrum_accumulate_arp4(const int16_t *fft_out,
+                                                int32_t *accum, int fft_n);
+#define PIE_ASM_POWER_SPECTRUM 1
+#else
+#define PIE_ASM_POWER_SPECTRUM 0
+#endif
+
+#if CONFIG_IDF_TARGET_ESP32P4 && CONFIG_DSP_OPTIMIZED
+extern void pie_nco_mix_s16_arp4(const int16_t *iq_in, const int16_t *nco_table,
+                                  int16_t *iq_out, int iq_pairs);
+#define PIE_ASM_NCO_MIX 1
+#else
+#define PIE_ASM_NCO_MIX 0
+#endif
+
 #include <string.h>
 #include <math.h>
 #include "esp_log.h"
@@ -38,6 +55,13 @@ void pie_u8iq_to_s16_windowed(const uint8_t *src, const int16_t *window,
 
 void pie_power_spectrum_accumulate(const int16_t *fft_out, int32_t *accum, int fft_n)
 {
+#if PIE_ASM_POWER_SPECTRUM
+    if ((fft_n & 3) == 0 && fft_n >= 4) {
+        pie_power_spectrum_accumulate_arp4(fft_out, accum, fft_n);
+        return;
+    }
+#endif
+    /* C fallback */
     for (int k = 0; k < fft_n; k++) {
         int32_t re = (int32_t)fft_out[k * 2];
         int32_t im = (int32_t)fft_out[k * 2 + 1];
@@ -142,21 +166,44 @@ void pie_u8_to_s16_bias(const uint8_t *src, int16_t *dst, int count)
 void pie_nco_mix_s16(const int16_t *iq_in, pie_nco_t *nco,
                       int16_t *iq_out, int iq_pairs)
 {
-    const int16_t *tbl = nco->table;
     uint32_t pos = nco->phase_pos;
     uint32_t len = nco->table_len;
 
-    for (int k = 0; k < iq_pairs; k++) {
-        int32_t in_re = iq_in[k * 2];
-        int32_t in_im = iq_in[k * 2 + 1];
-        int32_t nco_cos  = tbl[pos * 2];       /* cos(phase) Q15 */
-        int32_t nco_nsin = tbl[pos * 2 + 1];   /* -sin(phase) Q15 */
+    /* Process in contiguous chunks within the NCO table */
+    int remaining = iq_pairs;
+    const int16_t *in_ptr = iq_in;
+    int16_t *out_ptr = iq_out;
 
-        /* Complex multiply (Q15): (in_re + j*in_im) * (cos - j*sin) */
-        iq_out[k * 2]     = (int16_t)((in_re * nco_cos  - in_im * nco_nsin) >> 15);
-        iq_out[k * 2 + 1] = (int16_t)((in_re * nco_nsin + in_im * nco_cos)  >> 15);
+    while (remaining > 0) {
+        uint32_t chunk = len - pos;
+        if (chunk > (uint32_t)remaining) chunk = remaining;
+        uint32_t chunk_simd = chunk & ~3u;  /* multiple of 4 for PIE */
 
-        pos++;
+#if PIE_ASM_NCO_MIX
+        if (chunk_simd >= 4) {
+            pie_nco_mix_s16_arp4(in_ptr, nco->table + pos * 2, out_ptr, chunk_simd);
+            in_ptr    += chunk_simd * 2;
+            out_ptr   += chunk_simd * 2;
+            pos       += chunk_simd;
+            remaining -= chunk_simd;
+        }
+#endif
+        /* Scalar tail or full fallback */
+        uint32_t tail = chunk - chunk_simd;
+        const int16_t *tbl = nco->table;
+        for (uint32_t k = 0; k < tail; k++) {
+            int32_t in_re    = in_ptr[k * 2];
+            int32_t in_im    = in_ptr[k * 2 + 1];
+            int32_t nco_cos  = tbl[pos * 2];
+            int32_t nco_nsin = tbl[pos * 2 + 1];
+            out_ptr[k * 2]     = (int16_t)((in_re * nco_cos  - in_im * nco_nsin) >> 15);
+            out_ptr[k * 2 + 1] = (int16_t)((in_re * nco_nsin + in_im * nco_cos)  >> 15);
+            pos++;
+            if (pos >= len) pos = 0;
+        }
+        in_ptr    += tail * 2;
+        out_ptr   += tail * 2;
+        remaining -= tail;
         if (pos >= len) pos = 0;
     }
 
