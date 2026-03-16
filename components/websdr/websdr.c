@@ -31,6 +31,8 @@ extern const uint8_t sdr_js_start[]     asm("_binary_sdr_js_start");
 extern const uint8_t sdr_js_end[]       asm("_binary_sdr_js_end");
 extern const uint8_t sdr_css_start[]    asm("_binary_sdr_css_start");
 extern const uint8_t sdr_css_end[]      asm("_binary_sdr_css_end");
+extern const uint8_t dseg7_woff2_start[] asm("_binary_dseg7_woff2_start");
+extern const uint8_t dseg7_woff2_end[]   asm("_binary_dseg7_woff2_end");
 
 /* ──────────────────────── Constants ──────────────────────── */
 
@@ -346,6 +348,15 @@ static esp_err_t css_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "text/css");
     httpd_resp_send(req, (const char *)sdr_css_start,
                     sdr_css_end - sdr_css_start);
+    return ESP_OK;
+}
+
+static esp_err_t font_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "font/woff2");
+    httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=31536000");
+    httpd_resp_send(req, (const char *)dseg7_woff2_start,
+                    dseg7_woff2_end - dseg7_woff2_start);
     return ESP_OK;
 }
 
@@ -688,6 +699,9 @@ esp_err_t websdr_server_start(websdr_server_t **out_server, const websdr_config_
     const httpd_uri_t uri_css = {
         .uri = "/sdr.css", .method = HTTP_GET, .handler = css_handler,
     };
+    const httpd_uri_t uri_font = {
+        .uri = "/dseg7.woff2", .method = HTTP_GET, .handler = font_handler,
+    };
     const httpd_uri_t uri_ws = {
         .uri = "/ws", .method = HTTP_GET, .handler = ws_handler,
         .user_ctx = srv, .is_websocket = true,
@@ -696,6 +710,7 @@ esp_err_t websdr_server_start(websdr_server_t **out_server, const websdr_config_
     httpd_register_uri_handler(srv->httpd, &uri_index);
     httpd_register_uri_handler(srv->httpd, &uri_js);
     httpd_register_uri_handler(srv->httpd, &uri_css);
+    httpd_register_uri_handler(srv->httpd, &uri_font);
     httpd_register_uri_handler(srv->httpd, &uri_ws);
 
     /* Start FFT processing task on Core 1 */
