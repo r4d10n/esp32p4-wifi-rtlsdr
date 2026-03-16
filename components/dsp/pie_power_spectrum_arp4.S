@@ -1,13 +1,30 @@
 /*
  * PIE SIMD: Accumulate power spectrum from int16 FFT output.
  *
- * WARNING: This assembly is DISABLED — needs TRM validation.
- * Known issues:
- *   1. esp.vunzip.16 q0, q1 — operates on {q0,q1} as 256-bit pair but q1
- *      is uninitialized. For a single 128-bit interleaved input, vunzip.16
- *      is the wrong approach.
- *   2. esp.vmul.s32.s16xs16 q2, q0, q0, q0 — 4th operand encoding unclear
- *      without official PIE TRM.
+ * STATUS: DISABLED — awaiting hardware validation of PIE instruction semantics.
+ *
+ * This assembly kernel is NOT linked into the build (PIE_ASM_POWER_SPECTRUM=0
+ * in pie_kernels.c). The C reference with __attribute__((optimize("O3"))) is
+ * used instead, which generates good scalar code.
+ *
+ * To re-enable, the following must be verified on real ESP32-P4 hardware:
+ *
+ *   1. esp.vunzip.16 q0, q1 — Research indicates this rearranges within a
+ *      SINGLE register, not across a register pair:
+ *        Input  q0: [a0, b0, a1, b1, a2, b2, a3, b3]
+ *        Output q0: [a0, a1, a2, a3, b0, b1, b2, b3]
+ *      This puts both re and im halves into the SAME register (q0 lower = re,
+ *      q0 upper = im), NOT split across q0/q1 as the code below assumes.
+ *      The kernel needs restructuring to account for this layout.
+ *
+ *   2. esp.vmul.s32.s16xs16 qd, qs1, qs2, qs3 — The 4th operand likely
+ *      selects which half (low/high) of the 16-bit source to widen-multiply.
+ *      Exact encoding must be confirmed against the PIE TRM or xesppie.S
+ *      instruction catalog.
+ *
+ *   3. Accumulation is int32 here but the C reference uses int64 to avoid
+ *      overflow with large averaging counts. A corrected assembly version
+ *      would need widening accumulation or reduced averaging.
  *
  * The C fallback in pie_kernels.c is used instead (PIE_ASM_POWER_SPECTRUM=0).
  *

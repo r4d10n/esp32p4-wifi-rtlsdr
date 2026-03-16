@@ -53,6 +53,7 @@ void pie_u8iq_to_s16_windowed(const uint8_t *src, const int16_t *window,
     }
 }
 
+__attribute__((optimize("O3")))
 void pie_power_spectrum_accumulate(const int16_t *fft_out, int64_t *accum, int fft_n)
 {
 #if PIE_ASM_POWER_SPECTRUM
