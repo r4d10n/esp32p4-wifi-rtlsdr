@@ -11,20 +11,29 @@
 
 #include "sdkconfig.h"
 #include <stdlib.h>
-
-#if 0 /* Disabled: assembly needs TRM validation for vunzip/vmul encoding */
-extern void pie_power_spectrum_accumulate_arp4(const int16_t *fft_out,
-                                                int64_t *accum, int fft_n);
-#define PIE_ASM_POWER_SPECTRUM 1
-#else
-#define PIE_ASM_POWER_SPECTRUM 0
-#endif
+#include <stdint.h>
+#include <string.h>
+#include <alloca.h>
 
 #if CONFIG_IDF_TARGET_ESP32P4 && CONFIG_DSP_OPTIMIZED
+/* Power spectrum: scalar loop with hardware zero-overhead loop, int32 temp accum */
+extern void pie_power_spectrum_accumulate_arp4(const int16_t *fft_out,
+                                                int32_t *accum, int fft_n);
+#define PIE_ASM_POWER_SPECTRUM 1
+
+/* Windowing: scalar with hardware zero-overhead loop */
+extern void pie_u8iq_to_s16_windowed_arp4(const uint8_t *src,
+                                           const int16_t *window,
+                                           int16_t *dst, int iq_pairs);
+#define PIE_ASM_WINDOWING 1
+
+/* NCO mix: PIE esp.cmul.s16 SIMD complex multiply */
 extern void pie_nco_mix_s16_arp4(const int16_t *iq_in, const int16_t *nco_table,
                                   int16_t *iq_out, int iq_pairs);
 #define PIE_ASM_NCO_MIX 1
 #else
+#define PIE_ASM_POWER_SPECTRUM 0
+#define PIE_ASM_WINDOWING 0
 #define PIE_ASM_NCO_MIX 0
 #endif
 
@@ -41,28 +50,39 @@ static const char *TAG = "pie";
 void pie_u8iq_to_s16_windowed(const uint8_t *src, const int16_t *window,
                                int16_t *dst, int iq_pairs)
 {
+#if PIE_ASM_WINDOWING
+    if (iq_pairs > 0) {
+        pie_u8iq_to_s16_windowed_arp4(src, window, dst, iq_pairs);
+        return;
+    }
+#endif
     for (int k = 0; k < iq_pairs; k++) {
-        /* Convert uint8 to int16: (val - 128) << 8 gives [-32768, +32512] */
         int16_t si = ((int16_t)src[k * 2]     - 128) << 8;
         int16_t sq = ((int16_t)src[k * 2 + 1] - 128) << 8;
-
-        /* Q15 window multiply: (sample * window) >> 15 */
         int32_t wi = window[k];
         dst[k * 2]     = (int16_t)((si * wi) >> 15);
         dst[k * 2 + 1] = (int16_t)((sq * wi) >> 15);
     }
 }
 
-__attribute__((optimize("O3")))
 void pie_power_spectrum_accumulate(const int16_t *fft_out, int64_t *accum, int fft_n)
 {
 #if PIE_ASM_POWER_SPECTRUM
-    if ((fft_n & 3) == 0 && fft_n >= 4) {
-        pie_power_spectrum_accumulate_arp4(fft_out, accum, fft_n);
+    /* Assembly uses int32 accumulator for hardware loop efficiency.
+     * We use a stack-allocated int32 temp buffer, accumulate there,
+     * then widen to int64. Safe because one FFT frame's power
+     * (max 32767^2 + 32767^2 = ~2.1G) fits in int32. */
+    if (fft_n <= 8192) {
+        int32_t *tmp = (int32_t *)alloca(fft_n * sizeof(int32_t));
+        memset(tmp, 0, fft_n * sizeof(int32_t));
+        pie_power_spectrum_accumulate_arp4(fft_out, tmp, fft_n);
+        for (int k = 0; k < fft_n; k++) {
+            accum[k] += (int64_t)tmp[k];
+        }
         return;
     }
 #endif
-    /* C fallback */
+    /* C fallback — direct int64 accumulation */
     for (int k = 0; k < fft_n; k++) {
         int32_t re = (int32_t)fft_out[k * 2];
         int32_t im = (int32_t)fft_out[k * 2 + 1];
