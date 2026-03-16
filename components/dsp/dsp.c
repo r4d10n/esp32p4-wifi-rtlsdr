@@ -17,6 +17,7 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "dsp.h"
+#include "pie_kernels.h"
 
 /* ──────────────────────── Performance Counters ──────────────────────── */
 /* Enable DSP_PERF_BENCH for cycle-accurate benchmarking, disable for production */
@@ -35,18 +36,9 @@ static uint64_t perf_db_total_us = 0;
 #define PERF_END(var, accum) (void)0
 #endif
 
-/* esp-dsp functions
- * Note: On ESP32-P4, dsps_mul_f32/add_f32/mulc_f32/addc_f32 are ANSI C fallbacks
- * (no PIE SIMD for float). PIE only accelerates integer types (u8/s8/s16/s32).
- * The FFT (dsps_fft2r_fc32_arp4) uses hardware loops but not PIE SIMD.
- * For true SIMD, use integer-domain processing (future optimization).
- */
+/* esp-dsp functions — only FFT and window generation still needed */
 #include "dsps_fft2r.h"
 #include "dsps_wind_hann.h"
-#include "dsps_mul.h"
-#include "dsps_add.h"
-#include "dsps_mulc.h"
-#include "dsps_addc.h"
 
 static const char *TAG = "dsp";
 
@@ -87,16 +79,12 @@ static float s_db_min =  10.0f;
 static float s_db_max =  90.0f;
 
 /* Dynamically allocated, 16-byte aligned buffers */
-static float *fft_power   = NULL;   /* [fft_n] — accumulated power spectrum */
+static int32_t *fft_power   = NULL;   /* [fft_n] — accumulated power spectrum (int32) */
 
 /* INT16 FFT path (PIE SIMD accelerated — 4.3-4.8x faster than float) */
 static int16_t *fft_sc16_window = NULL;  /* [fft_n] — Hann window as Q15 */
 static int16_t *fft_sc16_input  = NULL;  /* [fft_n * 2] — interleaved I,Q */
 static int16_t *fft_sc16_work   = NULL;  /* [fft_n * 2] — FFT work buffer */
-
-/* DDC still uses float — keep these for DDC batch ops */
-static float *fft_tmp_a   = NULL;   /* [fft_n] — used by DDC */
-static float *fft_tmp_b   = NULL;   /* [fft_n] — used by DDC */
 
 static int      fft_n = 0;
 static int      fft_avg_count = 0;
@@ -108,8 +96,6 @@ static void fft_free_buffers(void)
     if (fft_sc16_window) { free(fft_sc16_window); fft_sc16_window = NULL; }
     if (fft_sc16_input)  { free(fft_sc16_input);  fft_sc16_input  = NULL; }
     if (fft_sc16_work)   { free(fft_sc16_work);   fft_sc16_work   = NULL; }
-    if (fft_tmp_a)       { free(fft_tmp_a);       fft_tmp_a       = NULL; }
-    if (fft_tmp_b)       { free(fft_tmp_b);       fft_tmp_b       = NULL; }
 }
 
 void dsp_fft_init(int fft_size)
@@ -126,15 +112,12 @@ void dsp_fft_init(int fft_size)
     fft_n = n;
 
     /* Allocate 16-byte aligned buffers */
-    fft_power       = heap_caps_aligned_alloc(16, n * sizeof(float), MALLOC_CAP_DEFAULT);
+    fft_power       = heap_caps_aligned_alloc(16, n * sizeof(int32_t), MALLOC_CAP_DEFAULT);
     fft_sc16_window = heap_caps_aligned_alloc(16, n * sizeof(int16_t), MALLOC_CAP_DEFAULT);
     fft_sc16_input  = heap_caps_aligned_alloc(16, n * 2 * sizeof(int16_t), MALLOC_CAP_DEFAULT);
     fft_sc16_work   = heap_caps_aligned_alloc(16, n * 2 * sizeof(int16_t), MALLOC_CAP_DEFAULT);
-    fft_tmp_a       = heap_caps_aligned_alloc(16, n * sizeof(float), MALLOC_CAP_DEFAULT);
-    fft_tmp_b       = heap_caps_aligned_alloc(16, n * sizeof(float), MALLOC_CAP_DEFAULT);
 
-    if (!fft_power || !fft_sc16_window || !fft_sc16_input || !fft_sc16_work ||
-        !fft_tmp_a || !fft_tmp_b) {
+    if (!fft_power || !fft_sc16_window || !fft_sc16_input || !fft_sc16_work) {
         ESP_LOGE(TAG, "Failed to allocate FFT buffers for size %d", n);
         fft_free_buffers();
         fft_n = 0;
@@ -170,7 +153,7 @@ void dsp_fft_init(int fft_size)
 void dsp_fft_reset(void)
 {
     if (fft_power && fft_n > 0) {
-        memset(fft_power, 0, fft_n * sizeof(float));
+        memset(fft_power, 0, fft_n * sizeof(int32_t));
     }
     fft_avg_count = 0;
     fft_input_pos = 0;
@@ -196,25 +179,38 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
 
     if (fft_n == 0 || !fft_sc16_input || !fft_sc16_work || !fft_power) return;
 
-    /* Accumulate IQ samples into int16 interleaved buffer
-     * Convert uint8 IQ to int16 with window application:
-     *   sc16 = (uint8 - 128) * window_sc16 >> 15  (Q15 multiply) */
+    /* Accumulate IQ samples into int16 interleaved buffer using SIMD-friendly batch conversion */
     uint32_t i = 0;
     while (i + 1 < len) {
-        /* Convert uint8 to int16: center at 0, scale up for dynamic range
-         * uint8 range [0,255] → int16 range [-128*256, +127*256] = [-32768, +32512]
-         * This gives full Q15 range for the FFT */
-        int16_t si = ((int16_t)iq_data[i] - 128) << 8;
-        int16_t sq = ((int16_t)iq_data[i + 1] - 128) << 8;
+        /* How many IQ pairs can we accept before FFT buffer is full? */
+        uint32_t pairs_available = (len - i) / 2;
+        uint32_t pairs_needed = fft_n - fft_input_pos;
+        uint32_t batch = pairs_available < pairs_needed ? pairs_available : pairs_needed;
 
-        /* Apply window: (sample * window_q15) >> 15
-         * window is Q15 [0, 32767], sample is [-32768, 32512]
-         * result fits in int16 */
-        int32_t wi = fft_sc16_window[fft_input_pos];
-        fft_sc16_input[fft_input_pos * 2]     = (int16_t)((si * wi) >> 15);
-        fft_sc16_input[fft_input_pos * 2 + 1] = (int16_t)((sq * wi) >> 15);
-        fft_input_pos++;
-        i += 2;
+        /* Round down to multiple of 8 for SIMD, process remainder one-by-one */
+        uint32_t batch_simd = batch & ~7u;
+
+        if (batch_simd > 0) {
+            pie_u8iq_to_s16_windowed(
+                iq_data + i,
+                fft_sc16_window + fft_input_pos,
+                fft_sc16_input + fft_input_pos * 2,
+                batch_simd);
+            fft_input_pos += batch_simd;
+            i += batch_simd * 2;
+        }
+
+        /* Handle remaining 0-7 pairs with scalar fallback */
+        uint32_t remainder = batch - batch_simd;
+        for (uint32_t r = 0; r < remainder; r++) {
+            int16_t si = ((int16_t)iq_data[i] - 128) << 8;
+            int16_t sq = ((int16_t)iq_data[i + 1] - 128) << 8;
+            int32_t wi = fft_sc16_window[fft_input_pos];
+            fft_sc16_input[fft_input_pos * 2]     = (int16_t)((si * wi) >> 15);
+            fft_sc16_input[fft_input_pos * 2 + 1] = (int16_t)((sq * wi) >> 15);
+            fft_input_pos++;
+            i += 2;
+        }
 
         if (fft_input_pos >= fft_n) {
             /* Copy to work buffer (FFT is in-place) */
@@ -232,18 +228,8 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
 
             PERF_START(t_pwr);
 
-            /* Power spectrum from int16 FFT output
-             * Accumulate raw int16 power — normalize at output time.
-             * No division per sample = faster accumulation */
-            {
-                const int16_t *w16 = fft_sc16_work;
-                float *pwr = fft_power;
-                for (int k = 0; k < fft_n; k++) {
-                    float re = (float)w16[k * 2];
-                    float im = (float)w16[k * 2 + 1];
-                    pwr[k] += re * re + im * im;
-                }
-            }
+            /* Power spectrum: accumulate re^2 + im^2 into int32 buffer */
+            pie_power_spectrum_accumulate(fft_sc16_work, fft_power, fft_n);
 
             PERF_END(t_pwr, perf_power_total_us);
 
@@ -252,31 +238,11 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
 
             /* Output averaged spectrum */
             if (fft_avg_count >= FFT_AVG_COUNT) {
-                float inv = 1.0f / fft_avg_count;
-                float db_range = s_db_max - s_db_min;
-                if (db_range < 1.0f) db_range = 1.0f;
-                float scale = 255.0f / db_range;
-
-                /* Convert power → dB → uint8, output into temp buffer first */
-                int half = fft_n / 2;
                 PERF_START(t_db);
 
-                /* Process first half → goes to second half of output (FFT shift) */
-                for (int k = 0; k < half; k++) {
-                    float avg_pwr = fft_power[k] * inv;
-                    float db = (avg_pwr < 1e-20f) ? s_db_min : 10.0f * fast_log10f(avg_pwr);
-                    if (db < s_db_min) db = s_db_min;
-                    if (db > s_db_max) db = s_db_max;
-                    fft_out[k + half] = (uint8_t)((db - s_db_min) * scale + 0.5f);
-                }
-                /* Process second half → goes to first half of output (FFT shift) */
-                for (int k = half; k < fft_n; k++) {
-                    float avg_pwr = fft_power[k] * inv;
-                    float db = (avg_pwr < 1e-20f) ? s_db_min : 10.0f * fast_log10f(avg_pwr);
-                    if (db < s_db_min) db = s_db_min;
-                    if (db > s_db_max) db = s_db_max;
-                    fft_out[k - half] = (uint8_t)((db - s_db_min) * scale + 0.5f);
-                }
+                /* Convert int32 power -> dB -> uint8 with FFT shift */
+                pie_power_to_db_u8(fft_power, fft_out, fft_n,
+                                   fft_avg_count, s_db_min, s_db_max);
                 *fft_out_len = fft_n;
 
                 PERF_END(t_db, perf_db_total_us);
@@ -297,7 +263,7 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
 #endif
 
                 /* Reset accumulator */
-                memset(fft_power, 0, fft_n * sizeof(float));
+                memset(fft_power, 0, fft_n * sizeof(int32_t));
                 fft_avg_count = 0;
             }
         }
@@ -306,7 +272,7 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
 
 /* ──────────────────────── DDC (Digital Down Converter) ──────────────────────── */
 
-#define DDC_BATCH_SIZE  1024    /* Batch processing size for esp-dsp ops */
+#define DDC_BATCH_SIZE  1024    /* Must be multiple of 8 */
 
 struct dsp_ddc {
     uint32_t    sample_rate;
@@ -314,30 +280,16 @@ struct dsp_ddc {
     uint32_t    output_bw;
     uint32_t    decim_ratio;
 
-    /* NCO (Numerically Controlled Oscillator) -- precomputed, 16-byte aligned */
-    float      *nco_re;         /* [DDC_BATCH_SIZE] */
-    float      *nco_im;         /* [DDC_BATCH_SIZE] */
-    uint32_t    nco_len;
-    uint32_t    nco_pos;
+    /* NCO for int16 Q15 mixing */
+    pie_nco_t  *nco;
 
-    /* Scratch buffers for batch processing, 16-byte aligned */
-    float      *buf_re;         /* input I samples */
-    float      *buf_im;         /* input Q samples */
-    float      *tmp1;           /* product scratch */
-    float      *tmp2;           /* product scratch */
-    float      *mix_re;         /* mixed output I */
-    float      *mix_im;         /* mixed output Q */
+    /* Int16 scratch buffers (16-byte aligned) */
+    int16_t    *buf_s16;       /* uint8 -> int16 conversion [DDC_BATCH_SIZE * 2] */
+    int16_t    *mix_s16;       /* NCO mixed output [DDC_BATCH_SIZE * 2] */
 
-    /* CIC-like decimator accumulator */
-    float       accum_re;
-    float       accum_im;
-    uint32_t    accum_count;
+    /* CIC decimator persistent state */
+    int32_t     cic_accum[4];  /* {accum_re, accum_im, count, 0} */
 };
-
-static float *ddc_alloc(void)
-{
-    return heap_caps_aligned_alloc(16, DDC_BATCH_SIZE * sizeof(float), MALLOC_CAP_DEFAULT);
-}
 
 dsp_ddc_t *dsp_ddc_create(uint32_t sample_rate, uint32_t center_offset_hz,
                            uint32_t output_bw_hz)
@@ -356,34 +308,28 @@ dsp_ddc_t *dsp_ddc_create(uint32_t sample_rate, uint32_t center_offset_hz,
     while (p2 * 2 <= ratio) p2 *= 2;
     ddc->decim_ratio = p2;
 
-    /* Allocate 16-byte aligned buffers for PIE */
-    ddc->nco_re = ddc_alloc();
-    ddc->nco_im = ddc_alloc();
-    ddc->buf_re = ddc_alloc();
-    ddc->buf_im = ddc_alloc();
-    ddc->tmp1   = ddc_alloc();
-    ddc->tmp2   = ddc_alloc();
-    ddc->mix_re = ddc_alloc();
-    ddc->mix_im = ddc_alloc();
+    /* Create int16 Q15 NCO table */
+    ddc->nco = pie_nco_create(sample_rate, (int32_t)center_offset_hz);
+    if (!ddc->nco) {
+        free(ddc);
+        return NULL;
+    }
 
-    if (!ddc->nco_re || !ddc->nco_im || !ddc->buf_re || !ddc->buf_im ||
-        !ddc->tmp1 || !ddc->tmp2 || !ddc->mix_re || !ddc->mix_im) {
+    /* Allocate int16 scratch buffers (interleaved IQ, so *2) */
+    ddc->buf_s16 = heap_caps_aligned_alloc(16, DDC_BATCH_SIZE * 2 * sizeof(int16_t),
+                                            MALLOC_CAP_DEFAULT);
+    ddc->mix_s16 = heap_caps_aligned_alloc(16, DDC_BATCH_SIZE * 2 * sizeof(int16_t),
+                                            MALLOC_CAP_DEFAULT);
+
+    if (!ddc->buf_s16 || !ddc->mix_s16) {
         ESP_LOGE(TAG, "DDC buffer allocation failed");
         dsp_ddc_free(ddc);
         return NULL;
     }
 
-    /* Precompute NCO table for batch processing */
-    ddc->nco_len = DDC_BATCH_SIZE;
-    double phase_inc = 2.0 * M_PI * (double)center_offset_hz / (double)sample_rate;
-    for (uint32_t j = 0; j < ddc->nco_len; j++) {
-        double phase = phase_inc * j;
-        ddc->nco_re[j] = (float)cos(phase);
-        ddc->nco_im[j] = (float)(-sin(phase)); /* Negative for downconversion */
-    }
-    ddc->nco_pos = 0;
+    memset(ddc->cic_accum, 0, sizeof(ddc->cic_accum));
 
-    ESP_LOGI(TAG, "DDC created: offset=%ldHz bw=%luHz decim=%lu",
+    ESP_LOGI(TAG, "DDC created: offset=%ldHz bw=%luHz decim=%lu (int16 pipeline)",
              (long)ddc->center_offset, (unsigned long)output_bw_hz,
              (unsigned long)ddc->decim_ratio);
     return ddc;
@@ -398,14 +344,9 @@ uint32_t dsp_ddc_get_output_rate(dsp_ddc_t *ddc)
 void dsp_ddc_free(dsp_ddc_t *ddc)
 {
     if (!ddc) return;
-    free(ddc->nco_re);
-    free(ddc->nco_im);
-    free(ddc->buf_re);
-    free(ddc->buf_im);
-    free(ddc->tmp1);
-    free(ddc->tmp2);
-    free(ddc->mix_re);
-    free(ddc->mix_im);
+    pie_nco_free(ddc->nco);
+    free(ddc->buf_s16);
+    free(ddc->mix_s16);
     free(ddc);
 }
 
@@ -416,76 +357,40 @@ int dsp_ddc_process(dsp_ddc_t *ddc, const uint8_t *iq_in, uint32_t in_len,
     uint32_t out_pos = 0;
     uint32_t i = 0;
 
+    /* Temporary int16 output from CIC before converting to uint8 */
+    int16_t *cic_out = ddc->buf_s16;  /* Reuse buf_s16 since we're done with input by then */
+
     while (i + 1 < in_len && out_pos + 1 < max_out) {
         /* Determine batch size */
         uint32_t remaining_pairs = (in_len - i) / 2;
         uint32_t batch = remaining_pairs;
         if (batch > DDC_BATCH_SIZE) batch = DDC_BATCH_SIZE;
-        uint32_t nco_remaining = ddc->nco_len - ddc->nco_pos;
-        if (batch > nco_remaining) batch = nco_remaining;
-        if (batch == 0) break;
 
-        /* Deinterleave uint8 IQ into separate float arrays */
-        for (uint32_t j = 0; j < batch; j++) {
-            ddc->buf_re[j] = (float)iq_in[i + j * 2];
-            ddc->buf_im[j] = (float)iq_in[i + j * 2 + 1];
+        /* Round down to multiple of 8 for SIMD */
+        batch = batch & ~7u;
+        if (batch == 0) {
+            /* Handle remaining < 8 pairs with scalar fallback */
+            break;
         }
 
-        /* Batch convert: subtract 127.5, scale by 1/127.5 using PIE */
-        dsps_addc_f32(ddc->buf_re, ddc->buf_re, batch, -127.5f, 1, 1);
-        dsps_mulc_f32(ddc->buf_re, ddc->buf_re, batch, 1.0f / 127.5f, 1, 1);
-        dsps_addc_f32(ddc->buf_im, ddc->buf_im, batch, -127.5f, 1, 1);
-        dsps_mulc_f32(ddc->buf_im, ddc->buf_im, batch, 1.0f / 127.5f, 1, 1);
+        /* Step 1: uint8 IQ -> int16 with bias removal */
+        pie_u8_to_s16_bias(iq_in + i, ddc->buf_s16, batch * 2);
 
-        /* Complex multiply with NCO using PIE:
-         * mix_re = buf_re * nco_re - buf_im * nco_im
-         * mix_im = buf_re * nco_im + buf_im * nco_re */
-        float *nco_r = ddc->nco_re + ddc->nco_pos;
-        float *nco_i = ddc->nco_im + ddc->nco_pos;
+        /* Step 2: Complex multiply with NCO (frequency shift) */
+        pie_nco_mix_s16(ddc->buf_s16, ddc->nco, ddc->mix_s16, batch);
 
-        /* tmp1 = buf_re * nco_re */
-        dsps_mul_f32(ddc->buf_re, nco_r, ddc->tmp1, batch, 1, 1, 1);
-        /* tmp2 = buf_im * nco_im */
-        dsps_mul_f32(ddc->buf_im, nco_i, ddc->tmp2, batch, 1, 1, 1);
-        /* mix_re = tmp1 - tmp2 (negate tmp2, then add) */
-        dsps_mulc_f32(ddc->tmp2, ddc->tmp2, batch, -1.0f, 1, 1);
-        dsps_add_f32(ddc->tmp1, ddc->tmp2, ddc->mix_re, batch, 1, 1, 1);
+        /* Step 3: CIC decimation */
+        int cic_out_pairs = (int)((max_out - out_pos) / 2);
+        pie_cic_decimate_s16(ddc->mix_s16, batch,
+                              cic_out, &cic_out_pairs,
+                              ddc->decim_ratio, ddc->cic_accum);
 
-        /* tmp1 = buf_re * nco_im */
-        dsps_mul_f32(ddc->buf_re, nco_i, ddc->tmp1, batch, 1, 1, 1);
-        /* tmp2 = buf_im * nco_re */
-        dsps_mul_f32(ddc->buf_im, nco_r, ddc->tmp2, batch, 1, 1, 1);
-        /* mix_im = tmp1 + tmp2 */
-        dsps_add_f32(ddc->tmp1, ddc->tmp2, ddc->mix_im, batch, 1, 1, 1);
-
-        /* CIC decimation (accumulate and dump) */
-        for (uint32_t j = 0; j < batch && out_pos + 1 < max_out; j++) {
-            ddc->accum_re += ddc->mix_re[j];
-            ddc->accum_im += ddc->mix_im[j];
-            ddc->accum_count++;
-
-            if (ddc->accum_count >= ddc->decim_ratio) {
-                float o_re = ddc->accum_re / ddc->decim_ratio;
-                float o_im = ddc->accum_im / ddc->decim_ratio;
-
-                /* Convert back to uint8 */
-                int ival = (int)(o_re * 127.5f + 127.5f + 0.5f);
-                int qval = (int)(o_im * 127.5f + 127.5f + 0.5f);
-                if (ival < 0) ival = 0;
-                if (ival > 255) ival = 255;
-                if (qval < 0) qval = 0;
-                if (qval > 255) qval = 255;
-                iq_out[out_pos]     = (uint8_t)ival;
-                iq_out[out_pos + 1] = (uint8_t)qval;
-                out_pos += 2;
-
-                ddc->accum_re = 0;
-                ddc->accum_im = 0;
-                ddc->accum_count = 0;
-            }
+        /* Step 4: int16 -> uint8 output conversion */
+        if (cic_out_pairs > 0) {
+            pie_s16_to_u8(cic_out, iq_out + out_pos, cic_out_pairs * 2);
+            out_pos += cic_out_pairs * 2;
         }
 
-        ddc->nco_pos = (ddc->nco_pos + batch) % ddc->nco_len;
         i += batch * 2;
     }
 
