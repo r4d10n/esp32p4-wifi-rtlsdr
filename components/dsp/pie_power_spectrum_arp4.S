@@ -1,19 +1,22 @@
 /*
- * PIE SIMD: Accumulate power spectrum from int16 FFT output to int32.
+ * PIE SIMD: Accumulate power spectrum from int16 FFT output.
+ *
+ * WARNING: This assembly is DISABLED — needs TRM validation.
+ * Known issues:
+ *   1. esp.vunzip.16 q0, q1 — operates on {q0,q1} as 256-bit pair but q1
+ *      is uninitialized. For a single 128-bit interleaved input, vunzip.16
+ *      is the wrong approach.
+ *   2. esp.vmul.s32.s16xs16 q2, q0, q0, q0 — 4th operand encoding unclear
+ *      without official PIE TRM.
+ *
+ * The C fallback in pie_kernels.c is used instead (PIE_ASM_POWER_SPECTRUM=0).
  *
  * void pie_power_spectrum_accumulate_arp4(const int16_t *fft_out,
- *                                         int32_t *accum, int fft_n);
- *
- * For each bin k: accum[k] += re[k]^2 + im[k]^2
- * Input: interleaved [re0,im0,re1,im1,...] int16
- * Output: int32 power per bin
- *
- * Processes 4 bins per iteration (loads 8 int16 = 4 complex pairs).
- * Uses esp.vmul.s32.s16xs16 for widening multiply.
+ *                                         int64_t *accum, int fft_n);
  *
  * Registers:
  *   a0 = fft_out (const int16_t *)
- *   a1 = accum (int32_t *)
+ *   a1 = accum (int64_t *)
  *   a2 = fft_n (bins, must be multiple of 4)
  *
  * SPDX-License-Identifier: GPL-2.0-or-later

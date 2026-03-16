@@ -12,9 +12,9 @@
 #include "sdkconfig.h"
 #include <stdlib.h>
 
-#if CONFIG_IDF_TARGET_ESP32P4 && CONFIG_DSP_OPTIMIZED
+#if 0 /* Disabled: assembly needs TRM validation for vunzip/vmul encoding */
 extern void pie_power_spectrum_accumulate_arp4(const int16_t *fft_out,
-                                                int32_t *accum, int fft_n);
+                                                int64_t *accum, int fft_n);
 #define PIE_ASM_POWER_SPECTRUM 1
 #else
 #define PIE_ASM_POWER_SPECTRUM 0
@@ -53,7 +53,7 @@ void pie_u8iq_to_s16_windowed(const uint8_t *src, const int16_t *window,
     }
 }
 
-void pie_power_spectrum_accumulate(const int16_t *fft_out, int32_t *accum, int fft_n)
+void pie_power_spectrum_accumulate(const int16_t *fft_out, int64_t *accum, int fft_n)
 {
 #if PIE_ASM_POWER_SPECTRUM
     if ((fft_n & 3) == 0 && fft_n >= 4) {
@@ -65,11 +65,11 @@ void pie_power_spectrum_accumulate(const int16_t *fft_out, int32_t *accum, int f
     for (int k = 0; k < fft_n; k++) {
         int32_t re = (int32_t)fft_out[k * 2];
         int32_t im = (int32_t)fft_out[k * 2 + 1];
-        accum[k] += re * re + im * im;
+        accum[k] += (int64_t)(re * re + im * im);
     }
 }
 
-void pie_power_to_db_u8(const int32_t *power, uint8_t *db_out, int fft_n,
+void pie_power_to_db_u8(const int64_t *power, uint8_t *db_out, int fft_n,
                          int avg_count, float db_min, float db_max)
 {
     float inv = 1.0f / avg_count;
@@ -123,9 +123,6 @@ pie_nco_t *pie_nco_create(uint32_t sample_rate, int32_t offset_hz)
     /* Cap table size to avoid excessive memory. 32K entries = 64KB. */
     if (period > 32768) period = 32768;
 
-    /* Round up to multiple of 8 for SIMD alignment */
-    period = (period + 7) & ~7u;
-
     nco->table = heap_caps_aligned_alloc(16, period * 2 * sizeof(int16_t), MALLOC_CAP_DEFAULT);
     if (!nco->table) {
         free(nco);
@@ -152,7 +149,7 @@ pie_nco_t *pie_nco_create(uint32_t sample_rate, int32_t offset_hz)
 void pie_nco_free(pie_nco_t *nco)
 {
     if (!nco) return;
-    free(nco->table);
+    heap_caps_free(nco->table);
     free(nco);
 }
 

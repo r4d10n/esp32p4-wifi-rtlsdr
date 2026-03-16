@@ -33,31 +33,31 @@ void pie_u8iq_to_s16_windowed(const uint8_t *src, const int16_t *window,
                                int16_t *dst, int iq_pairs);
 
 /**
- * Accumulate power spectrum from int16 FFT output into int32 buffer.
+ * Accumulate power spectrum from int16 FFT output into int64 buffer.
  *
  * For each bin k: accum[k] += re[k]*re[k] + im[k]*im[k]
  * Input is interleaved [re0,im0,re1,im1,...] from dsps_fft2r_sc16.
  *
  * @param fft_out   int16 interleaved FFT output [16-byte aligned]
- * @param accum     int32 power accumulator [16-byte aligned, fft_n entries]
+ * @param accum     int64 power accumulator [16-byte aligned, fft_n entries]
  * @param fft_n     FFT size (number of bins, must be multiple of 8)
  */
-void pie_power_spectrum_accumulate(const int16_t *fft_out, int32_t *accum, int fft_n);
+void pie_power_spectrum_accumulate(const int16_t *fft_out, int64_t *accum, int fft_n);
 
 /**
- * Convert int32 power spectrum to uint8 dB with FFT shift.
+ * Convert int64 power spectrum to uint8 dB with FFT shift.
  *
  * Uses integer log2 approximation (CLZ + LUT) instead of float log10f.
  * Output is FFT-shifted: second half first, then first half.
  *
- * @param power     int32 accumulated power [16-byte aligned, fft_n entries]
+ * @param power     int64 accumulated power [16-byte aligned, fft_n entries]
  * @param db_out    uint8 dB output (0-255) [fft_n entries]
  * @param fft_n     FFT size
  * @param avg_count Number of frames averaged (for normalization)
  * @param db_min    Minimum dB value (maps to 0)
  * @param db_max    Maximum dB value (maps to 255)
  */
-void pie_power_to_db_u8(const int32_t *power, uint8_t *db_out, int fft_n,
+void pie_power_to_db_u8(const int64_t *power, uint8_t *db_out, int fft_n,
                          int avg_count, float db_min, float db_max);
 
 /* ── DDC Pipeline Kernels ── */

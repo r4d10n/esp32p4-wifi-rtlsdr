@@ -58,7 +58,7 @@ static float s_db_min =  10.0f;
 static float s_db_max =  90.0f;
 
 /* Dynamically allocated, 16-byte aligned buffers */
-static int32_t *fft_power   = NULL;   /* [fft_n] — accumulated power spectrum (int32) */
+static int64_t *fft_power   = NULL;   /* [fft_n] — accumulated power spectrum (int64) */
 
 /* INT16 FFT path (PIE SIMD accelerated — 4.3-4.8x faster than float) */
 static int16_t *fft_sc16_window = NULL;  /* [fft_n] — Hann window as Q15 */
@@ -71,10 +71,10 @@ static int      fft_input_pos = 0;
 
 static void fft_free_buffers(void)
 {
-    if (fft_power)       { free(fft_power);       fft_power       = NULL; }
-    if (fft_sc16_window) { free(fft_sc16_window); fft_sc16_window = NULL; }
-    if (fft_sc16_input)  { free(fft_sc16_input);  fft_sc16_input  = NULL; }
-    if (fft_sc16_work)   { free(fft_sc16_work);   fft_sc16_work   = NULL; }
+    if (fft_power)       { heap_caps_free(fft_power);       fft_power       = NULL; }
+    if (fft_sc16_window) { heap_caps_free(fft_sc16_window); fft_sc16_window = NULL; }
+    if (fft_sc16_input)  { heap_caps_free(fft_sc16_input);  fft_sc16_input  = NULL; }
+    if (fft_sc16_work)   { heap_caps_free(fft_sc16_work);   fft_sc16_work   = NULL; }
 }
 
 void dsp_fft_init(int fft_size)
@@ -91,7 +91,7 @@ void dsp_fft_init(int fft_size)
     fft_n = n;
 
     /* Allocate 16-byte aligned buffers */
-    fft_power       = heap_caps_aligned_alloc(16, n * sizeof(int32_t), MALLOC_CAP_DEFAULT);
+    fft_power       = heap_caps_aligned_alloc(16, n * sizeof(int64_t), MALLOC_CAP_DEFAULT);
     fft_sc16_window = heap_caps_aligned_alloc(16, n * sizeof(int16_t), MALLOC_CAP_DEFAULT);
     fft_sc16_input  = heap_caps_aligned_alloc(16, n * 2 * sizeof(int16_t), MALLOC_CAP_DEFAULT);
     fft_sc16_work   = heap_caps_aligned_alloc(16, n * 2 * sizeof(int16_t), MALLOC_CAP_DEFAULT);
@@ -132,7 +132,7 @@ void dsp_fft_init(int fft_size)
 void dsp_fft_reset(void)
 {
     if (fft_power && fft_n > 0) {
-        memset(fft_power, 0, fft_n * sizeof(int32_t));
+        memset(fft_power, 0, fft_n * sizeof(int64_t));
     }
     fft_avg_count = 0;
     fft_input_pos = 0;
@@ -242,7 +242,7 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
 #endif
 
                 /* Reset accumulator */
-                memset(fft_power, 0, fft_n * sizeof(int32_t));
+                memset(fft_power, 0, fft_n * sizeof(int64_t));
                 fft_avg_count = 0;
             }
         }
@@ -324,8 +324,8 @@ void dsp_ddc_free(dsp_ddc_t *ddc)
 {
     if (!ddc) return;
     pie_nco_free(ddc->nco);
-    free(ddc->buf_s16);
-    free(ddc->mix_s16);
+    heap_caps_free(ddc->buf_s16);
+    heap_caps_free(ddc->mix_s16);
     free(ddc);
 }
 
@@ -345,12 +345,8 @@ int dsp_ddc_process(dsp_ddc_t *ddc, const uint8_t *iq_in, uint32_t in_len,
         uint32_t batch = remaining_pairs;
         if (batch > DDC_BATCH_SIZE) batch = DDC_BATCH_SIZE;
 
-        /* Round down to multiple of 8 for SIMD */
-        batch = batch & ~7u;
-        if (batch == 0) {
-            /* Handle remaining < 8 pairs with scalar fallback */
-            break;
-        }
+        /* Process full batch without rounding — C functions handle any count */
+        if (batch == 0) break;
 
         /* Step 1: uint8 IQ -> int16 with bias removal */
         pie_u8_to_s16_bias(iq_in + i, ddc->buf_s16, batch * 2);
@@ -360,6 +356,7 @@ int dsp_ddc_process(dsp_ddc_t *ddc, const uint8_t *iq_in, uint32_t in_len,
 
         /* Step 3: CIC decimation */
         int cic_out_pairs = (int)((max_out - out_pos) / 2);
+        if (cic_out_pairs > DDC_BATCH_SIZE) cic_out_pairs = DDC_BATCH_SIZE;
         pie_cic_decimate_s16(ddc->mix_s16, batch,
                               cic_out, &cic_out_pairs,
                               ddc->decim_ratio, ddc->cic_accum);
