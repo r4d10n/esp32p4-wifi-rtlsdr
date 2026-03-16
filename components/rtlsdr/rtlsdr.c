@@ -26,6 +26,9 @@ static const char *TAG = "rtlsdr";
 #define CTRL_IN     (USB_BM_REQUEST_TYPE_TYPE_VENDOR | USB_BM_REQUEST_TYPE_DIR_IN)
 #define CTRL_OUT    (USB_BM_REQUEST_TYPE_TYPE_VENDOR | USB_BM_REQUEST_TYPE_DIR_OUT)
 
+/* Max retries after EP0 STALL before giving up */
+#define CTRL_STALL_RETRIES  2
+
 /* Number of async bulk transfer buffers */
 #define DEFAULT_BUF_NUM     6
 #define DEFAULT_BUF_LEN     (32 * 512)  /* 16KB per transfer */
@@ -96,62 +99,73 @@ static esp_err_t rtlsdr_ctrl_transfer(rtlsdr_dev_t *dev, uint8_t bmRequestType,
     xSemaphoreTake(dev->ctrl_mutex, portMAX_DELAY);
     usb_transfer_t *xfer = dev->ctrl_xfer;
 
-    xfer->device_handle = dev->dev_hdl;
-    xfer->callback = ctrl_xfer_cb;
-    xfer->context = dev;
-    xfer->bEndpointAddress = 0;
-    xfer->timeout_ms = RTLSDR_CTRL_TIMEOUT_MS;
+    for (int attempt = 0; attempt <= CTRL_STALL_RETRIES; attempt++) {
+        xfer->device_handle = dev->dev_hdl;
+        xfer->callback = ctrl_xfer_cb;
+        xfer->context = dev;
+        xfer->bEndpointAddress = 0;
+        xfer->timeout_ms = RTLSDR_CTRL_TIMEOUT_MS;
 
-    /* Fill setup packet */
-    usb_setup_packet_t *setup = (usb_setup_packet_t *)xfer->data_buffer;
-    setup->bmRequestType = bmRequestType;
-    setup->bRequest = 0;
-    setup->wValue = wValue;
-    setup->wIndex = wIndex;
-    setup->wLength = wLength;
+        /* Fill setup packet */
+        usb_setup_packet_t *setup = (usb_setup_packet_t *)xfer->data_buffer;
+        setup->bmRequestType = bmRequestType;
+        setup->bRequest = 0;
+        setup->wValue = wValue;
+        setup->wIndex = wIndex;
+        setup->wLength = wLength;
 
-    if ((bmRequestType & USB_BM_REQUEST_TYPE_DIR_IN) == 0 && wLength > 0) {
-        memcpy(xfer->data_buffer + sizeof(usb_setup_packet_t), data, wLength);
-    }
+        if ((bmRequestType & USB_BM_REQUEST_TYPE_DIR_IN) == 0 && wLength > 0) {
+            memcpy(xfer->data_buffer + sizeof(usb_setup_packet_t), data, wLength);
+        }
 
-    xfer->num_bytes = sizeof(usb_setup_packet_t) + wLength;
+        xfer->num_bytes = sizeof(usb_setup_packet_t) + wLength;
 
-    esp_err_t ret = usb_host_transfer_submit_control(dev->client_hdl, xfer);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Control transfer submit failed: %s", esp_err_to_name(ret));
-        xSemaphoreGive(dev->ctrl_mutex);
-        return ret;
-    }
+        esp_err_t ret = usb_host_transfer_submit_control(dev->client_hdl, xfer);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Control transfer submit failed: %s", esp_err_to_name(ret));
+            xSemaphoreGive(dev->ctrl_mutex);
+            return ret;
+        }
 
-    if (xSemaphoreTake(dev->ctrl_sem, pdMS_TO_TICKS(RTLSDR_CTRL_TIMEOUT_MS + 100)) != pdTRUE) {
-        ESP_LOGE(TAG, "Control transfer timeout");
-        xSemaphoreGive(dev->ctrl_mutex);
-        return ESP_ERR_TIMEOUT;
-    }
+        if (xSemaphoreTake(dev->ctrl_sem, pdMS_TO_TICKS(RTLSDR_CTRL_TIMEOUT_MS + 100)) != pdTRUE) {
+            ESP_LOGE(TAG, "Control transfer timeout");
+            xSemaphoreGive(dev->ctrl_mutex);
+            return ESP_ERR_TIMEOUT;
+        }
 
-    if (dev->ctrl_status != ESP_OK) {
-        ESP_LOGE(TAG, "Ctrl xfer fail: bmReqType=0x%02x wValue=0x%04x wIndex=0x%04x wLen=%d status=%d",
-                 ((usb_setup_packet_t *)xfer->data_buffer)->bmRequestType,
-                 ((usb_setup_packet_t *)xfer->data_buffer)->wValue,
-                 ((usb_setup_packet_t *)xfer->data_buffer)->wIndex,
-                 ((usb_setup_packet_t *)xfer->data_buffer)->wLength,
-                 xfer->status);
-        /* After a STALL, halt must be cleared before EP0 can be used again */
+        if (dev->ctrl_status == ESP_OK) {
+            /* Success — copy IN data and return */
+            if ((bmRequestType & USB_BM_REQUEST_TYPE_DIR_IN) && wLength > 0) {
+                memcpy(data, xfer->data_buffer + sizeof(usb_setup_packet_t), wLength);
+            }
+            xSemaphoreGive(dev->ctrl_mutex);
+            return ESP_OK;
+        }
+
+        /* Transfer failed */
         if (xfer->status == USB_TRANSFER_STATUS_STALL) {
+            /* Clear the STALL condition so EP0 can be used again */
             usb_host_endpoint_halt(dev->dev_hdl, 0);
             usb_host_endpoint_flush(dev->dev_hdl, 0);
             usb_host_endpoint_clear(dev->dev_hdl, 0);
+
+            if (attempt < CTRL_STALL_RETRIES) {
+                ESP_LOGW(TAG, "EP0 STALL (attempt %d/%d), retrying...",
+                         attempt + 1, CTRL_STALL_RETRIES + 1);
+                vTaskDelay(pdMS_TO_TICKS(5));
+                continue;  /* retry the transfer */
+            }
         }
+
+        /* Non-STALL failure or retries exhausted */
+        ESP_LOGE(TAG, "Ctrl xfer fail: bmReqType=0x%02x wValue=0x%04x wIndex=0x%04x wLen=%d status=%d",
+                 bmRequestType, wValue, wIndex, wLength, xfer->status);
         xSemaphoreGive(dev->ctrl_mutex);
         return ESP_FAIL;
     }
 
-    if ((bmRequestType & USB_BM_REQUEST_TYPE_DIR_IN) && wLength > 0) {
-        memcpy(data, xfer->data_buffer + sizeof(usb_setup_packet_t), wLength);
-    }
-
     xSemaphoreGive(dev->ctrl_mutex);
-    return ESP_OK;
+    return ESP_FAIL;
 }
 
 /*

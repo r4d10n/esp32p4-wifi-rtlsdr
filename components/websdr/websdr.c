@@ -75,6 +75,9 @@ struct websdr_server {
     /* Deferred FFT size change (applied in task loop to avoid race) */
     volatile int        pending_fft_size;
 
+    /* Deferred freq change — coalesces rapid tuning into one USB call */
+    volatile uint32_t   pending_freq;
+
     /* Processing task */
     TaskHandle_t        fft_task;
     volatile bool       running;
@@ -143,24 +146,36 @@ static void free_client(ws_client_t *c)
     c->iq_subscribed = false;
 }
 
-static void send_ws_text(httpd_handle_t hd, int fd, const char *text)
+static esp_err_t send_ws_text(httpd_handle_t hd, int fd, const char *text)
 {
     httpd_ws_frame_t frame = {
         .type = HTTPD_WS_TYPE_TEXT,
         .payload = (uint8_t *)text,
         .len = strlen(text),
     };
-    httpd_ws_send_frame_async(hd, fd, &frame);
+    return httpd_ws_send_frame_async(hd, fd, &frame);
 }
 
-static void send_ws_binary(httpd_handle_t hd, int fd, const uint8_t *data, size_t len)
+static esp_err_t send_ws_binary(httpd_handle_t hd, int fd, const uint8_t *data, size_t len)
 {
     httpd_ws_frame_t frame = {
         .type = HTTPD_WS_TYPE_BINARY,
         .payload = (uint8_t *)data,
         .len = len,
     };
-    httpd_ws_send_frame_async(hd, fd, &frame);
+    return httpd_ws_send_frame_async(hd, fd, &frame);
+}
+
+/* Mark a client as dead by fd.  Must be called WITHOUT client_mutex held. */
+static void evict_client_by_fd(websdr_server_t *srv, int fd)
+{
+    xSemaphoreTake(srv->client_mutex, portMAX_DELAY);
+    ws_client_t *c = find_client_by_fd(srv, fd);
+    if (c) {
+        ESP_LOGW(TAG, "Evicting dead client fd=%d", fd);
+        free_client(c);
+    }
+    xSemaphoreGive(srv->client_mutex);
 }
 
 static void send_device_info(websdr_server_t *srv, int fd)
@@ -220,18 +235,9 @@ static void handle_ws_command(websdr_server_t *srv, ws_client_t *client,
         if (val && cJSON_IsNumber(val)) {
             uint32_t freq = (uint32_t)val->valuedouble;
             ESP_LOGI(TAG, "Set freq: %lu Hz", (unsigned long)freq);
-            rtlsdr_set_center_freq(srv->dev, freq);
-            /* Notify all clients of new freq */
-            char buf[128];
-            snprintf(buf, sizeof(buf), "{\"type\":\"freq\",\"value\":%lu}",
-                     (unsigned long)freq);
-            xSemaphoreTake(srv->client_mutex, portMAX_DELAY);
-            for (int i = 0; i < MAX_WS_CLIENTS; i++) {
-                if (srv->clients[i].active) {
-                    send_ws_text(srv->httpd, srv->clients[i].fd, buf);
-                }
-            }
-            xSemaphoreGive(srv->client_mutex);
+            /* Defer to FFT task — coalesces rapid tuning so only the
+             * latest value hits USB, preventing STALL cascades. */
+            srv->pending_freq = freq;
         }
     } else if (strcmp(cmd_str, "gain") == 0) {
         cJSON *val = cJSON_GetObjectItem(root, "value");
@@ -507,6 +513,28 @@ static void fft_process_task(void *arg)
             send_config_to_all(srv);
         }
 
+        /* Apply deferred frequency change (coalesces rapid tuning) */
+        uint32_t pend_freq = srv->pending_freq;
+        if (pend_freq > 0) {
+            srv->pending_freq = 0;
+            esp_err_t fret = rtlsdr_set_center_freq(srv->dev, pend_freq);
+            if (fret == ESP_OK) {
+                /* Notify all clients of new freq */
+                char fbuf[128];
+                snprintf(fbuf, sizeof(fbuf), "{\"type\":\"freq\",\"value\":%lu}",
+                         (unsigned long)pend_freq);
+                xSemaphoreTake(srv->client_mutex, portMAX_DELAY);
+                for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+                    if (srv->clients[i].active) {
+                        send_ws_text(srv->httpd, srv->clients[i].fd, fbuf);
+                    }
+                }
+                xSemaphoreGive(srv->client_mutex);
+            } else {
+                ESP_LOGW(TAG, "Freq change to %lu Hz failed", (unsigned long)pend_freq);
+            }
+        }
+
         /* Read all available IQ data from ring */
         uint32_t avail = iq_ring_available(srv);
         if (avail > chunk_size) avail = chunk_size;
@@ -540,8 +568,10 @@ static void fft_process_task(void *arg)
                     xSemaphoreGive(srv->client_mutex);
 
                     for (int j = 0; j < fft_fd_count; j++) {
-                        send_ws_binary(srv->httpd, fft_fds[j],
-                                       fft_frame, frame_len);
+                        if (send_ws_binary(srv->httpd, fft_fds[j],
+                                           fft_frame, frame_len) != ESP_OK) {
+                            evict_client_by_fd(srv, fft_fds[j]);
+                        }
                     }
                 }
             }
@@ -577,8 +607,10 @@ static void fft_process_task(void *arg)
                 memcpy(iq_frame + 1,
                        ddc_buf_pool + j * DDC_OUT_BUF_SIZE,
                        ddc_sends[j].len);
-                send_ws_binary(srv->httpd, ddc_sends[j].fd,
-                               iq_frame, 1 + ddc_sends[j].len);
+                if (send_ws_binary(srv->httpd, ddc_sends[j].fd,
+                                   iq_frame, 1 + ddc_sends[j].len) != ESP_OK) {
+                    evict_client_by_fd(srv, ddc_sends[j].fd);
+                }
             }
         }
 
