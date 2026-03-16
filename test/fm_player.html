@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<title>WBFM Player - ESP32-P4 WebSDR</title>
+<style>
+body{background:#111;color:#eee;font:14px monospace;margin:0;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh}
+.box{background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:24px;width:400px}
+h2{margin:0 0 16px;color:#FFB000;text-align:center}
+.row{display:flex;align-items:center;gap:8px;margin:8px 0}
+label{width:60px;color:#888;font-size:12px}
+input[type=range]{flex:1;accent-color:#FFB000}
+.val{width:50px;text-align:right;color:#FFB000;font-size:12px}
+button{padding:8px 24px;border:1px solid #FFB000;background:transparent;color:#FFB000;cursor:pointer;border-radius:4px;font:bold 14px monospace}
+button:hover{background:#FFB000;color:#111}
+button.active{background:#FF4400;border-color:#FF4400;color:#fff}
+#status{text-align:center;margin:12px 0;color:#888;font-size:12px}
+#meter{height:4px;background:#222;border-radius:2px;margin:8px 0}
+#meter-fill{height:100%;background:#FFB000;border-radius:2px;width:0%;transition:width 0.1s}
+.freq{font-size:28px;text-align:center;color:#FFB000;margin:8px 0;letter-spacing:2px}
+</style>
+</head><body>
+<div class="box">
+<h2>WBFM Player</h2>
+<div class="freq" id="freq-display">106.800.000</div>
+<div class="row"><label>Freq MHz</label><input type="range" id="freq" min="88" max="108" step="0.1" value="106.8"><span class="val" id="freq-val">106.8</span></div>
+<div class="row"><label>Gain</label><input type="range" id="gain" min="0" max="496" step="10" value="200"><span class="val" id="gain-val">200</span></div>
+<div class="row"><label>Volume</label><input type="range" id="vol" min="0" max="100" value="50"><span class="val" id="vol-val">50%</span></div>
+<div id="meter"><div id="meter-fill"></div></div>
+<div style="text-align:center"><button id="play-btn" onclick="toggle()">&#9654; Play</button></div>
+<div id="status">Disconnected</div>
+</div>
+<script>
+var ws,aCtx,wkNode,gNode,iqRate=0,playing=false,prevI=0,prevQ=0;
+var host='192.168.1.232',port='8080';
+
+// AudioWorklet processor code — runs in audio thread
+var PROC_CODE=`
+class FMProc extends AudioWorkletProcessor {
+  constructor(){super();this.buf=[];this.prevI=0;this.prevQ=0;this.deY=0;
+    this.port.onmessage=(e)=>{if(e.data.type==='iq')this.buf.push(e.data.d);
+      if(e.data.type==='cfg'){this.iqRate=e.data.rate;this.vol=e.data.vol;}};
+    this.iqRate=150000;this.vol=0.5;}
+  process(i,o){
+    var out=o[0][0];if(!out)return true;
+    var ar=48000,rBuf=this.rBuf||(this.rBuf=[]);
+    // Demod queued IQ frames
+    while(this.buf.length>0&&rBuf.length<out.length*2){
+      var raw=this.buf.shift();
+      var n=raw.length/2;if(n<2)continue;
+      // FM discriminator
+      for(var k=0;k<n;k++){
+        var ci=(raw[k*2]-127.5)/127.5, cq=(raw[k*2+1]-127.5)/127.5;
+        var re=ci*this.prevI+cq*this.prevQ, im=cq*this.prevI-ci*this.prevQ;
+        var s=Math.atan2(im,re)/Math.PI;
+        this.prevI=ci; this.prevQ=cq;
+        // De-emphasis (75us IIR)
+        var a=0.0147; // 1/(75e-6*48000+1) ≈ 0.217 at iqRate, but we apply after resample
+        this.deY=0.217*s+0.783*this.deY;
+        s=this.deY;
+        this.sIdx=(this.sIdx||0)+1;
+        // Decimate: only push every (iqRate/48000)th sample
+        var dec=Math.round(this.iqRate/ar);
+        if(dec<1)dec=1;
+        if(this.sIdx%dec===0)rBuf.push(s);
+      }
+    }
+    // Output with soft limiter
+    var vol=this.vol;
+    for(var p=0;p<out.length;p++){
+      if(rBuf.length>0){
+        var v=rBuf.shift()*vol;
+        out[p]=Math.tanh(v*2)*0.35;
+      }else out[p]=0;
+    }
+    // Report level
+    if(this.cnt===undefined)this.cnt=0;
+    if(++this.cnt%20===0){var pk=0;for(var j=0;j<out.length;j++){var a=Math.abs(out[j]);if(a>pk)pk=a;}
+      this.port.postMessage({pk:pk,buf:rBuf.length});}
+    this.rBuf=rBuf;
+    return true;
+  }
+}
+registerProcessor('fm-proc',FMProc);
+`;
+
+function connect(){
+  ws=new WebSocket('ws://'+host+':'+port+'/ws');
+  ws.binaryType='arraybuffer';
+  ws.onopen=function(){
+    document.getElementById('status').textContent='Connected';
+    ws.send(JSON.stringify({cmd:'sample_rate',value:300000}));
+    setTimeout(function(){
+      ws.send(JSON.stringify({cmd:'freq',value:Math.round(parseFloat(document.getElementById('freq').value)*1e6)}));
+      ws.send(JSON.stringify({cmd:'gain',value:parseInt(document.getElementById('gain').value)}));
+      ws.send(JSON.stringify({cmd:'subscribe_iq',offset:0,bw:150000}));
+    },500);
+  };
+  ws.onclose=function(){document.getElementById('status').textContent='Disconnected';};
+  ws.onmessage=function(e){
+    if(typeof e.data==='string'){
+      var m=JSON.parse(e.data);
+      if(m.type==='iq_start'){iqRate=m.rate;if(wkNode)wkNode.port.postMessage({type:'cfg',rate:iqRate,vol:parseInt(document.getElementById('vol').value)/100});}
+    }else{
+      var d=new Uint8Array(e.data);
+      if(d[0]===2&&wkNode)wkNode.port.postMessage({type:'iq',d:d.slice(1)});
+    }
+  };
+}
+
+function startAudio(){
+  aCtx=new(window.AudioContext||window.webkitAudioContext)({sampleRate:48000});
+  aCtx.resume();
+  gNode=aCtx.createGain();gNode.gain.value=1;gNode.connect(aCtx.destination);
+  var blob=new Blob([PROC_CODE],{type:'application/javascript'});
+  var url=URL.createObjectURL(blob);
+  aCtx.audioWorklet.addModule(url).then(function(){
+    URL.revokeObjectURL(url);
+    wkNode=new AudioWorkletNode(aCtx,'fm-proc');
+    wkNode.port.onmessage=function(e){
+      document.getElementById('meter-fill').style.width=Math.min(100,e.data.pk/0.35*100)+'%';
+      document.getElementById('status').textContent='Playing | buf:'+e.data.buf+' | rate:'+iqRate+'Hz';
+    };
+    wkNode.connect(gNode);
+    wkNode.port.postMessage({type:'cfg',rate:iqRate||150000,vol:parseInt(document.getElementById('vol').value)/100});
+    document.getElementById('status').textContent='Audio started';
+  }).catch(function(e){document.getElementById('status').textContent='AudioWorklet failed: '+e;});
+}
+
+function toggle(){
+  var btn=document.getElementById('play-btn');
+  if(!playing){
+    connect();
+    setTimeout(startAudio,1000);
+    btn.innerHTML='&#9724; Stop';btn.classList.add('active');playing=true;
+  }else{
+    if(wkNode){wkNode.disconnect();wkNode=null;}
+    if(aCtx){aCtx.close();aCtx=null;}
+    if(ws){try{ws.send(JSON.stringify({cmd:'unsubscribe_iq'}));}catch(e){}ws.close();ws=null;}
+    btn.innerHTML='&#9654; Play';btn.classList.remove('active');playing=false;
+    document.getElementById('status').textContent='Stopped';
+    document.getElementById('meter-fill').style.width='0%';
+  }
+}
+
+document.getElementById('freq').oninput=function(){
+  var f=parseFloat(this.value);
+  document.getElementById('freq-val').textContent=f.toFixed(1);
+  var hz=Math.round(f*1e6);
+  document.getElementById('freq-display').textContent=String(hz).replace(/(\d{3})(\d{3})(\d{3})/,'$1.$2.$3');
+  if(ws&&ws.readyState===1)ws.send(JSON.stringify({cmd:'freq',value:hz}));
+};
+document.getElementById('gain').oninput=function(){
+  document.getElementById('gain-val').textContent=this.value;
+  if(ws&&ws.readyState===1)ws.send(JSON.stringify({cmd:'gain',value:parseInt(this.value)}));
+};
+document.getElementById('vol').oninput=function(){
+  document.getElementById('vol-val').textContent=this.value+'%';
+  if(wkNode)wkNode.port.postMessage({type:'cfg',rate:iqRate,vol:parseInt(this.value)/100});
+};
+</script>
+</body></html>
