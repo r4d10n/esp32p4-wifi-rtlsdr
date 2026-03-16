@@ -53,8 +53,8 @@ DTMF_MAP = {
 
 DTMF_SEQUENCE = "123A456B789C*0#D"
 
-# Test frequencies (MHz) — must be in PlutoSDR TX (325-3800) AND RTL-SDR RX (24-1766) overlap
-TEST_FREQS_MHZ = [433.0, 446.0, 800.0, 915.0, 1090.0, 1420.0]
+# Test frequencies (MHz) — PlutoSDR TX range 47-6000, RTL-SDR RX range 24-1766
+TEST_FREQS_MHZ = [88.0, 108.0, 145.0, 174.0, 290.0, 435.0, 915.0, 1090.0, 1420.0, 1700.0]
 
 # FM parameters
 FM_DEVIATION = 5000       # 5 kHz NFM
@@ -146,12 +146,14 @@ def detect_dtmf(audio, sample_rate, block_ms=40):
     return results
 
 
-def consolidate_detections(detections, min_gap_ms=50):
-    """Merge consecutive detections of same character into single events."""
+def consolidate_detections(detections, min_gap_ms=50, block_ms=30):
+    """Merge consecutive detections of same character into single events.
+    Returns list of (char, snr, low_mag, high_mag, hit_count, start_ms, duration_ms)."""
     if not detections:
         return []
     merged = []
     prev_char = detections[0][1]
+    start_time = detections[0][0]
     prev_time = detections[0][0]
     best_snr = detections[0][6]
     best_low_mag = detections[0][4]
@@ -167,15 +169,20 @@ def consolidate_detections(detections, min_gap_ms=50):
             count += 1
             prev_time = t
         else:
-            merged.append((prev_char, best_snr, best_low_mag, best_high_mag, count))
+            duration = prev_time - start_time + block_ms
+            merged.append((prev_char, best_snr, best_low_mag, best_high_mag,
+                           count, start_time, duration))
             prev_char = c
+            start_time = t
             prev_time = t
             best_snr = snr
             best_low_mag = ml
             best_high_mag = mh
             count = 1
 
-    merged.append((prev_char, best_snr, best_low_mag, best_high_mag, count))
+    duration = prev_time - start_time + block_ms
+    merged.append((prev_char, best_snr, best_low_mag, best_high_mag,
+                   count, start_time, duration))
     return merged
 
 
@@ -404,6 +411,27 @@ def compute_metrics(expected_seq, detected_chars, all_detections):
     mags_low = [d[2] for d in detected_chars] if detected_chars else [0]
     mags_high = [d[3] for d in detected_chars] if detected_chars else [0]
 
+    # Timing analysis: tone duration vs expected 150ms, gap vs expected 100ms
+    expected_tone_ms = TONE_DURATION * 1000   # 150ms
+    expected_gap_ms = SILENCE_DURATION * 1000  # 100ms
+
+    tone_durations = [d[6] for d in detected_chars] if detected_chars else []
+    tone_errors = [abs(dur - expected_tone_ms) for dur in tone_durations]
+
+    # Compute gaps between consecutive detections (end of one to start of next)
+    gap_errors = []
+    gaps = []
+    for i in range(1, len(detected_chars)):
+        prev_end = detected_chars[i - 1][5] + detected_chars[i - 1][6]
+        curr_start = detected_chars[i][5]
+        gap = curr_start - prev_end
+        if gap >= 0:
+            gaps.append(gap)
+            gap_errors.append(abs(gap - expected_gap_ms))
+
+    timing_error_ms = float(np.mean(tone_errors)) if tone_errors else 0.0
+    gap_error_ms = float(np.mean(gap_errors)) if gap_errors else 0.0
+
     return {
         'expected': expected_seq,
         'detected': detected_str,
@@ -416,6 +444,10 @@ def compute_metrics(expected_seq, detected_chars, all_detections):
         'snr_mean': np.mean(snrs),
         'mag_low_mean': np.mean(mags_low),
         'mag_high_mean': np.mean(mags_high),
+        'timing_error_ms': timing_error_ms,
+        'gap_error_ms': gap_error_ms,
+        'tone_durations': tone_durations,
+        'gaps': gaps,
     }
 
 
@@ -433,18 +465,25 @@ def print_metrics(metrics, freq_mhz, iteration):
           f"mean={metrics['snr_mean']:.1f}dB")
     print(f"  Magnitude: low={metrics['mag_low_mean']:.4f} "
           f"high={metrics['mag_high_mean']:.4f}")
+    print(f"  Timing:    tone_err={metrics['timing_error_ms']:.1f}ms "
+          f"gap_err={metrics['gap_error_ms']:.1f}ms "
+          f"(expected: tone={TONE_DURATION*1000:.0f}ms gap={SILENCE_DURATION*1000:.0f}ms)")
 
     # Per-character detail
     if metrics['detected']:
-        print(f"\n  {'Char':>4} {'SNR':>7} {'LowMag':>8} {'HighMag':>8} {'Hits':>5}")
-        print(f"  {'─'*36}")
+        print(f"\n  {'Char':>4} {'SNR':>7} {'LowMag':>8} {'HighMag':>8} "
+              f"{'Hits':>5} {'Dur ms':>7} {'TErr':>6}")
+        print(f"  {'─'*55}")
 
 
 def print_detection_detail(detected_chars):
-    """Print per-character detection detail."""
-    for char, snr, ml, mh, count in detected_chars:
+    """Print per-character detection detail with timing."""
+    expected_tone_ms = TONE_DURATION * 1000
+    for char, snr, ml, mh, count, start_ms, dur_ms in detected_chars:
+        tone_err = dur_ms - expected_tone_ms
         status = "✓" if snr > 10 else "~" if snr > 6 else "✗"
-        print(f"  {status} {char:>3} {snr:>6.1f}dB {ml:>8.4f} {mh:>8.4f} {count:>5}")
+        print(f"  {status} {char:>3} {snr:>6.1f}dB {ml:>8.4f} {mh:>8.4f} "
+              f"{count:>5} {dur_ms:>6.0f} {tone_err:>+5.0f}")
 
 
 def save_debug_wav(audio, filename):
@@ -622,13 +661,18 @@ def run_test(args):
                     'detected': metrics['detected'],
                 }
 
-            # If perfect detection, skip other gains
-            if metrics['accuracy'] >= 100:
-                print(f"\n  ★ PERFECT detection at {freq_mhz:.1f}MHz gain={gain_db}dB!")
+            # Quality gate: accuracy AND timing must be good
+            timing_ok = (metrics['timing_error_ms'] <= 0.2 * TONE_DURATION * 1000)
+            quality_perfect = (metrics['accuracy'] >= 100 and timing_ok)
+
+            if quality_perfect:
+                print(f"\n  ★ PERFECT detection at {freq_mhz:.1f}MHz gain={gain_db}dB!"
+                      f" (timing_err={metrics['timing_error_ms']:.1f}ms"
+                      f" gap_err={metrics['gap_error_ms']:.1f}ms)")
                 break
 
-            # If good enough (>75%), try one more gain step
-            if metrics['accuracy'] >= 75 and gains.index(gain_db) >= 2:
+            # If good enough (>75% and timing < 20%), try one more gain step
+            if metrics['accuracy'] >= 75 and timing_ok and gains.index(gain_db) >= 2:
                 break
 
     # ─────────────── Final Summary ───────────────
@@ -636,13 +680,16 @@ def run_test(args):
     print(f"\n{'═'*70}")
     print(f"  FINAL RESULTS")
     print(f"{'═'*70}")
-    print(f"\n  {'Freq':>8} {'Gain':>6} {'Accuracy':>8} {'SNR':>8} {'Detected':>20}")
-    print(f"  {'─'*56}")
+    print(f"\n  {'Freq':>8} {'Gain':>6} {'Accuracy':>8} {'SNR':>8} "
+          f"{'ToneErr':>8} {'GapErr':>8} {'Detected':>20}")
+    print(f"  {'─'*74}")
 
     for r in all_results:
         status = "★" if r['accuracy'] >= 100 else "✓" if r['accuracy'] >= 75 else "✗"
         print(f"  {status} {r['freq_mhz']:>6.1f} {r['gain_db']:>5}dB "
-              f"{r['accuracy']:>6.0f}% {r['snr_mean']:>6.1f}dB  {r['detected']:>18}")
+              f"{r['accuracy']:>6.0f}% {r['snr_mean']:>6.1f}dB "
+              f"{r['timing_error_ms']:>6.1f}ms {r['gap_error_ms']:>6.1f}ms "
+              f" {r['detected']:>18}")
 
     print(f"\n  Best: {best_overall['accuracy']:.0f}% at {best_overall['freq']:.1f}MHz "
           f"gain={best_overall['gain']}dB SNR={best_overall['snr']:.1f}dB")

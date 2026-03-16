@@ -36,7 +36,7 @@ extern const uint8_t sdr_css_end[]      asm("_binary_sdr_css_end");
 
 #define MAX_WS_CLIENTS      3
 #define IQ_BUF_SIZE         (256 * 1024)    /* IQ ring — 125ms at 1MSPS, PSRAM backed */
-#define TASK_PERIOD_MS      10              /* Internal loop rate (100Hz) for DDC throughput */
+#define TASK_PERIOD_MS      5               /* Internal loop rate (200Hz) for DDC throughput */
 #define DDC_OUT_BUF_SIZE    8192
 
 /* ──────────────────────── Server State ──────────────────────── */
@@ -448,13 +448,13 @@ static void fft_process_task(void *arg)
 {
     websdr_server_t *srv = (websdr_server_t *)arg;
 
-    /* Internal loop runs at TASK_PERIOD_MS (10ms = 100Hz) for DDC throughput.
+    /* Internal loop runs at TASK_PERIOD_MS (5ms = 200Hz) for DDC throughput.
      * FFT frames are only broadcast at the configured display rate (fft_rate). */
     uint32_t fft_interval_ms = 1000 / srv->fft_rate;
     if (fft_interval_ms < TASK_PERIOD_MS) fft_interval_ms = TASK_PERIOD_MS;
 
     /* Buffer large enough for one full task period of IQ data.
-     * At 3.2MSPS max: 10ms × 3.2M × 2 = 64KB. Use 3/4 of ring. */
+     * At 3.2MSPS max: 5ms × 3.2M × 2 = 32KB. Use 3/4 of ring. */
     uint32_t chunk_size = (IQ_BUF_SIZE * 3) / 4;
     uint8_t *iq_tmp = malloc(chunk_size);
     if (!iq_tmp) {
@@ -466,8 +466,14 @@ static void fft_process_task(void *arg)
     uint8_t *ddc_out = malloc(DDC_OUT_BUF_SIZE);
     uint8_t *fft_frame = malloc(1 + 16384);
     uint8_t *iq_frame = malloc(1 + DDC_OUT_BUF_SIZE);
-    if (!ddc_out || !fft_frame || !iq_frame) {
+
+    /* Per-client DDC output buffers for send-outside-mutex pattern.
+     * Heap-allocated to avoid blowing the task stack (3 × 8KB = 24KB). */
+    uint8_t *ddc_buf_pool = malloc(MAX_WS_CLIENTS * DDC_OUT_BUF_SIZE);
+
+    if (!ddc_out || !fft_frame || !iq_frame || !ddc_buf_pool) {
         free(iq_tmp); free(ddc_out); free(fft_frame); free(iq_frame);
+        free(ddc_buf_pool);
         ESP_LOGE(TAG, "Failed to allocate task buffers");
         vTaskDelete(NULL);
         return;
@@ -521,18 +527,33 @@ static void fft_process_task(void *arg)
                     memcpy(fft_frame + 1, srv->fft_out, fft_len);
                     size_t frame_len = 1 + fft_len;
 
+                    /* Collect active FDs under mutex, send outside */
+                    int fft_fds[MAX_WS_CLIENTS];
+                    int fft_fd_count = 0;
+
                     xSemaphoreTake(srv->client_mutex, portMAX_DELAY);
                     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
                         if (srv->clients[i].active) {
-                            send_ws_binary(srv->httpd, srv->clients[i].fd,
-                                           fft_frame, frame_len);
+                            fft_fds[fft_fd_count++] = srv->clients[i].fd;
                         }
                     }
                     xSemaphoreGive(srv->client_mutex);
+
+                    for (int j = 0; j < fft_fd_count; j++) {
+                        send_ws_binary(srv->httpd, fft_fds[j],
+                                       fft_frame, frame_len);
+                    }
                 }
             }
 
             /* ── DDC: runs every cycle for full audio throughput ── */
+            /* Each client has its own DDC (different offset/bw), so
+             * process under mutex but buffer outputs, then send outside
+             * to minimise mutex hold time and prevent ring overruns. */
+            typedef struct { int fd; uint32_t len; } ddc_pending_t;
+            ddc_pending_t ddc_sends[MAX_WS_CLIENTS];
+            int ddc_send_count = 0;
+
             xSemaphoreTake(srv->client_mutex, portMAX_DELAY);
             for (int i = 0; i < MAX_WS_CLIENTS; i++) {
                 ws_client_t *c = &srv->clients[i];
@@ -540,15 +561,28 @@ static void fft_process_task(void *arg)
                     uint32_t out_len = DDC_OUT_BUF_SIZE;
                     if (dsp_ddc_process(c->ddc, iq_tmp, got, ddc_out, &out_len) == 0
                         && out_len > 0) {
-                        memcpy(iq_frame + 1, ddc_out, out_len);
-                        send_ws_binary(srv->httpd, c->fd, iq_frame, 1 + out_len);
+                        ddc_sends[ddc_send_count].fd = c->fd;
+                        ddc_sends[ddc_send_count].len = out_len;
+                        memcpy(ddc_buf_pool + ddc_send_count * DDC_OUT_BUF_SIZE,
+                               ddc_out, out_len);
+                        ddc_send_count++;
                     }
                 }
             }
             xSemaphoreGive(srv->client_mutex);
+
+            /* Send DDC frames outside mutex */
+            for (int j = 0; j < ddc_send_count; j++) {
+                iq_frame[0] = WEBSDR_MSG_IQ;
+                memcpy(iq_frame + 1,
+                       ddc_buf_pool + j * DDC_OUT_BUF_SIZE,
+                       ddc_sends[j].len);
+                send_ws_binary(srv->httpd, ddc_sends[j].fd,
+                               iq_frame, 1 + ddc_sends[j].len);
+            }
         }
 
-        /* Sleep for remainder of 10ms period */
+        /* Sleep for remainder of 5ms period */
         TickType_t elapsed = xTaskGetTickCount() - start;
         TickType_t target = pdMS_TO_TICKS(TASK_PERIOD_MS);
         if (elapsed < target) {
@@ -560,6 +594,7 @@ static void fft_process_task(void *arg)
     free(ddc_out);
     free(fft_frame);
     free(iq_frame);
+    free(ddc_buf_pool);
     ESP_LOGI(TAG, "DSP task stopped");
     vTaskDelete(NULL);
 }
