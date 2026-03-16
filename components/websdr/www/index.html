@@ -4,80 +4,437 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>ESP32-P4 WebSDR</title>
-<style>@font-face{font-family:'DSEG7';src:url('/dseg7.woff2') format('woff2');font-display:swap}</style>
 <link rel="stylesheet" href="/sdr.css">
 </head>
 <body>
-<header id="header">
-<div id="status-led"></div><span id="status-txt">Disconnected</span>
-<div id="freq-display" role="group"><span class="fd" data-step="1000000000">0</span><span class="fs">.</span><span class="fd" data-step="100000000">1</span><span class="fd" data-step="10000000">4</span><span class="fd" data-step="1000000">5</span><span class="fs">.</span><span class="fd" data-step="100000">8</span><span class="fd" data-step="10000">0</span><span class="fd" data-step="1000">0</span><span class="fs">.</span><span class="fd" data-step="100">0</span><span class="fd" data-step="10">0</span><span class="fd" data-step="1">0</span><span class="freq-unit">MHz</span></div>
-<div id="vfo-btns" role="group"><button class="vfo-btn active" data-vfo="A">A</button><button class="vfo-btn" data-vfo="B">B</button></div>
-<div id="mode-btns" role="group"><button class="mode-btn" data-mode="AM">AM</button><button class="mode-btn active" data-mode="NFM">NFM</button><button class="mode-btn" data-mode="WBFM">WBFM</button><button class="mode-btn" data-mode="USB">USB</button><button class="mode-btn" data-mode="LSB">LSB</button><button class="mode-btn" data-mode="CW">CW</button></div>
-<div id="smeter-wrap"><svg id="smeter-svg" viewBox="0 0 160 50" width="160" height="50" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-<rect width="160" height="50" rx="3" fill="#0a0a0a"/>
-<path d="M20 46A60 60 0 0 1 100 46" fill="none" stroke="#0a0" stroke-width="3" stroke-linecap="round"/>
-<path d="M100 46A60 60 0 0 1 140 46" fill="none" stroke="#f40" stroke-width="3" stroke-linecap="round"/>
-<g fill="none" stroke="#888" stroke-width=".8"><line x1="25" y1="44" x2="27" y2="38"/><line x1="38" y1="39" x2="41" y2="33"/><line x1="55" y1="34" x2="58" y2="28"/><line x1="74" y1="30" x2="77" y2="24"/><line x1="98" y1="28" x2="100" y2="21"/><line x1="116" y1="31" x2="119" y2="25"/><line x1="130" y1="37" x2="133" y2="31"/><line x1="142" y1="44" x2="143" y2="38"/></g>
-<g font-size="5" fill="#888" text-anchor="middle"><text x="22" y="36">1</text><text x="37" y="31">3</text><text x="55" y="26">5</text><text x="74" y="22">7</text><text x="98" y="19" font-size="6" fill="#aaa" font-weight="bold">9</text></g>
-<g font-size="4.5" fill="#f40" text-anchor="middle"><text x="118" y="23">+20</text><text x="132" y="29">+40</text><text x="143" y="36">+60</text></g>
-<text x="8" y="46" font-size="7" fill="#556655" text-anchor="middle">S</text>
-<line id="smeter-peak" x1="80" y1="32" x2="80" y2="44" stroke="#fa0" stroke-width="1.5" opacity="0"/>
-<g id="smeter-needle" style="transform-origin:80px 46px;transform:rotate(-70deg);transition:transform 80ms ease-out"><line x1="80" y1="46" x2="80" y2="16" stroke="#fff" stroke-width="1.2" stroke-linecap="round"/><circle cx="80" cy="46" r="2.5" fill="#444"/></g>
-</svg><span id="smeter-val">S0</span></div>
-<span id="bw-val">-- BW</span><span id="rate-display">---</span><div class="hdr-spacer"></div><button id="audio-btn" aria-pressed="false">Audio</button><button id="settings-btn" aria-label="Settings">&#9881;</button>
-</header>
-<main id="display">
-<section id="spectrum-wrap"><canvas id="spectrum"></canvas><div id="cursor-readout"></div></section>
-<div id="resize-handle" role="separator" aria-orientation="horizontal" title="Drag to resize; dbl-click reset"></div>
-<section id="waterfall-wrap"><canvas id="waterfall"></canvas></section>
-</main>
-<nav id="controls">
-<div class="cg"><span class="lbl">Tune</span><input type="range" id="tune-slider" min="-50000" max="50000" value="0" step="100"><span id="tune-lbl" class="val-lbl">±0</span></div><b class="cg-sep"></b>
-<div class="cg"><span class="lbl">G</span><input type="range" id="gain-slider" min="0" max="496" value="0"><span id="gain-val" class="val-lbl">Auto</span></div><b class="cg-sep"></b>
-<div class="cg"><span class="lbl">Vol</span><input type="range" id="vol-slider" min="0" max="100" value="50"><span id="vol-val" class="val-lbl">50%</span></div>
-<div class="cg"><span class="lbl">Sql</span><input type="range" id="sql-slider" min="0" max="255" value="0"><span id="sql-val" class="val-lbl">0</span></div><b class="cg-sep"></b>
-<div class="cg"><span class="lbl">Rng</span><input type="range" id="range-slider" min="10" max="120" value="80"><span id="range-val" class="val-lbl">80</span></div>
-<div class="cg"><span class="lbl">Ref</span><input type="range" id="ref-slider" min="-80" max="40" value="0"><span id="ref-val" class="val-lbl">0</span></div><b class="cg-sep"></b>
-<div class="cg"><span class="lbl">Zoom</span><button class="ctrl-btn" id="zoom-out">&#8722;</button><span id="zoom-val" class="val-lbl">1x</span><button class="ctrl-btn" id="zoom-in">+</button><button class="ctrl-btn" id="zoom-reset">1:1</button></div><b class="cg-sep"></b>
-<div class="cg"><span class="lbl">WF</span><input type="range" id="wf-speed" min="5" max="100" value="50"><span id="wf-speed-val" class="val-lbl">50</span></div><b class="cg-sep"></b>
-<div class="cg"><span class="lbl">Rate</span><select id="rate-select"><option value="250000">250k</option><option value="900001">900k</option><option value="1024000" selected>1.024M</option><option value="1200000">1.2M</option><option value="2048000">2.048M</option><option value="2400000">2.4M</option><option value="3200000">3.2M</option></select></div>
-<div class="cg"><span class="lbl">FFT</span><select id="fft-select"><option value="256">256</option><option value="512">512</option><option value="1024" selected>1024</option><option value="2048">2048</option><option value="4096">4096</option><option value="8192">8192</option></select></div><b class="cg-sep"></b>
-<div class="cg"><button class="ctrl-btn" id="peak-clear">Pk Clr</button></div>
-</nav>
-<nav id="band-bar">
-<div id="band-tabs" role="tablist"><button role="tab" class="band-tab active" data-tab="hf" aria-selected="true" aria-controls="band-panel-hf">HF</button><button role="tab" class="band-tab" data-tab="vhf" aria-selected="false" aria-controls="band-panel-vhf">VHF/UHF</button><button role="tab" class="band-tab" data-tab="bc" aria-selected="false" aria-controls="band-panel-bc">Broadcast</button></div>
-<div id="band-panel-hf" class="band-panel" role="tabpanel" data-bands="160m:1900000:LSB,80m:3700000:LSB,60m:5357000:USB,40m:7100000:LSB,30m:10125000:CW,20m:14200000:USB,17m:18130000:USB,15m:21200000:USB,12m:24940000:USB,10m:28400000:USB"></div>
-<div id="band-panel-vhf" class="band-panel" role="tabpanel" hidden data-bands="6m:51000000:USB,2m:145000000:NFM,70cm:433500000:NFM,23cm:1296000000:USB,ISM433:433920000:AM,ISM915:915000000:AM"></div>
-<div id="band-panel-bc" class="band-panel" role="tabpanel" hidden data-bands="FM:98000000:WBFM,Air:127000000:AM,Marine:156800000:NFM,Wx162:162550000:NFM"></div>
-</nav>
-<dialog id="settings-dialog" aria-labelledby="settings-title">
-<header><h2 id="settings-title">Settings</h2><button id="settings-close" aria-label="Close">&#10005;</button></header>
-<div class="settings-body">
-<section class="ss"><h3>Appearance</h3>
-<label>Theme<select id="set-theme"><option value="phosphor" selected>Phosphor</option><option value="amber">Amber</option><option value="cyan">Cyan</option></select></label>
-<label>Font<select id="set-freq-font"><option value="dseg7" selected>DSEG7</option><option value="mono">Mono</option></select></label>
-<label>S-meter<select id="set-smeter-style"><option value="analog" selected>Analog</option><option value="bar">Bar</option><option value="digital">Digital</option></select></label>
-<label>Colormap<select id="set-colormap"><option value="jet" selected>Jet</option><option value="iron">Iron</option><option value="viridis">Viridis</option><option value="phosphor">Phosphor</option><option value="grayscale">Grayscale</option></select></label>
-</section>
-<section class="ss"><h3>FFT &amp; Audio</h3>
-<label>Avg<input type="range" id="set-fft-avg" min="0" max="99" value="50"><span id="set-fft-avg-val">0.50</span></label>
-<label>Peak&#8595;<input type="range" id="set-peak-decay" min="1" max="20" value="5"><span id="set-peak-decay-val">0.5</span></label>
-<label>AGC<select id="set-agc-speed"><option value="off">Off</option><option value="slow">Slow</option><option value="medium" selected>Medium</option><option value="fast">Fast</option></select></label>
-<label>De-emph<select id="set-deemph"><option value="off">Off</option><option value="50us">50µs EU</option><option value="75us" selected>75µs US</option></select></label>
-</section>
-<section class="ss"><h3>Band tabs</h3>
-<label><input type="checkbox" id="set-tab-hf" checked> HF</label>
-<label><input type="checkbox" id="set-tab-vhf" checked> VHF/UHF</label>
-<label><input type="checkbox" id="set-tab-bc" checked> Broadcast</label>
-</section>
-<section class="ss"><h3>Memory</h3>
-<div id="mem-channel-list"></div><button id="mem-add-btn" class="ctrl-btn">+ Add</button>
-</section>
-<section class="ss"><h3>Keys</h3>
-<dl id="kbd-shortcuts"><dt>F</dt><dd>Freq</dd><dt>&#8593;&#8595;</dt><dd>Tune</dd><dt>&#8592;&#8594;</dt><dd>Pan</dd><dt>+/-</dt><dd>Zoom</dd><dt>M</dt><dd>Mode</dd><dt>Space</dt><dd>Audio</dd><dt>S</dt><dd>Settings</dd><dt>P</dt><dd>Peak</dd></dl>
-</section>
+
+<!-- Ribbon / Toolbar Bar -->
+<div id="ribbon">
+  <div id="ribbon-tabs">
+    <button class="ribbon-tab active" data-tab="home">Home</button>
+    <button class="ribbon-tab" data-tab="dsp">DSP</button>
+    <button class="ribbon-tab" data-tab="display">Display</button>
+    <button class="ribbon-tab" data-tab="favourites">Favourites</button>
+    <button class="ribbon-tab" data-tab="memories">Memories</button>
+    <button class="ribbon-tab" data-tab="tools">Tools</button>
+    <button class="ribbon-tab" data-tab="help">Help</button>
+  </div>
+  <div id="ribbon-content">
+    <!-- Home tab content -->
+    <div class="ribbon-panel active" data-panel="home">
+      <div class="ribbon-group">
+        <span class="ribbon-group-label">VFO</span>
+        <div class="ribbon-group-btns">
+          <button class="ribbon-btn vfo-sel-btn active" data-vfo="A">A</button>
+          <button class="ribbon-btn vfo-sel-btn" data-vfo="B">B</button>
+          <button class="ribbon-btn vfo-sel-btn" data-vfo="C">C</button>
+          <button class="ribbon-btn vfo-sel-btn" data-vfo="D">D</button>
+        </div>
+      </div>
+      <div class="ribbon-sep"></div>
+      <div class="ribbon-group">
+        <span class="ribbon-group-label">Tuning</span>
+        <div class="ribbon-group-btns">
+          <button class="ribbon-btn" id="btn-fast-tune">Fast</button>
+          <button class="ribbon-btn" id="btn-lock">Lock</button>
+        </div>
+      </div>
+      <div class="ribbon-sep"></div>
+      <div class="ribbon-group">
+        <span class="ribbon-group-label">Gain</span>
+        <div class="ribbon-group-btns ribbon-group-sliders">
+          <label class="ribbon-slider-lbl">LNA<input type="range" id="gain-slider" min="0" max="496" value="0"><span id="gain-val">Auto</span></label>
+        </div>
+      </div>
+      <div class="ribbon-sep"></div>
+      <div class="ribbon-group">
+        <span class="ribbon-group-label">Audio</span>
+        <div class="ribbon-group-btns">
+          <button class="ribbon-btn" id="audio-btn">Start Audio</button>
+        </div>
+      </div>
+      <div class="ribbon-sep"></div>
+      <div class="ribbon-group">
+        <span class="ribbon-group-label">Sample Rate</span>
+        <div class="ribbon-group-btns">
+          <select id="rate-select"><option value="250000">250k</option><option value="900001">900k</option><option value="1024000" selected>1.024M</option><option value="1200000">1.2M</option><option value="2048000">2.048M</option><option value="2400000">2.4M</option><option value="3200000">3.2M</option></select>
+        </div>
+      </div>
+      <div class="ribbon-sep"></div>
+      <div class="ribbon-group">
+        <span class="ribbon-group-label">FFT</span>
+        <div class="ribbon-group-btns">
+          <select id="fft-select"><option value="256">256</option><option value="512">512</option><option value="1024" selected>1024</option><option value="2048">2048</option><option value="4096">4096</option><option value="8192">8192</option></select>
+        </div>
+      </div>
+    </div>
+    <!-- DSP tab content -->
+    <div class="ribbon-panel" data-panel="dsp">
+      <div class="ribbon-group">
+        <span class="ribbon-group-label">AGC</span>
+        <div class="ribbon-group-btns">
+          <select id="set-agc-speed"><option value="off">Off</option><option value="slow">Slow</option><option value="medium" selected>Medium</option><option value="fast">Fast</option></select>
+        </div>
+      </div>
+      <div class="ribbon-sep"></div>
+      <div class="ribbon-group">
+        <span class="ribbon-group-label">De-emphasis</span>
+        <div class="ribbon-group-btns">
+          <select id="set-deemph"><option value="off">Off</option><option value="50us">50us EU</option><option value="75us" selected>75us US</option></select>
+        </div>
+      </div>
+    </div>
+    <!-- Display tab content -->
+    <div class="ribbon-panel" data-panel="display">
+      <div class="ribbon-group">
+        <span class="ribbon-group-label">Palette</span>
+        <div class="ribbon-group-btns">
+          <select id="set-colormap"><option value="sdrc0" selected>SDR Console</option><option value="jet">Jet</option><option value="iron">Iron</option><option value="viridis">Viridis</option><option value="grayscale">Grayscale</option></select>
+        </div>
+      </div>
+      <div class="ribbon-sep"></div>
+      <div class="ribbon-group">
+        <span class="ribbon-group-label">FFT</span>
+        <div class="ribbon-group-btns ribbon-group-sliders">
+          <label class="ribbon-slider-lbl">Avg<input type="range" id="set-fft-avg" min="0" max="99" value="50"><span id="set-fft-avg-val">0.50</span></label>
+          <label class="ribbon-slider-lbl">Peak<input type="range" id="set-peak-decay" min="1" max="20" value="5"><span id="set-peak-decay-val">0.5</span></label>
+        </div>
+      </div>
+      <div class="ribbon-sep"></div>
+      <div class="ribbon-group">
+        <span class="ribbon-group-label">Spectrum</span>
+        <div class="ribbon-group-btns ribbon-group-sliders">
+          <label class="ribbon-slider-lbl">Ref<input type="range" id="ref-slider" min="-80" max="40" value="0"><span id="ref-val">0</span></label>
+          <label class="ribbon-slider-lbl">Rng<input type="range" id="range-slider" min="10" max="120" value="80"><span id="range-val">80</span></label>
+        </div>
+      </div>
+      <div class="ribbon-sep"></div>
+      <div class="ribbon-group">
+        <span class="ribbon-group-label">Waterfall</span>
+        <div class="ribbon-group-btns ribbon-group-sliders">
+          <label class="ribbon-slider-lbl">Speed<input type="range" id="wf-speed" min="5" max="100" value="50"><span id="wf-speed-val">50</span></label>
+        </div>
+      </div>
+    </div>
+    <!-- Favourites tab (decorative) -->
+    <div class="ribbon-panel" data-panel="favourites">
+      <div class="ribbon-group"><span class="ribbon-group-label">Band Presets</span>
+        <div class="ribbon-group-btns" id="fav-bands"></div>
+      </div>
+    </div>
+    <!-- Memories tab -->
+    <div class="ribbon-panel" data-panel="memories">
+      <div class="ribbon-group"><span class="ribbon-group-label">Channels</span>
+        <div class="ribbon-group-btns" id="mem-channel-list"></div>
+      </div>
+      <div class="ribbon-sep"></div>
+      <div class="ribbon-group">
+        <div class="ribbon-group-btns"><button class="ribbon-btn" id="mem-add-btn">+ Add Current</button></div>
+      </div>
+    </div>
+    <!-- Tools tab (decorative) -->
+    <div class="ribbon-panel" data-panel="tools">
+      <div class="ribbon-group"><span class="ribbon-group-label">Info</span>
+        <div class="ribbon-group-btns"><span class="ribbon-info">ESP32-P4 RTL-SDR WebSDR</span></div>
+      </div>
+    </div>
+    <!-- Help tab (decorative) -->
+    <div class="ribbon-panel" data-panel="help">
+      <div class="ribbon-group"><span class="ribbon-group-label">Keyboard</span>
+        <div class="ribbon-group-btns ribbon-help-keys">
+          <span><kbd>Up/Down</kbd> Tune</span>
+          <span><kbd>Left/Right</kbd> Pan</span>
+          <span><kbd>+/-</kbd> Zoom</span>
+          <span><kbd>M</kbd> Mode</span>
+          <span><kbd>Space</kbd> Audio</span>
+          <span><kbd>F</kbd> Fullscreen</span>
+          <span><kbd>1-9</kbd> Band</span>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
-</dialog>
+
+<!-- VFO Panel -->
+<div id="vfo-panel">
+  <!-- VFO A -->
+  <div id="vfo-a-block" class="vfo-block active">
+    <div class="vfo-titlebar">
+      <span class="vfo-title">VFOA</span>
+      <div class="vfo-titlebar-btns">
+        <button class="vfo-pin-btn" title="Pin">&#128204;</button>
+      </div>
+    </div>
+    <div class="vfo-body">
+      <div class="vfo-controls-row">
+        <button class="vfo-enable-btn active" id="vfo-a-enable">&#9654; Enable</button>
+        <div class="vfo-vol-wrap">
+          <span class="vfo-vol-icon">&#128266;</span>
+          <input type="range" id="vol-slider" class="vfo-vol-slider" min="0" max="100" value="50">
+          <span id="vol-val" class="vfo-vol-val">50</span>
+        </div>
+        <button class="vfo-audio-btn" id="vfo-a-audio">Audio &#9660;</button>
+      </div>
+      <div class="vfo-freq-row">
+        <div id="freq-display" class="freq-display" role="group">
+          <span class="fd" data-step="1000000000">0</span>
+          <span class="fd" data-step="100000000">1</span>
+          <span class="fd" data-step="10000000">4</span>
+          <span class="fs">.</span>
+          <span class="fd" data-step="1000000">5</span>
+          <span class="fd" data-step="100000">8</span>
+          <span class="fd" data-step="10000">0</span>
+          <span class="fs">.</span>
+          <span class="fd" data-step="1000">0</span>
+          <span class="fd fd-hz" data-step="100">0</span>
+          <span class="fd fd-hz" data-step="10">0</span>
+        </div>
+        <div class="vfo-info-col">
+          <span class="vfo-letter" id="vfo-a-letter">A</span>
+          <span class="vfo-mode-display" id="vfo-a-mode">NFM</span>
+          <span class="vfo-dbm" id="vfo-a-dbm">-127 dBm</span>
+        </div>
+      </div>
+      <div class="vfo-filter-row">
+        <span id="bw-val" class="vfo-bw">BW: 12.5kHz</span>
+        <span id="rate-display" class="vfo-rate">1024 kSPS</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- VFO B (compact) -->
+  <div id="vfo-b-block" class="vfo-block">
+    <div class="vfo-titlebar">
+      <span class="vfo-title">VFOB</span>
+    </div>
+    <div class="vfo-body vfo-body-compact">
+      <div class="vfo-freq-row">
+        <div id="freq-display-b" class="freq-display freq-b"><span class="fd-b">145.000.000</span></div>
+        <div class="vfo-info-col">
+          <span class="vfo-letter">B</span>
+          <span class="vfo-mode-display" id="vfo-b-mode">NFM</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Connection status + clock -->
+  <div id="vfo-status-area">
+    <div id="status-led"></div>
+    <span id="status-txt">Disconnected</span>
+    <span id="clock-time">--:--:--</span>
+  </div>
+</div>
+
+<!-- Main content area: DSP sidebar + Spectrum/Waterfall -->
+<div id="main-content">
+
+  <!-- DSP Sidebar -->
+  <aside id="dsp-sidebar">
+    <!-- Mode and Filter -->
+    <div class="dsp-section open">
+      <div class="dsp-section-header" data-section="mode-filter">
+        <span class="dsp-chevron">&#9660;</span> Mode and Filter
+      </div>
+      <div class="dsp-section-body">
+        <div id="mode-btns" class="dsp-mode-btns" role="group">
+          <button class="mode-btn" data-mode="AM">AM</button>
+          <button class="mode-btn active" data-mode="NFM">NFM</button>
+          <button class="mode-btn" data-mode="WBFM">WBFM</button>
+          <button class="mode-btn" data-mode="USB">USB</button>
+          <button class="mode-btn" data-mode="LSB">LSB</button>
+          <button class="mode-btn" data-mode="CW">CW</button>
+        </div>
+        <div class="dsp-filter-grid">
+          <span class="dsp-filter-label">Filter:</span>
+          <button class="filter-btn" data-bw="2500">2.5k</button>
+          <button class="filter-btn" data-bw="3000">3k</button>
+          <button class="filter-btn" data-bw="3500">3.5k</button>
+          <button class="filter-btn" data-bw="4000">4k</button>
+          <button class="filter-btn" data-bw="4500">4.5k</button>
+          <button class="filter-btn" data-bw="6000">6k</button>
+          <button class="filter-btn" data-bw="8000">8k</button>
+          <button class="filter-btn" data-bw="10000">10k</button>
+          <button class="filter-btn active" data-bw="12500">12.5k</button>
+          <button class="filter-btn" data-bw="24000">24k</button>
+          <button class="filter-btn" data-bw="48000">48k</button>
+          <button class="filter-btn" data-bw="96000">96k</button>
+          <button class="filter-btn" data-bw="150000">150k</button>
+          <button class="filter-btn" data-bw="250000">250k</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- AGC -->
+    <div class="dsp-section open">
+      <div class="dsp-section-header" data-section="agc">
+        <span class="dsp-chevron">&#9660;</span> AGC
+      </div>
+      <div class="dsp-section-body">
+        <div class="dsp-row">
+          <label>Speed</label>
+          <select id="dsp-agc-speed"><option value="off">Off</option><option value="slow">Slow</option><option value="medium" selected>Medium</option><option value="fast">Fast</option></select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Noise Blanker -->
+    <div class="dsp-section">
+      <div class="dsp-section-header" data-section="nb">
+        <span class="dsp-chevron">&#9654;</span> Noise Blanker
+      </div>
+      <div class="dsp-section-body">
+        <div class="dsp-row">
+          <label><input type="checkbox" id="dsp-nb-enable"> Enable</label>
+          <input type="range" id="dsp-nb-level" min="0" max="100" value="50" disabled>
+        </div>
+      </div>
+    </div>
+
+    <!-- Noise Reduction -->
+    <div class="dsp-section">
+      <div class="dsp-section-header" data-section="nr">
+        <span class="dsp-chevron">&#9654;</span> Noise Reduction
+      </div>
+      <div class="dsp-section-body">
+        <div class="dsp-row">
+          <label><input type="checkbox" id="dsp-nr-enable"> Enable</label>
+          <input type="range" id="dsp-nr-level" min="0" max="100" value="50" disabled>
+        </div>
+      </div>
+    </div>
+
+    <!-- Notch -->
+    <div class="dsp-section">
+      <div class="dsp-section-header" data-section="notch">
+        <span class="dsp-chevron">&#9654;</span> Notch
+      </div>
+      <div class="dsp-section-body">
+        <div class="dsp-row">
+          <label><input type="checkbox" id="dsp-notch-enable"> Enable</label>
+          <button class="dsp-small-btn" id="dsp-notch-auto">Auto</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Squelch -->
+    <div class="dsp-section open">
+      <div class="dsp-section-header" data-section="squelch">
+        <span class="dsp-chevron">&#9660;</span> Squelch
+      </div>
+      <div class="dsp-section-body">
+        <div class="dsp-row">
+          <label><input type="checkbox" id="dsp-sql-enable"> Enable</label>
+          <button class="dsp-small-btn" id="dsp-sql-auto">Auto</button>
+        </div>
+        <div class="dsp-row">
+          <label>Level</label>
+          <input type="range" id="sql-slider" min="0" max="255" value="0">
+          <span id="sql-val" class="dsp-val">0</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bands -->
+    <div class="dsp-section open">
+      <div class="dsp-section-header" data-section="bands">
+        <span class="dsp-chevron">&#9660;</span> Bands
+      </div>
+      <div class="dsp-section-body">
+        <div class="dsp-band-tabs" role="tablist">
+          <button role="tab" class="band-tab active" data-tab="hf" aria-selected="true">HF</button>
+          <button role="tab" class="band-tab" data-tab="vhf" aria-selected="false">VHF/UHF</button>
+          <button role="tab" class="band-tab" data-tab="bc" aria-selected="false">Broadcast</button>
+        </div>
+        <div id="band-panel-hf" class="band-panel" role="tabpanel" data-bands="160m:1900000:LSB,80m:3700000:LSB,60m:5357000:USB,40m:7100000:LSB,30m:10125000:CW,20m:14200000:USB,17m:18130000:USB,15m:21200000:USB,12m:24940000:USB,10m:28400000:USB"></div>
+        <div id="band-panel-vhf" class="band-panel" role="tabpanel" hidden data-bands="6m:51000000:USB,2m:145000000:NFM,70cm:433500000:NFM,23cm:1296000000:USB,ISM433:433920000:AM,ISM915:915000000:AM"></div>
+        <div id="band-panel-bc" class="band-panel" role="tabpanel" hidden data-bands="FM:98000000:WBFM,Air:127000000:AM,Marine:156800000:NFM,Wx162:162550000:NFM"></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Spectrum + Waterfall -->
+  <div id="display">
+    <section id="spectrum-wrap">
+      <canvas id="spectrum"></canvas>
+      <div id="cursor-readout"></div>
+      <!-- Hover overlay controls (SDR Console signature) -->
+      <div id="hover-controls">
+        <div class="hover-ctrl-group">
+          <span class="hover-ctrl-label">HIGH</span>
+          <button class="hover-ctrl-btn" id="hc-high-up">&#9650;</button>
+          <button class="hover-ctrl-btn" id="hc-high-dn">&#9660;</button>
+          <button class="hover-ctrl-btn hover-ctrl-auto" id="hc-high-auto">A</button>
+        </div>
+        <div class="hover-ctrl-group">
+          <span class="hover-ctrl-label">LOW</span>
+          <button class="hover-ctrl-btn" id="hc-low-up">&#9650;</button>
+          <button class="hover-ctrl-btn" id="hc-low-dn">&#9660;</button>
+        </div>
+        <div class="hover-ctrl-group">
+          <span class="hover-ctrl-label">ZOOM</span>
+          <button class="hover-ctrl-btn" id="hc-zoom-in">+</button>
+          <button class="hover-ctrl-btn" id="hc-zoom-out">&minus;</button>
+          <button class="hover-ctrl-btn" id="hc-zoom-reset">1:1</button>
+        </div>
+      </div>
+    </section>
+    <div id="resize-handle" role="separator" aria-orientation="horizontal" title="Drag to resize; double-click to reset"></div>
+    <section id="waterfall-wrap">
+      <canvas id="waterfall"></canvas>
+    </section>
+  </div>
+</div>
+
+<!-- Bottom Panel -->
+<div id="bottom-panel">
+  <div id="bottom-tabs">
+    <button class="bottom-tab active" data-btab="tuning">VFO Tuning</button>
+    <button class="bottom-tab" data-btab="span">Span</button>
+  </div>
+  <div id="bottom-content">
+    <!-- VFO Tuning -->
+    <div class="bottom-pane active" data-bpane="tuning">
+      <div class="bottom-tune-row">
+        <label class="bt-lbl">Tune</label>
+        <input type="range" id="tune-slider" min="-50000" max="50000" value="0" step="100">
+        <span id="tune-lbl" class="bt-val">&plusmn;0</span>
+        <span id="rit-val" class="bt-val bt-rit">RIT: 0 Hz</span>
+      </div>
+    </div>
+    <!-- Span -->
+    <div class="bottom-pane" data-bpane="span">
+      <div class="bottom-span-row">
+        <button class="span-btn" data-zoom="1">A</button>
+        <button class="span-btn" data-zoom="2">B</button>
+        <button class="span-btn" data-zoom="4">C</button>
+        <button class="span-btn" data-zoom="8">D</button>
+        <button class="span-btn" data-zoom="16">E</button>
+        <span class="bt-val" id="zoom-val">1x</span>
+        <button class="span-btn" id="peak-clear">Pk Clr</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Signal Meter -->
+  <div id="smeter-wrap">
+    <div id="smeter-bar">
+      <div id="smeter-fill"></div>
+      <div id="smeter-peak-mark"></div>
+    </div>
+    <div id="smeter-labels">
+      <span id="smeter-val">S0</span>
+      <span id="smeter-dbm">-127 dBm</span>
+      <span class="smeter-title">Signal</span>
+    </div>
+  </div>
+
+  <!-- Status info -->
+  <div id="bottom-status">
+    <span id="bottom-status-info">ESP32-P4 RTL-SDR</span>
+  </div>
+</div>
+
 <script src="/sdr.js"></script>
 </body>
 </html>
