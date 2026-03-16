@@ -42,27 +42,6 @@ static uint64_t perf_db_total_us = 0;
 
 static const char *TAG = "dsp";
 
-/* ──────────────────────── Fast Approximations ──────────────────────── */
-
-/*
- * fast_log10f: IEEE 754 bit manipulation + 2nd-order polynomial
- * ~8x faster than newlib log10f (~15 cycles vs ~120)
- * Max error: ~0.01 dB — perfectly acceptable for spectrum display
- * Inspired by VOLK volk_32f_log2_32f approach
- */
-static inline float fast_log10f(float x)
-{
-    union { float f; uint32_t u; } v = { .f = x };
-    /* Extract exponent for coarse log2 */
-    int exp = (int)((v.u >> 23) & 0xFF) - 127;
-    /* Extract mantissa, force to [1.0, 2.0) range */
-    v.u = (v.u & 0x007FFFFF) | 0x3F800000;
-    float m = v.f;
-    /* 2nd-order polynomial for log2(mantissa) where m ∈ [1,2) */
-    float log2_approx = (float)exp + (-0.3358287f + m * (2.0024077f + m * (-0.6664778f)));
-    return log2_approx * 0.30103f;  /* log10(2) = 0.30103 */
-}
-
 /* ──────────────────────── FFT Engine ──────────────────────── */
 
 /* Max FFT size limited by internal RAM for aligned int16 buffers.
