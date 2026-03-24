@@ -149,8 +149,8 @@ static esp_err_t send_telegram_photo(const char *caption,
     const char *boundary = "----ESP32P4Boundary";
 
     /* Calculate total size */
-    size_t header_len = 512;
-    size_t total = header_len + png_len + 256;
+    size_t header_len = 256 + strlen(s_config.telegram.chat_id) + (caption ? strlen(caption) : 0);
+    size_t total = header_len + png_len + 128;
     char *body = malloc(total);
     if (!body) return ESP_ERR_NO_MEM;
 

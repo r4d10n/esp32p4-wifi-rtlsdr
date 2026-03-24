@@ -128,8 +128,8 @@ esp_err_t wifimgr_config_load_sdr(sdr_config_t *config)
         config->center_freq = (uint32_t)cJSON_GetNumberValue(item);
     if ((item = cJSON_GetObjectItem(json, "sample_rate")))
         config->sample_rate = (uint32_t)cJSON_GetNumberValue(item);
-    if ((item = cJSON_GetObjectItem(json, "gain_mode")))
-        strncpy(config->gain_mode, cJSON_GetStringValue(item), sizeof(config->gain_mode) - 1);
+    if ((item = cJSON_GetObjectItem(json, "gain_mode")) && cJSON_IsString(item))
+        strncpy(config->gain_mode, item->valuestring, sizeof(config->gain_mode) - 1);
     if ((item = cJSON_GetObjectItem(json, "tuner_gain_tenth_db")))
         config->tuner_gain_tenth_db = (uint16_t)cJSON_GetNumberValue(item);
     if ((item = cJSON_GetObjectItem(json, "rtl_agc")))
@@ -138,8 +138,8 @@ esp_err_t wifimgr_config_load_sdr(sdr_config_t *config)
         config->tuner_agc = cJSON_IsTrue(item);
     if ((item = cJSON_GetObjectItem(json, "ppm_correction")))
         config->ppm_correction = (int16_t)cJSON_GetNumberValue(item);
-    if ((item = cJSON_GetObjectItem(json, "direct_sampling")))
-        strncpy(config->direct_sampling, cJSON_GetStringValue(item), sizeof(config->direct_sampling) - 1);
+    if ((item = cJSON_GetObjectItem(json, "direct_sampling")) && cJSON_IsString(item))
+        strncpy(config->direct_sampling, item->valuestring, sizeof(config->direct_sampling) - 1);
     if ((item = cJSON_GetObjectItem(json, "offset_tuning")))
         config->offset_tuning = cJSON_IsTrue(item);
     if ((item = cJSON_GetObjectItem(json, "offset_freq_hz")))
@@ -154,8 +154,8 @@ esp_err_t wifimgr_config_load_sdr(sdr_config_t *config)
         config->invert_iq = cJSON_IsTrue(item);
     if ((item = cJSON_GetObjectItem(json, "max_total_users")))
         config->max_total_users = (uint8_t)cJSON_GetNumberValue(item);
-    if ((item = cJSON_GetObjectItem(json, "hostname")))
-        strncpy(config->hostname, cJSON_GetStringValue(item), sizeof(config->hostname) - 1);
+    if ((item = cJSON_GetObjectItem(json, "hostname")) && cJSON_IsString(item))
+        strncpy(config->hostname, item->valuestring, sizeof(config->hostname) - 1);
 
     cJSON_Delete(json);
     return ESP_OK;
@@ -204,16 +204,16 @@ esp_err_t wifimgr_config_load_ethernet(ethernet_config_t *config)
         config->enable = cJSON_IsTrue(item);
     if ((item = cJSON_GetObjectItem(json, "dhcp")))
         config->dhcp = cJSON_IsTrue(item);
-    if ((item = cJSON_GetObjectItem(json, "static_ip")))
-        strncpy(config->static_ip, cJSON_GetStringValue(item), sizeof(config->static_ip) - 1);
-    if ((item = cJSON_GetObjectItem(json, "static_mask")))
-        strncpy(config->static_mask, cJSON_GetStringValue(item), sizeof(config->static_mask) - 1);
-    if ((item = cJSON_GetObjectItem(json, "static_gw")))
-        strncpy(config->static_gw, cJSON_GetStringValue(item), sizeof(config->static_gw) - 1);
-    if ((item = cJSON_GetObjectItem(json, "static_dns")))
-        strncpy(config->static_dns, cJSON_GetStringValue(item), sizeof(config->static_dns) - 1);
-    if ((item = cJSON_GetObjectItem(json, "phy_type")))
-        strncpy(config->phy_type, cJSON_GetStringValue(item), sizeof(config->phy_type) - 1);
+    if ((item = cJSON_GetObjectItem(json, "static_ip")) && cJSON_IsString(item))
+        strncpy(config->static_ip, item->valuestring, sizeof(config->static_ip) - 1);
+    if ((item = cJSON_GetObjectItem(json, "static_mask")) && cJSON_IsString(item))
+        strncpy(config->static_mask, item->valuestring, sizeof(config->static_mask) - 1);
+    if ((item = cJSON_GetObjectItem(json, "static_gw")) && cJSON_IsString(item))
+        strncpy(config->static_gw, item->valuestring, sizeof(config->static_gw) - 1);
+    if ((item = cJSON_GetObjectItem(json, "static_dns")) && cJSON_IsString(item))
+        strncpy(config->static_dns, item->valuestring, sizeof(config->static_dns) - 1);
+    if ((item = cJSON_GetObjectItem(json, "phy_type")) && cJSON_IsString(item))
+        strncpy(config->phy_type, item->valuestring, sizeof(config->phy_type) - 1);
     if ((item = cJSON_GetObjectItem(json, "phy_addr")))
         config->phy_addr = (int8_t)cJSON_GetNumberValue(item);
     if ((item = cJSON_GetObjectItem(json, "mdc_gpio")))
@@ -336,10 +336,10 @@ esp_err_t wifimgr_config_load_chatbot(chatbot_config_t *config)
     cJSON *item;
     if ((item = cJSON_GetObjectItem(json, "enable")))
         config->enable = cJSON_IsTrue(item);
-    if ((item = cJSON_GetObjectItem(json, "provider")))
-        strncpy(config->provider, cJSON_GetStringValue(item), sizeof(config->provider) - 1);
-    if ((item = cJSON_GetObjectItem(json, "model")))
-        strncpy(config->model, cJSON_GetStringValue(item), sizeof(config->model) - 1);
+    if ((item = cJSON_GetObjectItem(json, "provider")) && cJSON_IsString(item))
+        strncpy(config->provider, item->valuestring, sizeof(config->provider) - 1);
+    if ((item = cJSON_GetObjectItem(json, "model")) && cJSON_IsString(item))
+        strncpy(config->model, item->valuestring, sizeof(config->model) - 1);
     if ((item = cJSON_GetObjectItem(json, "web_enable")))
         config->web_enable = cJSON_IsTrue(item);
     if ((item = cJSON_GetObjectItem(json, "telegram_enable")))
@@ -348,8 +348,8 @@ esp_err_t wifimgr_config_load_chatbot(chatbot_config_t *config)
         config->discord_enable = cJSON_IsTrue(item);
     if ((item = cJSON_GetObjectItem(json, "max_history")))
         config->max_history = (uint8_t)cJSON_GetNumberValue(item);
-    if ((item = cJSON_GetObjectItem(json, "allowed_tools")))
-        strncpy(config->allowed_tools, cJSON_GetStringValue(item), sizeof(config->allowed_tools) - 1);
+    if ((item = cJSON_GetObjectItem(json, "allowed_tools")) && cJSON_IsString(item))
+        strncpy(config->allowed_tools, item->valuestring, sizeof(config->allowed_tools) - 1);
 
     cJSON_Delete(json);
 

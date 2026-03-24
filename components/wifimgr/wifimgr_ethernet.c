@@ -20,7 +20,7 @@ static const char *TAG = "wifimgr_eth";
 
 static esp_eth_handle_t s_eth_handle;
 static esp_netif_t *s_eth_netif;
-static bool s_link_up;
+static volatile bool s_link_up;
 
 /* ── Event handlers ─────────────────────────────────────────── */
 
@@ -116,6 +116,8 @@ esp_err_t wifimgr_ethernet_init(void)
     esp_err_t err = esp_eth_driver_install(&eth_config, &s_eth_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Ethernet driver install failed: %s", esp_err_to_name(err));
+        phy->del(phy);
+        mac->del(mac);
         return err;
     }
 

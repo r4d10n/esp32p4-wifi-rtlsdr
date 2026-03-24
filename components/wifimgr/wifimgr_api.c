@@ -60,6 +60,7 @@ static esp_err_t send_json(httpd_req_t *req, cJSON *json)
 static esp_err_t send_ok(httpd_req_t *req, const char *msg)
 {
     cJSON *json = cJSON_CreateObject();
+    if (!json) { httpd_resp_send_500(req); return ESP_FAIL; }
     cJSON_AddStringToObject(json, "status", "ok");
     if (msg) cJSON_AddStringToObject(json, "message", msg);
     esp_err_t err = send_json(req, json);
@@ -70,10 +71,16 @@ static esp_err_t send_ok(httpd_req_t *req, const char *msg)
 static esp_err_t send_error(httpd_req_t *req, int status, const char *msg)
 {
     cJSON *json = cJSON_CreateObject();
+    if (!json) { httpd_resp_send_500(req); return ESP_FAIL; }
     cJSON_AddStringToObject(json, "status", "error");
     cJSON_AddStringToObject(json, "message", msg);
-    char status_str[16];
-    snprintf(status_str, sizeof(status_str), "%d", status);
+    const char *status_str = "500 Internal Server Error";
+    switch (status) {
+    case 400: status_str = "400 Bad Request"; break;
+    case 404: status_str = "404 Not Found"; break;
+    case 408: status_str = "408 Request Timeout"; break;
+    case 500: status_str = "500 Internal Server Error"; break;
+    }
     httpd_resp_set_status(req, status_str);
     esp_err_t err = send_json(req, json);
     cJSON_Delete(json);
@@ -317,15 +324,15 @@ static esp_err_t api_eth_config_put(httpd_req_t *req)
     cJSON *item;
     if ((item = cJSON_GetObjectItem(body, "enable"))) cfg.enable = cJSON_IsTrue(item);
     if ((item = cJSON_GetObjectItem(body, "dhcp"))) cfg.dhcp = cJSON_IsTrue(item);
-    if ((item = cJSON_GetObjectItem(body, "static_ip")))
+    if ((item = cJSON_GetObjectItem(body, "static_ip")) && cJSON_IsString(item))
         strncpy(cfg.static_ip, item->valuestring, sizeof(cfg.static_ip) - 1);
-    if ((item = cJSON_GetObjectItem(body, "static_mask")))
+    if ((item = cJSON_GetObjectItem(body, "static_mask")) && cJSON_IsString(item))
         strncpy(cfg.static_mask, item->valuestring, sizeof(cfg.static_mask) - 1);
-    if ((item = cJSON_GetObjectItem(body, "static_gw")))
+    if ((item = cJSON_GetObjectItem(body, "static_gw")) && cJSON_IsString(item))
         strncpy(cfg.static_gw, item->valuestring, sizeof(cfg.static_gw) - 1);
-    if ((item = cJSON_GetObjectItem(body, "static_dns")))
+    if ((item = cJSON_GetObjectItem(body, "static_dns")) && cJSON_IsString(item))
         strncpy(cfg.static_dns, item->valuestring, sizeof(cfg.static_dns) - 1);
-    if ((item = cJSON_GetObjectItem(body, "phy_type")))
+    if ((item = cJSON_GetObjectItem(body, "phy_type")) && cJSON_IsString(item))
         strncpy(cfg.phy_type, item->valuestring, sizeof(cfg.phy_type) - 1);
     if ((item = cJSON_GetObjectItem(body, "phy_addr")))
         cfg.phy_addr = (int8_t)item->valueint;
@@ -390,7 +397,7 @@ static esp_err_t api_sdr_config_put(httpd_req_t *req)
         cfg.center_freq = (uint32_t)cJSON_GetNumberValue(item);
     if ((item = cJSON_GetObjectItem(body, "sample_rate")))
         cfg.sample_rate = (uint32_t)cJSON_GetNumberValue(item);
-    if ((item = cJSON_GetObjectItem(body, "gain_mode")))
+    if ((item = cJSON_GetObjectItem(body, "gain_mode")) && cJSON_IsString(item))
         strncpy(cfg.gain_mode, item->valuestring, sizeof(cfg.gain_mode) - 1);
     if ((item = cJSON_GetObjectItem(body, "tuner_gain_tenth_db")))
         cfg.tuner_gain_tenth_db = (uint16_t)cJSON_GetNumberValue(item);
@@ -398,7 +405,7 @@ static esp_err_t api_sdr_config_put(httpd_req_t *req)
     if ((item = cJSON_GetObjectItem(body, "tuner_agc"))) cfg.tuner_agc = cJSON_IsTrue(item);
     if ((item = cJSON_GetObjectItem(body, "ppm_correction")))
         cfg.ppm_correction = (int16_t)cJSON_GetNumberValue(item);
-    if ((item = cJSON_GetObjectItem(body, "direct_sampling")))
+    if ((item = cJSON_GetObjectItem(body, "direct_sampling")) && cJSON_IsString(item))
         strncpy(cfg.direct_sampling, item->valuestring, sizeof(cfg.direct_sampling) - 1);
     if ((item = cJSON_GetObjectItem(body, "offset_tuning")))
         cfg.offset_tuning = cJSON_IsTrue(item);
@@ -412,7 +419,7 @@ static esp_err_t api_sdr_config_put(httpd_req_t *req)
     if ((item = cJSON_GetObjectItem(body, "invert_iq"))) cfg.invert_iq = cJSON_IsTrue(item);
     if ((item = cJSON_GetObjectItem(body, "max_total_users")))
         cfg.max_total_users = (uint8_t)cJSON_GetNumberValue(item);
-    if ((item = cJSON_GetObjectItem(body, "hostname")))
+    if ((item = cJSON_GetObjectItem(body, "hostname")) && cJSON_IsString(item))
         strncpy(cfg.hostname, item->valuestring, sizeof(cfg.hostname) - 1);
 
     cJSON_Delete(body);
@@ -435,7 +442,7 @@ static esp_err_t api_services_list(httpd_req_t *req)
     return err;
 }
 
-/* GET /api/services/* (wildcard match) */
+/* GET /api/services/:name (wildcard match) */
 static esp_err_t api_service_get(httpd_req_t *req)
 {
     /* Extract service name from URI: /api/services/rtl_tcp -> "rtl_tcp" */
@@ -468,7 +475,7 @@ static esp_err_t api_service_get(httpd_req_t *req)
     return err;
 }
 
-/* PUT /api/services/* */
+/* PUT /api/services/:name */
 static esp_err_t api_service_put(httpd_req_t *req)
 {
     const char *uri = req->uri;
@@ -643,9 +650,10 @@ static esp_err_t api_system_reboot(httpd_req_t *req)
     if (!body) return send_error(req, 400, "Invalid JSON");
 
     cJSON *confirm = cJSON_GetObjectItem(body, "confirm");
+    bool confirmed = cJSON_IsTrue(confirm);
     cJSON_Delete(body);
 
-    if (!cJSON_IsTrue(confirm)) {
+    if (!confirmed) {
         return send_error(req, 400, "Confirmation required");
     }
 
@@ -691,9 +699,10 @@ static esp_err_t api_system_factory_reset(httpd_req_t *req)
     if (!body) return send_error(req, 400, "Invalid JSON");
 
     cJSON *confirm = cJSON_GetObjectItem(body, "confirm");
+    bool confirmed = cJSON_IsTrue(confirm);
     cJSON_Delete(body);
 
-    if (!cJSON_IsTrue(confirm)) {
+    if (!confirmed) {
         return send_error(req, 400, "Confirmation required");
     }
 

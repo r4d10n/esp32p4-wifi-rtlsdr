@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
 #include "nvs_flash.h"
 #include "driver/uart.h"
@@ -172,8 +173,10 @@ esp_err_t wifimgr_get_status(wifimgr_status_t *status)
 {
     if (!status) return ESP_ERR_INVALID_ARG;
     status->state = s_state;
-    strncpy(status->ssid, s_connected_ssid, sizeof(status->ssid));
-    strncpy(status->ip, s_connected_ip, sizeof(status->ip));
+    strncpy(status->ssid, s_connected_ssid, sizeof(status->ssid) - 1);
+    status->ssid[sizeof(status->ssid) - 1] = '\0';
+    strncpy(status->ip, s_connected_ip, sizeof(status->ip) - 1);
+    status->ip[sizeof(status->ip) - 1] = '\0';
     status->rssi = s_connected_rssi;
 
     wifi_mode_t mode;
@@ -626,7 +629,8 @@ static esp_err_t try_connect_saved(void)
             err = wifimgr_test_connect(saved[j].ssid, saved[j].password, 10000);
 
             if (err == ESP_OK) {
-                strncpy(s_connected_ssid, saved[j].ssid, WIFIMGR_SSID_MAX_LEN);
+                strncpy(s_connected_ssid, saved[j].ssid, WIFIMGR_SSID_MAX_LEN - 1);
+                s_connected_ssid[WIFIMGR_SSID_MAX_LEN - 1] = '\0';
 
                 /* Update RSSI */
                 wifi_ap_record_t ap_info;
@@ -682,8 +686,10 @@ static void uart_pattern_task(void *arg)
                 int pos = uart_pattern_pop_pos(UART_NUM_0);
                 if (pos >= 0) {
                     /* Flush the pattern bytes */
-                    uint8_t buf[4];
-                    uart_read_bytes(UART_NUM_0, buf, pos + 3, 0);
+                    uint8_t buf[64];
+                    int to_read = pos + 3;
+                    if (to_read > (int)sizeof(buf)) to_read = sizeof(buf);
+                    uart_read_bytes(UART_NUM_0, buf, to_read, 0);
 
                     ESP_LOGI(TAG, "UART '+++' detected -> config mode");
                     wifimgr_enter_config_mode();

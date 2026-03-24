@@ -10,14 +10,7 @@ extern "C" {
 /**
  * Register all REST API handlers on the given HTTP server.
  *
- * Endpoints registered:
- *   GET/POST/PUT/DELETE /api/wifi/*
- *   GET/PUT             /api/eth/*
- *   GET/PUT             /api/sdr/config
- *   GET/PUT             /api/services, /api/services/{name}
- *   GET/PUT/POST        /api/notify/*
- *   GET/PUT/POST/DELETE /api/chat/*
- *   GET/POST            /api/system/*
+ * Endpoints: wifi, eth, sdr, services, notify, chat, system
  */
 esp_err_t wifimgr_api_register(httpd_handle_t server);
 
