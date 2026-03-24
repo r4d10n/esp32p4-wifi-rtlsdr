@@ -14,7 +14,7 @@ This variant extends the base ESP32-P4 RTL-SDR WiFi Bridge with:
 - **3rd-order CIC decimator** — 38.9 dB alias rejection (was 13 dB boxcar)
 - **32-bit NCO phase accumulator** — zero phase discontinuity at any frequency
 - **DC offset removal** — EMA-based center spike elimination
-- **Professional ribbon UI** — professional desktop SDR interface in the browser
+- **Browser-based WebSDR UI** — experimental web interface with spectrum, waterfall, and audio
 - **HTTPS/WSS** — secure WebSocket for AudioWorklet support
 - **FM audio player** — browser-based WBFM demodulation and streaming
 - **Full DSP sidebar** — NB, NR, Notch, AGC, Squelch, De-emphasis, Limiter
@@ -55,11 +55,11 @@ The device advertises via mDNS as `esp32p4-rtlsdr._rtl_tcp._tcp`.
 
 ## WebSDR UI Features
 
-### Ribbon Interface
+### WebSDR UI
 
-The browser UI provides a professional desktop-class SDR interface:
+The browser UI provides spectrum display, waterfall, and audio demodulation (experimental):
 
-**Ribbon Tabs**: Home | DSP | Display | Favourites | Memories | Tools | Help
+**Tabs**: Home | DSP | Display | Favourites | Memories | Tools | Help
 
 **Home Tab**:
 - VFO A/B/C/D switching with state preservation
@@ -126,7 +126,7 @@ The browser UI provides a professional desktop-class SDR interface:
 
 - Responsive layout at 900px, 640px, 480px breakpoints
 - Slide-out DSP drawer (hamburger button) on narrow screens
-- Scrollable ribbon tabs
+- Scrollable controls
 - Touch-friendly controls
 
 ## FM Audio Player
@@ -288,9 +288,9 @@ esp32p4-wifi-rtlsdr-simd/
 │       ├── websdr.c                     # Server, FFT task, DDC per-client
 │       ├── certs/                       # TLS certificates
 │       └── www/                         # Embedded web assets
-│           ├── index.html               # Professional ribbon UI
+│           ├── index.html               # WebSDR UI
 │           ├── sdr.js                   # Full JS client (~950 lines)
-│           ├── sdr.css                  # Ribbon layout (~1020 lines)
+│           ├── sdr.css                  # UI styles (~1020 lines)
 │           ├── fm_player.html           # Standalone FM player
 │           └── dseg7.woff2              # 7-segment display font
 ├── test/
