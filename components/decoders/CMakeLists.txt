@@ -14,5 +14,5 @@ idf_component_register(
          "decoder_cw.c"
          "dsp_ddc.c"
     INCLUDE_DIRS "include"
-    REQUIRES freertos log json esp_timer
+    REQUIRES freertos log json esp_timer esp_http_client lwip
 )

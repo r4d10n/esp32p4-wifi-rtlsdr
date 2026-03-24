@@ -992,14 +992,45 @@ static cJSON *ft8_get_results(void *ctx) {
                : cJSON_CreateArray();
 }
 
-/* ── PSKreporter upload stub ──────────────────────────── */
-/* TODO: Implement HTTPS POST to pskreporter.info/cgi-bin/psk-report.pl
- * Format: XML with receiverCallsign, senderCallsign, frequency, mode, SNR
- */
+/* ── PSKreporter upload ───────────────────────────────── */
+#include "esp_http_client.h"
+
 static void psk_reporter_submit(const char *callsign, double freq_hz,
                                  int snr, const char *mode) {
-    (void)callsign; (void)freq_hz; (void)snr; (void)mode;
-    ESP_LOGD("dec_ft8", "PSKreporter: %s at %.0f Hz, %d dB (%s)", callsign, freq_hz, snr, mode);
+    if (!callsign || callsign[0] == '\0') return;
+
+    char xml[512];
+    int xml_len = snprintf(xml, sizeof(xml),
+        "<?xml version='1.0'?>"
+        "<receptionReports>"
+        "<receiverInformation><receiverCallsign>ESP32P4</receiverCallsign></receiverInformation>"
+        "<receptionReport>"
+        "<senderCallsign>%s</senderCallsign>"
+        "<frequency>%.0f</frequency>"
+        "<sNR>%d</sNR>"
+        "<mode>%s</mode>"
+        "</receptionReport>"
+        "</receptionReports>",
+        callsign, freq_hz, snr, mode);
+
+    esp_http_client_config_t cfg = {
+        .url = "https://pskreporter.info/cgi-bin/psk-report.pl",
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = 10000,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) return;
+
+    esp_http_client_set_header(client, "Content-Type", "text/xml");
+    esp_http_client_set_post_field(client, xml, xml_len);
+
+    esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        ESP_LOGI("dec_ft8", "PSKreporter spot: %s %.0f Hz %d dB %s", callsign, freq_hz, snr, mode);
+    } else {
+        ESP_LOGW("dec_ft8", "PSKreporter upload failed: %s", esp_err_to_name(err));
+    }
+    esp_http_client_cleanup(client);
 }
 
 /* ═══════════════════════════════════════════════════════════════
