@@ -31,7 +31,7 @@ button.active{background:#FF4400;border-color:#FF4400;color:#fff}
 </div>
 <script>
 var ws,aCtx,wkNode,gNode,iqRate=0,playing=false,prevI=0,prevQ=0;
-var host='192.168.29.157',port='8080';
+var host=location.hostname||'192.168.29.157',port=location.port||'8080';
 
 // AudioWorklet processor code — runs in audio thread
 var PROC_CODE=`
@@ -84,7 +84,8 @@ registerProcessor('fm-proc',FMProc);
 `;
 
 function connect(){
-  ws=new WebSocket('ws://'+host+':'+port+'/ws');
+  var proto=location.protocol==='https:'?'wss://':'ws://';
+  ws=new WebSocket(proto+host+':'+port+'/ws');
   ws.binaryType='arraybuffer';
   ws.onopen=function(){
     document.getElementById('status').textContent='Connected';

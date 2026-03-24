@@ -602,7 +602,7 @@ def run_test(args):
     time.sleep(1.5)
     if not rx.connected:
         print("[RX] WebSDR connection failed, attempting UART reset...")
-        uart_reset_esp32(args.uart_port)
+        print("[UART] Skipping reset - causes download mode")
         time.sleep(15)
         rx = RxState()
         ws = create_ws_rx(args.sdr_ip, args.sdr_port, rx)
@@ -667,7 +667,7 @@ def run_test(args):
                 # Try UART reset
                 if len(audio) == 0:
                     print("[RX] Zero audio — attempting UART reset...")
-                    uart_reset_esp32(args.uart_port)
+                    print("[UART] Skipping reset - causes download mode")
                     time.sleep(15)
                     rx = RxState()
                     ws = create_ws_rx(args.sdr_ip, args.sdr_port, rx)

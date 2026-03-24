@@ -83,6 +83,22 @@
           <select id="set-deemph"><option value="off">Off</option><option value="50us">50us EU</option><option value="75us" selected>75us US</option></select>
         </div>
       </div>
+      <div class="ribbon-sep"></div>
+      <div class="ribbon-group">
+        <span class="ribbon-group-label">Limiter (WBFM)</span>
+        <div class="ribbon-group-btns ribbon-group-sliders">
+          <label class="ribbon-slider-lbl"><input type="checkbox" id="set-limiter" checked> On</label>
+          <label class="ribbon-slider-lbl">Drive<input type="range" id="set-lim-drive" min="5" max="50" value="20"><span id="set-lim-drive-val">2.0</span></label>
+          <label class="ribbon-slider-lbl">Ceil<input type="range" id="set-lim-ceil" min="10" max="80" value="35"><span id="set-lim-ceil-val">0.35</span></label>
+        </div>
+      </div>
+      <div class="ribbon-sep"></div>
+      <div class="ribbon-group">
+        <span class="ribbon-group-label">Audio Level</span>
+        <div class="ribbon-group-btns">
+          <div id="audio-meter" style="width:100px;height:6px;background:#222;border-radius:3px;overflow:hidden"><div id="audio-meter-fill" style="height:100%;width:0%;background:#FFB000;border-radius:3px;transition:width 0.08s"></div></div>
+        </div>
+      </div>
     </div>
     <!-- Display tab content -->
     <div class="ribbon-panel" data-panel="display">
