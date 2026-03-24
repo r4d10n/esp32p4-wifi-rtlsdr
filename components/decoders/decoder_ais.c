@@ -820,6 +820,16 @@ static int ais_build_nmea(const uint8_t *payload, int payload_bits, char channel
     return snprintf(nmea_out, max_len, "%s*%02X\r\n", body, cksum);
 }
 
+/* ── NMEA TCP forwarding ──────────────────────────────── */
+static int s_nmea_sock __attribute__((used)) = -1;
+
+static void ais_nmea_forward(const uint8_t *payload, int payload_bits, char channel) {
+    if (s_nmea_sock < 0) return;
+    char nmea[128];
+    int len = ais_build_nmea(payload, payload_bits, channel, nmea, sizeof(nmea));
+    (void)len; /* TODO: send(s_nmea_sock, nmea, len, MSG_DONTWAIT); */
+}
+
 /* ═══════════════════════════════════════════════════════════════
  *  Plugin registration
  * ═══════════════════════════════════════════════════════════════ */

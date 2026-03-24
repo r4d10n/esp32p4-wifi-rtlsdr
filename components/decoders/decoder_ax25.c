@@ -80,6 +80,13 @@ typedef struct {
     uint32_t configured_rate;   /* Sample rate we initialized for */
     uint16_t mark_hz;
     uint16_t space_hz;
+
+    /* G3RUH 9600 baud state */
+    int prev_raw_bit;           /* Previous raw bit for zero-crossing detect */
+    double pll_phase;           /* PLL phase accumulator (0.0 to 1.0) */
+    double pll_freq_adj;        /* PLL frequency correction */
+    uint32_t scrambler_reg;     /* G3RUH descrambler shift register */
+    int prev_nrzi_bit;          /* Previous bit for NRZI decode */
 } ax25_ctx_t;
 
 static ax25_ctx_t s_ax25_300_ctx  = { .baud_rate = 300,  .mark_hz = 1270, .space_hz = 1070 };
@@ -501,6 +508,120 @@ static void hdlc_process_bit(ax25_ctx_t *c, int raw_level) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+ *  HDLC bit processing for G3RUH (post-descrambler, no NRZI in
+ *  this entry point since NRZI is handled by the 9600 path)
+ * ═══════════════════════════════════════════════════════════════ */
+
+static void hdlc_process_data_bit(ax25_ctx_t *c, int data_bit) {
+    hdlc_state_t *h = &c->hdlc;
+
+    /* Shift into flag detection register */
+    h->shift_reg = (h->shift_reg << 1) | (data_bit & 1);
+
+    /* Check for HDLC flag (0x7E) */
+    if (h->shift_reg == HDLC_FLAG) {
+        if (h->in_frame && h->frame_bytes >= 17) {
+            ax25_handle_frame(c, h->frame_buf, h->frame_bytes);
+        }
+        h->in_frame = true;
+        h->frame_bits = 0;
+        h->frame_bytes = 0;
+        h->ones_count = 0;
+        return;
+    }
+
+    if (!h->in_frame) return;
+
+    if (h->ones_count >= 7) {
+        h->in_frame = false;
+        return;
+    }
+
+    if (data_bit == 1) {
+        h->ones_count++;
+    } else {
+        if (h->ones_count == 5) {
+            h->ones_count = 0;
+            return;
+        }
+        h->ones_count = 0;
+    }
+
+    if (h->frame_bytes < AX25_MAX_FRAME_LEN) {
+        if (h->frame_bits < 8) {
+            h->frame_buf[h->frame_bytes] >>= 1;
+            if (data_bit)
+                h->frame_buf[h->frame_bytes] |= 0x80;
+            h->frame_bits++;
+            if (h->frame_bits == 8) {
+                h->frame_bits = 0;
+                h->frame_bytes++;
+                if (h->frame_bytes < AX25_MAX_FRAME_LEN)
+                    h->frame_buf[h->frame_bytes] = 0;
+            }
+        }
+    } else {
+        h->in_frame = false;
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ *  G3RUH 9600 baud: direct FSK with descrambler
+ *
+ *  The FM demodulator output directly represents the data.
+ *  G3RUH uses a self-synchronizing descrambler: x^17 + x^12 + 1
+ *
+ *  Input: FM discriminator audio at 48kHz (or other rate)
+ *  Pipeline:
+ *    1. Bit slicing (zero-threshold comparator)
+ *    2. PLL clock recovery (tracking at 9600 baud)
+ *    3. G3RUH descrambler: out = in XOR delay[12] XOR delay[17]
+ *    4. NRZI decode: same level = 1, change = 0
+ *    5. HDLC framing (same as 1200 baud)
+ * ═══════════════════════════════════════════════════════════════ */
+
+static void ax25_9600_process(ax25_ctx_t *c, const int16_t *samples,
+                               uint32_t count, uint32_t sample_rate) {
+    double samples_per_bit = (double)sample_rate / 9600.0;
+
+    for (uint32_t i = 0; i < count; i++) {
+        /* Simple bit slicer: threshold at zero */
+        int raw_bit = (samples[i] > 0) ? 1 : 0;
+
+        /* PLL clock recovery: adjust phase on zero crossings */
+        if (raw_bit != c->prev_raw_bit) {
+            /* Transition detected -- correct PLL phase toward mid-bit */
+            double phase_error = c->pll_phase - 0.5;
+            c->pll_phase -= phase_error * 0.1;
+            c->pll_freq_adj = -phase_error * 0.01;
+        }
+        c->prev_raw_bit = raw_bit;
+
+        c->pll_phase += 1.0 / (samples_per_bit + c->pll_freq_adj);
+
+        if (c->pll_phase >= 1.0) {
+            c->pll_phase -= 1.0;
+
+            /* G3RUH descrambler: x^17 + x^12 + 1
+             * Output = input XOR tap[12] XOR tap[17]
+             * The shift register stores raw (pre-descramble) bits */
+            int descrambled = raw_bit
+                ^ ((c->scrambler_reg >> 12) & 1)
+                ^ ((c->scrambler_reg >> 17) & 1);
+            c->scrambler_reg = (c->scrambler_reg << 1) | (uint32_t)raw_bit;
+
+            /* NRZI decode: same level = 1, level change = 0 */
+            int data_bit = (descrambled == c->prev_nrzi_bit) ? 1 : 0;
+            c->prev_nrzi_bit = descrambled;
+
+            /* Feed decoded bit to HDLC framing (bypasses the NRZI in
+             * hdlc_process_bit since we already decoded NRZI above) */
+            hdlc_process_data_bit(c, data_bit);
+        }
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════
  *  Lifecycle callbacks
  * ═══════════════════════════════════════════════════════════════ */
 
@@ -513,6 +634,14 @@ static esp_err_t ax25_init(void *ctx) {
     hdlc_init(&c->hdlc);
     memset(&c->afsk, 0, sizeof(c->afsk));
     memset(&c->sync, 0, sizeof(c->sync));
+
+    /* G3RUH state */
+    c->prev_raw_bit = 0;
+    c->pll_phase = 0.0;
+    c->pll_freq_adj = 0.0;
+    c->scrambler_reg = 0;
+    c->prev_nrzi_bit = 0;
+
     ESP_LOGI(TAG, "AX.25 %lu baud decoder initialized", (unsigned long)c->baud_rate);
     return ESP_OK;
 }
@@ -541,7 +670,8 @@ static void ax25_destroy(void *ctx) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
- *  Audio processing: AFSK demod -> bit sync -> HDLC
+ *  Audio processing: AFSK demod -> bit sync -> HDLC  (300/1200)
+ *                    G3RUH direct FSK -> HDLC        (9600)
  * ═══════════════════════════════════════════════════════════════ */
 
 static void ax25_process_audio(void *ctx, const int16_t *samples,
@@ -549,8 +679,25 @@ static void ax25_process_audio(void *ctx, const int16_t *samples,
     ax25_ctx_t *c = (ax25_ctx_t *)ctx;
     if (!c->running) return;
 
-    /* Only implement AFSK for 300 and 1200 baud modes */
-    if (c->baud_rate != 300 && c->baud_rate != 1200) return;
+    /* ── G3RUH 9600 baud: direct FSK path ── */
+    if (c->baud_rate == 9600) {
+        /* Lazy init on first audio callback */
+        if (c->configured_rate != sample_rate) {
+            hdlc_init(&c->hdlc);
+            c->prev_raw_bit = 0;
+            c->pll_phase = 0.0;
+            c->pll_freq_adj = 0.0;
+            c->scrambler_reg = 0;
+            c->prev_nrzi_bit = 0;
+            c->configured_rate = sample_rate;
+            ESP_LOGI(TAG, "G3RUH 9600 demod initialized: rate=%lu, spb=%.1f",
+                     (unsigned long)sample_rate, (double)sample_rate / 9600.0);
+        }
+        ax25_9600_process(c, samples, count, sample_rate);
+        return;
+    }
+
+    /* ── AFSK path for 300 and 1200 baud ── */
     if (c->mark_hz == 0 || c->space_hz == 0) return;
 
     /* Lazy initialization of AFSK demod when sample rate is known */

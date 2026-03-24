@@ -376,6 +376,109 @@ static char *execute_tool_call(const char *tool_name, const cJSON *args) {
     return str;
 }
 
+/* ── Telegram getUpdates polling ──────────────────────── */
+
+static void telegram_poll_task(void *arg)
+{
+    (void)arg;
+    int64_t last_update_id = 0;
+
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        if (!s_chatbot_cfg.enable || !s_chatbot_cfg.telegram_enable) continue;
+
+        notify_config_t ncfg;
+        wifimgr_config_load_notify(&ncfg);
+        if (ncfg.telegram.bot_token[0] == '\0') continue;
+
+        char url[300];
+        snprintf(url, sizeof(url),
+                 "https://api.telegram.org/bot%s/getUpdates?offset=%lld&timeout=1&limit=3",
+                 ncfg.telegram.bot_token, (long long)(last_update_id + 1));
+
+        esp_http_client_config_t cfg = {
+            .url = url,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+            .timeout_ms = 8000,
+        };
+        esp_http_client_handle_t client = esp_http_client_init(&cfg);
+        if (!client) continue;
+
+        if (esp_http_client_perform(client) != ESP_OK) {
+            esp_http_client_cleanup(client);
+            continue;
+        }
+
+        int clen = esp_http_client_get_content_length(client);
+        if (clen <= 0 || clen > 4096) { esp_http_client_cleanup(client); continue; }
+
+        char *buf = malloc(clen + 1);
+        if (!buf) { esp_http_client_cleanup(client); continue; }
+        int rd = esp_http_client_read(client, buf, clen);
+        esp_http_client_cleanup(client);
+        if (rd <= 0) { free(buf); continue; }
+        buf[rd] = '\0';
+
+        cJSON *resp = cJSON_Parse(buf);
+        free(buf);
+        if (!resp) continue;
+
+        cJSON *result = cJSON_GetObjectItem(resp, "result");
+        if (result && cJSON_IsArray(result)) {
+            cJSON *upd;
+            cJSON_ArrayForEach(upd, result) {
+                cJSON *uid = cJSON_GetObjectItem(upd, "update_id");
+                if (uid) last_update_id = (int64_t)cJSON_GetNumberValue(uid);
+
+                cJSON *msg = cJSON_GetObjectItem(upd, "message");
+                if (!msg) continue;
+                cJSON *text = cJSON_GetObjectItem(msg, "text");
+                if (!text || !cJSON_IsString(text)) continue;
+
+                ESP_LOGI(TAG, "TG msg: %s", text->valuestring);
+
+                char *reply = NULL;
+                wifimgr_chatbot_message(text->valuestring, &reply);
+                if (reply) {
+                    /* Send reply via Telegram sendMessage */
+                    cJSON *chat = cJSON_GetObjectItem(msg, "chat");
+                    cJSON *cid = chat ? cJSON_GetObjectItem(chat, "id") : NULL;
+                    if (cid) {
+                        char send_url[200];
+                        snprintf(send_url, sizeof(send_url),
+                                 "https://api.telegram.org/bot%s/sendMessage",
+                                 ncfg.telegram.bot_token);
+                        cJSON *body = cJSON_CreateObject();
+                        char id_s[24];
+                        snprintf(id_s, sizeof(id_s), "%.0f", cJSON_GetNumberValue(cid));
+                        cJSON_AddStringToObject(body, "chat_id", id_s);
+                        cJSON_AddStringToObject(body, "text", reply);
+                        char *js = cJSON_PrintUnformatted(body);
+                        cJSON_Delete(body);
+                        if (js) {
+                            esp_http_client_config_t scfg = {
+                                .url = send_url, .method = HTTP_METHOD_POST,
+                                .crt_bundle_attach = esp_crt_bundle_attach,
+                                .timeout_ms = 10000,
+                            };
+                            esp_http_client_handle_t sc = esp_http_client_init(&scfg);
+                            if (sc) {
+                                esp_http_client_set_header(sc, "Content-Type", "application/json");
+                                esp_http_client_set_post_field(sc, js, strlen(js));
+                                esp_http_client_perform(sc);
+                                esp_http_client_cleanup(sc);
+                            }
+                            cJSON_free(js);
+                        }
+                    }
+                    free(reply);
+                }
+            }
+        }
+        cJSON_Delete(resp);
+    }
+}
+
 /* ── Public API ─────────────────────────────────────────────── */
 
 esp_err_t wifimgr_chatbot_init(void)
@@ -383,6 +486,12 @@ esp_err_t wifimgr_chatbot_init(void)
     wifimgr_config_load_chatbot(&s_chatbot_cfg);
     s_history = cJSON_CreateArray();
     s_mutex = xSemaphoreCreateMutex();
+
+    if (s_chatbot_cfg.telegram_enable) {
+        xTaskCreatePinnedToCore(telegram_poll_task, "tg_poll", 8192, NULL, 3, NULL, 1);
+        ESP_LOGI(TAG, "Telegram polling task started");
+    }
+
     ESP_LOGI(TAG, "Chatbot init (provider=%s, enabled=%d)",
              s_chatbot_cfg.provider, s_chatbot_cfg.enable);
     return ESP_OK;

@@ -354,6 +354,16 @@ static int adsb_build_sbs1(const adsb_aircraft_t *a, int msg_type,
         a->lat, a->lon, (int)a->vert_rate);
 }
 
+/* ── SBS-1 TCP forwarding ─────────────────────────────── */
+static int s_sbs1_sock __attribute__((used)) = -1;
+
+static void adsb_sbs1_forward(const adsb_aircraft_t *a, int msg_type) {
+    if (s_sbs1_sock < 0) return;
+    char sbs[256];
+    int len = adsb_build_sbs1(a, msg_type, sbs, sizeof(sbs));
+    (void)len; /* TODO: send(s_sbs1_sock, sbs, len, MSG_DONTWAIT); */
+}
+
 static esp_err_t adsb_init(void *ctx) {
     adsb_ctx_t *c = (adsb_ctx_t *)ctx;
     c->mutex = xSemaphoreCreateMutex();
