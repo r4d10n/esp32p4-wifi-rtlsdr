@@ -17,7 +17,7 @@ idf_component_register(
     SRCS ${srcs}
     INCLUDE_DIRS "include"
     REQUIRES nvs_flash esp_wifi esp_netif esp_http_server esp_http_client
-             esp_event lwip mdns json driver esp_eth
+             esp_event lwip mdns json driver esp_eth mbedtls
     PRIV_REQUIRES esp_https_server
     EMBED_FILES ${embed_files}
 )

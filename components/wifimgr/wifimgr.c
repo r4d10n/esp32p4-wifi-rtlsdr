@@ -46,6 +46,11 @@ static SemaphoreHandle_t s_scan_mutex;
 static wifi_ap_record_t *s_ap_records;
 static uint16_t s_ap_count;
 
+/* State mutex — protects s_state, s_connected_ssid, s_connected_ip, s_connected_rssi */
+static SemaphoreHandle_t s_state_mutex;
+#define STATE_LOCK()   xSemaphoreTake(s_state_mutex, portMAX_DELAY)
+#define STATE_UNLOCK() xSemaphoreGive(s_state_mutex)
+
 /* Connection tracking */
 static char s_connected_ssid[WIFIMGR_SSID_MAX_LEN];
 static char s_connected_ip[16];
@@ -70,8 +75,10 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
 {
     if (id == WIFI_EVENT_STA_DISCONNECTED) {
         ESP_LOGW(TAG, "STA disconnected");
+        STATE_LOCK();
         s_connected_ssid[0] = '\0';
         s_connected_ip[0] = '\0';
+        STATE_UNLOCK();
         xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
         xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     } else if (id == WIFI_EVENT_SCAN_DONE) {
@@ -90,9 +97,12 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
 {
     if (id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *evt = data;
-        snprintf(s_connected_ip, sizeof(s_connected_ip), IPSTR,
-                 IP2STR(&evt->ip_info.ip));
-        ESP_LOGI(TAG, "STA got IP: %s", s_connected_ip);
+        char tmp_ip[16];
+        snprintf(tmp_ip, sizeof(tmp_ip), IPSTR, IP2STR(&evt->ip_info.ip));
+        STATE_LOCK();
+        memcpy(s_connected_ip, tmp_ip, sizeof(s_connected_ip));
+        STATE_UNLOCK();
+        ESP_LOGI(TAG, "STA got IP: %s", tmp_ip);
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
         xEventGroupClearBits(s_wifi_event_group, WIFI_FAIL_BIT);
     }
@@ -110,6 +120,7 @@ esp_err_t wifimgr_init(const wifimgr_config_t *config)
 
     s_wifi_event_group = xEventGroupCreate();
     s_scan_mutex = xSemaphoreCreateMutex();
+    s_state_mutex = xSemaphoreCreateMutex();
 
     /* Initialize NVS + LittleFS config store */
     esp_err_t err = wifimgr_config_init();
@@ -166,18 +177,23 @@ esp_err_t wifimgr_start(void)
 /* ── Status queries ─────────────────────────────────────────── */
 wifimgr_state_t wifimgr_get_state(void)
 {
-    return s_state;
+    STATE_LOCK();
+    wifimgr_state_t state = s_state;
+    STATE_UNLOCK();
+    return state;
 }
 
 esp_err_t wifimgr_get_status(wifimgr_status_t *status)
 {
     if (!status) return ESP_ERR_INVALID_ARG;
+    STATE_LOCK();
     status->state = s_state;
     strncpy(status->ssid, s_connected_ssid, sizeof(status->ssid) - 1);
     status->ssid[sizeof(status->ssid) - 1] = '\0';
     strncpy(status->ip, s_connected_ip, sizeof(status->ip) - 1);
     status->ip[sizeof(status->ip) - 1] = '\0';
     status->rssi = s_connected_rssi;
+    STATE_UNLOCK();
 
     wifi_mode_t mode;
     if (esp_wifi_get_mode(&mode) == ESP_OK)
@@ -440,7 +456,11 @@ esp_err_t wifimgr_get_saved_networks(wifimgr_network_t *networks,
         memset(&networks[i], 0, sizeof(wifimgr_network_t));
         size_t len = WIFIMGR_SSID_MAX_LEN;
         snprintf(key, sizeof(key), "wifi_%d_ssid", i);
-        nvs_get_str(nvs, key, networks[i].ssid, &len);
+        esp_err_t ret = nvs_get_str(nvs, key, networks[i].ssid, &len);
+        if (ret != ESP_OK) {
+            memset(&networks[i], 0, sizeof(wifimgr_network_t));
+            continue;
+        }
 
         /* Don't return passwords in the getter */
         networks[i].password[0] = '\0';
@@ -542,11 +562,16 @@ static esp_err_t start_softap(void)
         ESP_ERROR_CHECK(esp_wifi_start());
     }
 
+    STATE_LOCK();
     if (target == WIFI_MODE_APSTA) {
         s_state = WIFIMGR_STATE_APSTA_MODE;
-        ESP_LOGI(TAG, "APSTA mode: AP '%s' + STA connected", s_config.ap_ssid);
     } else {
         s_state = WIFIMGR_STATE_AP_MODE;
+    }
+    STATE_UNLOCK();
+    if (target == WIFI_MODE_APSTA) {
+        ESP_LOGI(TAG, "APSTA mode: AP '%s' + STA connected", s_config.ap_ssid);
+    } else {
         ESP_LOGI(TAG, "AP mode: '%s' on 192.168.4.1:%d",
                  s_config.ap_ssid, CONFIG_WIFIMGR_PORTAL_PORT);
     }
@@ -599,10 +624,16 @@ static esp_err_t try_connect_saved(void)
     for (uint8_t i = 0; i < saved_count; i++) {
         size_t len = WIFIMGR_SSID_MAX_LEN;
         snprintf(key, sizeof(key), "wifi_%d_ssid", i);
-        nvs_get_str(nvs, key, saved[i].ssid, &len);
+        if (nvs_get_str(nvs, key, saved[i].ssid, &len) != ESP_OK) {
+            memset(&saved[i], 0, sizeof(wifimgr_network_t));
+            continue;
+        }
         len = WIFIMGR_PASS_MAX_LEN;
         snprintf(key, sizeof(key), "wifi_%d_pass", i);
-        nvs_get_str(nvs, key, saved[i].password, &len);
+        if (nvs_get_str(nvs, key, saved[i].password, &len) != ESP_OK) {
+            memset(&saved[i], 0, sizeof(wifimgr_network_t));
+            continue;
+        }
         uint8_t auth = 0;
         snprintf(key, sizeof(key), "wifi_%d_auth", i);
         nvs_get_u8(nvs, key, &auth);
@@ -625,18 +656,22 @@ static esp_err_t try_connect_saved(void)
 
             xSemaphoreGive(s_scan_mutex);
 
+            STATE_LOCK();
             s_state = WIFIMGR_STATE_CONNECTING;
+            STATE_UNLOCK();
             err = wifimgr_test_connect(saved[j].ssid, saved[j].password, 10000);
 
             if (err == ESP_OK) {
+                wifi_ap_record_t ap_info;
+                int8_t rssi = 0;
+                if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+                    rssi = ap_info.rssi;
+                }
+                STATE_LOCK();
                 strncpy(s_connected_ssid, saved[j].ssid, WIFIMGR_SSID_MAX_LEN - 1);
                 s_connected_ssid[WIFIMGR_SSID_MAX_LEN - 1] = '\0';
-
-                /* Update RSSI */
-                wifi_ap_record_t ap_info;
-                if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
-                    s_connected_rssi = ap_info.rssi;
-                }
+                s_connected_rssi = rssi;
+                STATE_UNLOCK();
                 connected = true;
             }
 
@@ -734,7 +769,9 @@ static void wifimgr_task(void *arg)
             break;
         }
 
+        STATE_LOCK();
         s_state = WIFIMGR_STATE_SCANNING;
+        STATE_UNLOCK();
         ESP_LOGI(TAG, "Scan cycle %d/%d", s_scan_cycle_count + 1,
                  s_config.scan_cycles_before_ap);
 
@@ -747,7 +784,9 @@ static void wifimgr_task(void *arg)
 
         err = try_connect_saved();
         if (err == ESP_OK) {
+            STATE_LOCK();
             s_state = WIFIMGR_STATE_CONNECTED;
+            STATE_UNLOCK();
             ESP_LOGI(TAG, "Connected to '%s' (%s)", s_connected_ssid, s_connected_ip);
 
             /* Start portal on STA interface too (accessible from LAN) */
@@ -791,14 +830,18 @@ monitor_loop:
             if (bits & WIFI_FAIL_BIT) {
                 ESP_LOGW(TAG, "Connection lost — rescanning");
                 xEventGroupClearBits(s_wifi_event_group, WIFI_FAIL_BIT);
+                STATE_LOCK();
                 s_state = WIFIMGR_STATE_SCANNING;
+                STATE_UNLOCK();
                 s_scan_cycle_count = 0;
 
                 /* Quick rescan-reconnect loop */
                 for (int i = 0; i < 3; i++) {
                     wifimgr_scan();
                     if (try_connect_saved() == ESP_OK) {
+                        STATE_LOCK();
                         s_state = WIFIMGR_STATE_CONNECTED;
+                        STATE_UNLOCK();
                         ESP_LOGI(TAG, "Reconnected to '%s'", s_connected_ssid);
                         wifimgr_notify_text("system", "wifi_reconnect",
                             "WiFi Reconnected", s_connected_ssid);
@@ -815,7 +858,9 @@ monitor_loop:
                 /* Periodic RSSI update */
                 wifi_ap_record_t ap_info;
                 if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+                    STATE_LOCK();
                     s_connected_rssi = ap_info.rssi;
+                    STATE_UNLOCK();
                 }
             }
         }

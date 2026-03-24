@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
@@ -23,6 +24,7 @@ static const char *TAG = "wifimgr_notify";
 
 static QueueHandle_t s_queue;
 static notify_config_t s_config;
+static SemaphoreHandle_t s_config_mutex;
 
 /* Rate limiter: track last send time per service+channel */
 #define MAX_RATE_ENTRIES 32
@@ -99,22 +101,23 @@ static esp_err_t http_post_json(const char *url, const char *json_body,
 
 /* ── Telegram sender ────────────────────────────────────────── */
 
-static esp_err_t send_telegram_text(const char *title, const char *message)
+static esp_err_t send_telegram_text(const notify_config_t *cfg,
+                                      const char *title, const char *message)
 {
-    if (!s_config.telegram.enable ||
-        s_config.telegram.bot_token[0] == '\0' ||
-        s_config.telegram.chat_id[0] == '\0') {
+    if (!cfg->telegram.enable ||
+        cfg->telegram.bot_token[0] == '\0' ||
+        cfg->telegram.chat_id[0] == '\0') {
         return ESP_ERR_INVALID_STATE;
     }
 
     char url[160];
     snprintf(url, sizeof(url),
              "https://api.telegram.org/bot%s/sendMessage",
-             s_config.telegram.bot_token);
+             cfg->telegram.bot_token);
 
     /* Build JSON body */
     cJSON *body = cJSON_CreateObject();
-    cJSON_AddStringToObject(body, "chat_id", s_config.telegram.chat_id);
+    cJSON_AddStringToObject(body, "chat_id", cfg->telegram.chat_id);
 
     char text[600];
     snprintf(text, sizeof(text), "*%s*\n%s", title, message);
@@ -131,11 +134,12 @@ static esp_err_t send_telegram_text(const char *title, const char *message)
     return err;
 }
 
-static esp_err_t send_telegram_photo(const char *caption,
+static esp_err_t send_telegram_photo(const notify_config_t *cfg,
+                                      const char *caption,
                                       const uint8_t *png_data, uint32_t png_len)
 {
-    if (!s_config.telegram.enable ||
-        s_config.telegram.bot_token[0] == '\0' ||
+    if (!cfg->telegram.enable ||
+        cfg->telegram.bot_token[0] == '\0' ||
         png_data == NULL || png_len == 0) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -143,13 +147,13 @@ static esp_err_t send_telegram_photo(const char *caption,
     char url[160];
     snprintf(url, sizeof(url),
              "https://api.telegram.org/bot%s/sendPhoto",
-             s_config.telegram.bot_token);
+             cfg->telegram.bot_token);
 
     /* Build multipart/form-data body */
     const char *boundary = "----ESP32P4Boundary";
 
     /* Calculate total size */
-    size_t header_len = 256 + strlen(s_config.telegram.chat_id) + (caption ? strlen(caption) : 0);
+    size_t header_len = 256 + strlen(cfg->telegram.chat_id) + (caption ? strlen(caption) : 0);
     size_t total = header_len + png_len + 128;
     char *body = malloc(total);
     if (!body) return ESP_ERR_NO_MEM;
@@ -165,7 +169,7 @@ static esp_err_t send_telegram_photo(const char *caption,
         "--%s\r\n"
         "Content-Disposition: form-data; name=\"photo\"; filename=\"image.png\"\r\n"
         "Content-Type: image/png\r\n\r\n",
-        boundary, s_config.telegram.chat_id,
+        boundary, cfg->telegram.chat_id,
         boundary, caption ? caption : "",
         boundary);
 
@@ -176,14 +180,14 @@ static esp_err_t send_telegram_photo(const char *caption,
         "\r\n--%s--\r\n", boundary);
 
     /* Send with multipart content type */
-    esp_http_client_config_t cfg = {
+    esp_http_client_config_t http_cfg = {
         .url = url,
         .method = HTTP_METHOD_POST,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = 30000,
     };
 
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
     char ct_header[80];
     snprintf(ct_header, sizeof(ct_header), "multipart/form-data; boundary=%s", boundary);
     esp_http_client_set_header(client, "Content-Type", ct_header);
@@ -203,10 +207,11 @@ static esp_err_t send_telegram_photo(const char *caption,
 
 /* ── Discord sender ─────────────────────────────────────────── */
 
-static esp_err_t send_discord_text(const char *title, const char *message)
+static esp_err_t send_discord_text(const notify_config_t *cfg,
+                                    const char *title, const char *message)
 {
-    if (!s_config.discord.enable ||
-        s_config.discord.webhook_url[0] == '\0') {
+    if (!cfg->discord.enable ||
+        cfg->discord.webhook_url[0] == '\0') {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -225,7 +230,7 @@ static esp_err_t send_discord_text(const char *title, const char *message)
 
     if (!json_str) return ESP_ERR_NO_MEM;
 
-    esp_err_t err = http_post_json(s_config.discord.webhook_url, json_str, NULL);
+    esp_err_t err = http_post_json(cfg->discord.webhook_url, json_str, NULL);
     cJSON_free(json_str);
     return err;
 }
@@ -241,17 +246,22 @@ static void notify_task(void *arg)
 
         ESP_LOGI(TAG, "Dispatching: %s/%s", event.service, event.event);
 
+        /* Snapshot config under lock */
+        xSemaphoreTake(s_config_mutex, portMAX_DELAY);
+        notify_config_t cfg = s_config;
+        xSemaphoreGive(s_config_mutex);
+
         /* Telegram */
-        if (s_config.telegram.enable &&
-            rate_limit_check(event.service, "telegram", s_config.telegram.rate_limit_s)) {
+        if (cfg.telegram.enable &&
+            rate_limit_check(event.service, "telegram", cfg.telegram.rate_limit_s)) {
 
             esp_err_t err = ESP_FAIL;
             for (int retry = 0; retry < CONFIG_WIFIMGR_NOTIFY_MAX_RETRIES; retry++) {
                 if (event.image_data && event.image_len > 0) {
-                    err = send_telegram_photo(event.title,
+                    err = send_telegram_photo(&cfg, event.title,
                                                event.image_data, event.image_len);
                 } else {
-                    err = send_telegram_text(event.title, event.message);
+                    err = send_telegram_text(&cfg, event.title, event.message);
                 }
                 if (err == ESP_OK) break;
                 /* Exponential backoff: 1s, 2s, 4s */
@@ -264,12 +274,12 @@ static void notify_task(void *arg)
         }
 
         /* Discord */
-        if (s_config.discord.enable &&
-            rate_limit_check(event.service, "discord", s_config.discord.rate_limit_s)) {
+        if (cfg.discord.enable &&
+            rate_limit_check(event.service, "discord", cfg.discord.rate_limit_s)) {
 
             esp_err_t err = ESP_FAIL;
             for (int retry = 0; retry < CONFIG_WIFIMGR_NOTIFY_MAX_RETRIES; retry++) {
-                err = send_discord_text(event.title, event.message);
+                err = send_discord_text(&cfg, event.title, event.message);
                 if (err == ESP_OK) break;
                 vTaskDelay(pdMS_TO_TICKS(1000 << retry));
             }
@@ -290,6 +300,8 @@ esp_err_t wifimgr_notify_init(void)
 {
     s_queue = xQueueCreate(CONFIG_WIFIMGR_NOTIFY_QUEUE_SIZE, sizeof(notify_event_t));
     if (!s_queue) return ESP_ERR_NO_MEM;
+
+    s_config_mutex = xSemaphoreCreateMutex();
 
     /* Load config */
     wifimgr_config_load_notify(&s_config);
@@ -334,11 +346,15 @@ esp_err_t wifimgr_notify_test(const char *channel)
 {
     if (!channel) return ESP_ERR_INVALID_ARG;
 
+    xSemaphoreTake(s_config_mutex, portMAX_DELAY);
+    notify_config_t cfg = s_config;
+    xSemaphoreGive(s_config_mutex);
+
     if (strcmp(channel, "telegram") == 0) {
-        return send_telegram_text("ESP32-P4 SDR Test",
+        return send_telegram_text(&cfg, "ESP32-P4 SDR Test",
                                    "Notification channel working.");
     } else if (strcmp(channel, "discord") == 0) {
-        return send_discord_text("ESP32-P4 SDR Test",
+        return send_discord_text(&cfg, "ESP32-P4 SDR Test",
                                   "Notification channel working.");
     }
     return ESP_ERR_INVALID_ARG;
@@ -346,5 +362,12 @@ esp_err_t wifimgr_notify_test(const char *channel)
 
 esp_err_t wifimgr_notify_reload_config(void)
 {
-    return wifimgr_config_load_notify(&s_config);
+    notify_config_t new_config;
+    esp_err_t err = wifimgr_config_load_notify(&new_config);
+    if (err == ESP_OK) {
+        xSemaphoreTake(s_config_mutex, portMAX_DELAY);
+        s_config = new_config;
+        xSemaphoreGive(s_config_mutex);
+    }
+    return err;
 }

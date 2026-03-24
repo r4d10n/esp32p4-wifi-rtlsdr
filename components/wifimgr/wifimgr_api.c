@@ -13,6 +13,7 @@
 #include "esp_chip_info.h"
 #include "esp_heap_caps.h"
 #include "cJSON.h"
+#include "mbedtls/base64.h"
 
 #include "wifimgr.h"
 #include "wifimgr_config.h"
@@ -20,6 +21,67 @@
 #include "wifimgr_notify.h"
 
 static const char *TAG = "wifimgr_api";
+
+/* ── Basic Auth ─────────────────────────────────────────────── */
+
+/* Admin password cache (loaded from NVS on first check) */
+static char s_admin_pass[65] = {0};
+static bool s_admin_pass_loaded = false;
+
+static void load_admin_pass(void) {
+    if (!s_admin_pass_loaded) {
+        wifimgr_config_get_api_key("admin_pass", s_admin_pass, sizeof(s_admin_pass));
+        s_admin_pass_loaded = true;
+    }
+}
+
+/* Returns true if request is authorized (no password set, or valid Basic Auth) */
+static bool check_auth(httpd_req_t *req) {
+    load_admin_pass();
+    if (s_admin_pass[0] == '\0') return true; /* No password set — open access */
+
+    char auth_header[256] = {0};
+    if (httpd_req_get_hdr_value_str(req, "Authorization", auth_header, sizeof(auth_header)) != ESP_OK) {
+        return false;
+    }
+
+    /* Expect "Basic <base64(admin:password)>" */
+    if (strncmp(auth_header, "Basic ", 6) != 0) return false;
+
+    /* Decode base64 */
+    unsigned char decoded[128] = {0};
+    size_t decoded_len = 0;
+    if (mbedtls_base64_decode(decoded, sizeof(decoded) - 1, &decoded_len,
+                               (unsigned char *)auth_header + 6, strlen(auth_header + 6)) != 0) {
+        return false;
+    }
+    decoded[decoded_len] = '\0';
+
+    /* Expected format: "admin:<password>" */
+    char expected[128];
+    snprintf(expected, sizeof(expected), "admin:%s", s_admin_pass);
+
+    return strcmp((char *)decoded, expected) == 0;
+}
+
+static esp_err_t require_auth(httpd_req_t *req) {
+    if (check_auth(req)) return ESP_OK;
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"ESP32-P4 SDR\"");
+    cJSON *json = cJSON_CreateObject();
+    if (json) {
+        cJSON_AddStringToObject(json, "status", "error");
+        cJSON_AddStringToObject(json, "message", "Authentication required");
+        char *str = cJSON_PrintUnformatted(json);
+        if (str) {
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_send(req, str, strlen(str));
+            cJSON_free(str);
+        }
+        cJSON_Delete(json);
+    }
+    return ESP_FAIL;
+}
 
 /* ── Helper: read request body as cJSON ─────────────────────── */
 static cJSON *read_req_json(httpd_req_t *req)
@@ -77,6 +139,7 @@ static esp_err_t send_error(httpd_req_t *req, int status, const char *msg)
     const char *status_str = "500 Internal Server Error";
     switch (status) {
     case 400: status_str = "400 Bad Request"; break;
+    case 401: status_str = "401 Unauthorized"; break;
     case 404: status_str = "404 Not Found"; break;
     case 408: status_str = "408 Request Timeout"; break;
     case 500: status_str = "500 Internal Server Error"; break;
@@ -168,6 +231,7 @@ static esp_err_t api_wifi_networks_get(httpd_req_t *req)
 /* POST /api/wifi/networks — add/update a network */
 static esp_err_t api_wifi_networks_post(httpd_req_t *req)
 {
+    if (require_auth(req) != ESP_OK) return ESP_OK;
     cJSON *body = read_req_json(req);
     if (!body) return send_error(req, 400, "Invalid JSON");
 
@@ -201,6 +265,7 @@ static esp_err_t api_wifi_networks_post(httpd_req_t *req)
 /* DELETE /api/wifi/networks?ssid=... */
 static esp_err_t api_wifi_networks_delete(httpd_req_t *req)
 {
+    if (require_auth(req) != ESP_OK) return ESP_OK;
     char query[128] = {0};
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
         return send_error(req, 400, "Missing ssid parameter");
@@ -224,6 +289,7 @@ static esp_err_t api_wifi_networks_delete(httpd_req_t *req)
 /* POST /api/wifi/connect */
 static esp_err_t api_wifi_connect(httpd_req_t *req)
 {
+    if (require_auth(req) != ESP_OK) return ESP_OK;
     cJSON *body = read_req_json(req);
     if (!body) return send_error(req, 400, "Invalid JSON");
 
@@ -315,6 +381,7 @@ static esp_err_t api_eth_config_get(httpd_req_t *req)
 /* PUT /api/eth/config */
 static esp_err_t api_eth_config_put(httpd_req_t *req)
 {
+    if (require_auth(req) != ESP_OK) return ESP_OK;
     cJSON *body = read_req_json(req);
     if (!body) return send_error(req, 400, "Invalid JSON");
 
@@ -386,6 +453,7 @@ static esp_err_t api_sdr_config_get(httpd_req_t *req)
 /* PUT /api/sdr/config */
 static esp_err_t api_sdr_config_put(httpd_req_t *req)
 {
+    if (require_auth(req) != ESP_OK) return ESP_OK;
     cJSON *body = read_req_json(req);
     if (!body) return send_error(req, 400, "Invalid JSON");
 
@@ -478,6 +546,7 @@ static esp_err_t api_service_get(httpd_req_t *req)
 /* PUT /api/services/:name */
 static esp_err_t api_service_put(httpd_req_t *req)
 {
+    if (require_auth(req) != ESP_OK) return ESP_OK;
     const char *uri = req->uri;
     const char *name = uri + strlen("/api/services/");
 
@@ -557,6 +626,7 @@ static esp_err_t api_notify_config_get(httpd_req_t *req)
 /* PUT /api/notify/config */
 static esp_err_t api_notify_config_put(httpd_req_t *req)
 {
+    if (require_auth(req) != ESP_OK) return ESP_OK;
     cJSON *body = read_req_json(req);
     if (!body) return send_error(req, 400, "Invalid JSON");
 
@@ -646,6 +716,7 @@ static esp_err_t api_system_info(httpd_req_t *req)
 /* POST /api/system/reboot */
 static esp_err_t api_system_reboot(httpd_req_t *req)
 {
+    if (require_auth(req) != ESP_OK) return ESP_OK;
     cJSON *body = read_req_json(req);
     if (!body) return send_error(req, 400, "Invalid JSON");
 
@@ -682,6 +753,7 @@ static esp_err_t api_system_backup(httpd_req_t *req)
 /* POST /api/system/restore */
 static esp_err_t api_system_restore(httpd_req_t *req)
 {
+    if (require_auth(req) != ESP_OK) return ESP_OK;
     cJSON *body = read_req_json(req);
     if (!body) return send_error(req, 400, "Invalid JSON");
 
@@ -695,6 +767,7 @@ static esp_err_t api_system_restore(httpd_req_t *req)
 /* POST /api/system/factory-reset */
 static esp_err_t api_system_factory_reset(httpd_req_t *req)
 {
+    if (require_auth(req) != ESP_OK) return ESP_OK;
     cJSON *body = read_req_json(req);
     if (!body) return send_error(req, 400, "Invalid JSON");
 
@@ -713,6 +786,50 @@ static esp_err_t api_system_factory_reset(httpd_req_t *req)
     esp_restart();
 
     return ESP_OK;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ *  Auth endpoints
+ * ═══════════════════════════════════════════════════════════════ */
+
+/* POST /api/auth/setup */
+static esp_err_t api_auth_setup(httpd_req_t *req) {
+    cJSON *body = read_req_json(req);
+    if (!body) return send_error(req, 400, "Invalid JSON");
+
+    cJSON *new_pass = cJSON_GetObjectItem(body, "password");
+    if (!cJSON_IsString(new_pass) || strlen(new_pass->valuestring) < 8) {
+        cJSON_Delete(body);
+        return send_error(req, 400, "Password must be at least 8 characters");
+    }
+
+    /* If admin password already set, require current password */
+    load_admin_pass();
+    if (s_admin_pass[0] != '\0') {
+        cJSON *current = cJSON_GetObjectItem(body, "current_password");
+        if (!cJSON_IsString(current) || strcmp(current->valuestring, s_admin_pass) != 0) {
+            cJSON_Delete(body);
+            return send_error(req, 401, "Current password incorrect");
+        }
+    }
+
+    /* Save new password */
+    wifimgr_config_set_api_key("admin_pass", new_pass->valuestring);
+    strncpy(s_admin_pass, new_pass->valuestring, sizeof(s_admin_pass) - 1);
+
+    cJSON_Delete(body);
+    return send_ok(req, "Admin password set");
+}
+
+/* GET /api/auth/status */
+static esp_err_t api_auth_status(httpd_req_t *req) {
+    load_admin_pass();
+    cJSON *resp = cJSON_CreateObject();
+    if (!resp) { httpd_resp_send_500(req); return ESP_FAIL; }
+    cJSON_AddBoolToObject(resp, "configured", s_admin_pass[0] != '\0');
+    esp_err_t err = send_json(req, resp);
+    cJSON_Delete(resp);
+    return err;
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -757,6 +874,9 @@ esp_err_t wifimgr_api_register(httpd_handle_t server)
         { "/api/system/backup",        HTTP_GET,  api_system_backup },
         { "/api/system/restore",       HTTP_POST, api_system_restore },
         { "/api/system/factory-reset", HTTP_POST, api_system_factory_reset },
+        /* Auth */
+        { "/api/auth/setup",  HTTP_POST, api_auth_setup },
+        { "/api/auth/status", HTTP_GET,  api_auth_status },
     };
 
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
