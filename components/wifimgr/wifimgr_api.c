@@ -21,6 +21,10 @@
 #include "wifimgr_notify.h"
 #include "wifimgr_chatbot.h"
 
+/* OTA handlers (defined in wifimgr_ota.c) */
+extern esp_err_t wifimgr_ota_handler(httpd_req_t *req);
+extern esp_err_t wifimgr_ota_info_handler(httpd_req_t *req);
+
 static const char *TAG = "wifimgr_api";
 
 /* ── Basic Auth ─────────────────────────────────────────────── */
@@ -1014,6 +1018,9 @@ esp_err_t wifimgr_api_register(httpd_handle_t server)
         { "/api/chat/history",  HTTP_DELETE, api_chat_history_delete },
         { "/api/chat/config",   HTTP_GET,    api_chat_config_get },
         { "/api/chat/config",   HTTP_PUT,    api_chat_config_put },
+        /* OTA */
+        { "/api/system/ota",     HTTP_POST, wifimgr_ota_handler },
+        { "/api/system/ota/info", HTTP_GET, wifimgr_ota_info_handler },
     };
 
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
