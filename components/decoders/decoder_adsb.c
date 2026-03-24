@@ -343,6 +343,17 @@ static void decode_adsb_msg(adsb_ctx_t *c, const uint8_t *msg, int len) {
     }
 }
 
+/* ── SBS-1 BaseStation format for FlightAware/FR24 ────── */
+static int adsb_build_sbs1(const adsb_aircraft_t *a, int msg_type,
+                            char *sbs_out, int max_len) {
+    /* SBS-1 format: MSG,type,session,aircraft,hex,flight,date,time,date,time,callsign,alt,speed,track,lat,lon,vrate,squawk,alert,emergency,spi,ground */
+    return snprintf(sbs_out, max_len,
+        "MSG,%d,1,1,%06" PRIX32 ",1,,,,%s,%d,%d,%d,%.5f,%.5f,%d,,,,\r\n",
+        msg_type, a->icao, a->callsign,
+        (int)a->altitude_ft, (int)a->speed_kt, (int)a->heading,
+        a->lat, a->lon, (int)a->vert_rate);
+}
+
 static esp_err_t adsb_init(void *ctx) {
     adsb_ctx_t *c = (adsb_ctx_t *)ctx;
     c->mutex = xSemaphoreCreateMutex();

@@ -331,6 +331,18 @@ static void ax25_handle_frame(ax25_ctx_t *c, const uint8_t *frame, int len) {
     }
 }
 
+/* ── APRS-IS iGate forwarding stub ────────────────────── */
+/* TODO: Implement TCP connection to rotate.aprs2.net:14580
+ * Login: user CALLSIGN pass PASSCODE vers ESP32-P4-SDR 1.0
+ * Forward: src>dst,path,qAR,IGATECALL:info_field
+ */
+static void aprs_is_forward(const char *src, const char *dst, const char *path,
+                              const char *info) {
+    (void)src; (void)dst; (void)path; (void)info;
+    /* Stub: would open TCP socket and send APRS-IS formatted packet */
+    ESP_LOGD("dec_ax25", "APRS-IS forward: %s>%s,%s:%s", src, dst, path, info);
+}
+
 /* ═══════════════════════════════════════════════════════════════
  *  AFSK correlator initialization
  * ═══════════════════════════════════════════════════════════════ */

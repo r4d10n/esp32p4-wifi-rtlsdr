@@ -10,11 +10,14 @@
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
+#include "esp_system.h"
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "wifimgr_chatbot.h"
 #include "wifimgr_config.h"
+#include "decoder_framework.h"
 
 static const char *TAG = "chatbot";
 static chatbot_config_t s_chatbot_cfg;
@@ -303,6 +306,74 @@ static char *call_claude(void)
     }
 
     return reply;
+}
+
+/* ── Tool implementations ──────────────────────────────── */
+
+static cJSON *tool_get_sdr_status(void) {
+    sdr_config_t cfg;
+    wifimgr_config_load_sdr(&cfg);
+    cJSON *result = cJSON_CreateObject();
+    if (result) {
+        cJSON_AddNumberToObject(result, "center_freq_hz", cfg.center_freq);
+        cJSON_AddNumberToObject(result, "sample_rate", cfg.sample_rate);
+        cJSON_AddStringToObject(result, "gain_mode", cfg.gain_mode);
+        cJSON_AddNumberToObject(result, "tuner_gain_tenth_db", cfg.tuner_gain_tenth_db);
+        cJSON_AddBoolToObject(result, "bias_tee", cfg.bias_tee);
+        cJSON_AddStringToObject(result, "hostname", cfg.hostname);
+    }
+    return result;
+}
+
+static cJSON *tool_get_decoder_status(void) {
+    /* Query all registered decoder plugins */
+    cJSON *arr = cJSON_CreateArray();
+    decoder_plugin_t *p = decoder_registry_first();
+    while (p) {
+        cJSON *obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(obj, "name", p->name);
+        cJSON_AddBoolToObject(obj, "enabled", p->enabled);
+        cJSON_AddBoolToObject(obj, "running", p->running);
+        cJSON_AddItemToArray(arr, obj);
+        p = decoder_registry_next(p);
+    }
+    return arr;
+}
+
+static cJSON *tool_get_tracking(const char *decoder_name) {
+    tracking_table_t *table = decoder_get_global_tracking();
+    if (!table) return cJSON_CreateArray();
+    if (decoder_name && decoder_name[0])
+        return tracking_table_query(table, decoder_name);
+    return tracking_table_to_json(table);
+}
+
+/* Parse tool call from LLM response and execute */
+static char *execute_tool_call(const char *tool_name, const cJSON *args) {
+    cJSON *result = NULL;
+
+    if (strcmp(tool_name, "get_sdr_status") == 0) {
+        result = tool_get_sdr_status();
+    } else if (strcmp(tool_name, "get_decoder_status") == 0) {
+        result = tool_get_decoder_status();
+    } else if (strcmp(tool_name, "get_tracking") == 0) {
+        const char *decoder = NULL;
+        cJSON *d = cJSON_GetObjectItem(args, "decoder");
+        if (d && cJSON_IsString(d)) decoder = d->valuestring;
+        result = tool_get_tracking(decoder);
+    } else if (strcmp(tool_name, "get_system_info") == 0) {
+        result = cJSON_CreateObject();
+        cJSON_AddNumberToObject(result, "uptime_s",
+            (double)(xTaskGetTickCount() * portTICK_PERIOD_MS / 1000));
+        cJSON_AddNumberToObject(result, "heap_free", esp_get_free_heap_size());
+    } else {
+        result = cJSON_CreateObject();
+        cJSON_AddStringToObject(result, "error", "Unknown tool");
+    }
+
+    char *str = result ? cJSON_PrintUnformatted(result) : strdup("{}");
+    cJSON_Delete(result);
+    return str;
 }
 
 /* ── Public API ─────────────────────────────────────────────── */

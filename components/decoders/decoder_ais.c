@@ -784,6 +784,42 @@ static cJSON *ais_get_results(void *ctx_ptr) {
         cJSON_CreateArray();
 }
 
+/* ── AIVDM NMEA sentence builder ──────────────────────── */
+/* Creates standard !AIVDM sentence from raw AIS payload for forwarding */
+static int ais_build_nmea(const uint8_t *payload, int payload_bits, char channel,
+                           char *nmea_out, int max_len) {
+    /* Convert binary payload to 6-bit ASCII armor */
+    int payload_chars = (payload_bits + 5) / 6;
+    char armored[64];
+    for (int i = 0; i < payload_chars && i < 63; i++) {
+        int val = 0;
+        int start_bit = i * 6;
+        for (int b = 0; b < 6 && (start_bit + b) < payload_bits; b++) {
+            int byte_idx = (start_bit + b) / 8;
+            int bit_idx = 7 - ((start_bit + b) % 8);
+            val = (val << 1) | ((payload[byte_idx] >> bit_idx) & 1);
+        }
+        /* 6-bit to ASCII armor: add 48, if > 87 add 8 more */
+        val += 48;
+        if (val > 87) val += 8;
+        armored[i] = (char)val;
+    }
+    armored[payload_chars] = '\0';
+
+    int fill_bits = (payload_chars * 6) - payload_bits;
+
+    /* Build sentence without checksum */
+    char body[128];
+    int body_len = snprintf(body, sizeof(body), "!AIVDM,1,1,,%c,%s,%d",
+                             channel, armored, fill_bits);
+
+    /* Compute XOR checksum (between ! and *) */
+    uint8_t cksum = 0;
+    for (int i = 1; i < body_len; i++) cksum ^= body[i];
+
+    return snprintf(nmea_out, max_len, "%s*%02X\r\n", body, cksum);
+}
+
 /* ═══════════════════════════════════════════════════════════════
  *  Plugin registration
  * ═══════════════════════════════════════════════════════════════ */

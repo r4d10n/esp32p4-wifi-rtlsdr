@@ -3,8 +3,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "decoder_framework.h"
+#include "dsp_ddc.h"
 
 static const char *TAG = "decode_chan";
+static const int DEFAULT_INPUT_SAMPLE_RATE = 250000;
 
 static decoder_channel_t s_channels[DECODER_MAX_CHANNELS];
 static int s_channel_count = 0;
@@ -56,6 +58,16 @@ int decoder_channel_manager_add(decoder_plugin_t *plugin, uint32_t center_freq_h
     ch->plugins[0] = plugin;
     ch->plugin_count = 1;
     ch->active = true;
+    ch->ddc = NULL;
+
+    if (plugin->demod_type != DEMOD_RAW_IQ && plugin->audio_rate_hz > 0) {
+        /* Create DDC for this channel */
+        ch->ddc = ddc_create(DEFAULT_INPUT_SAMPLE_RATE, (double)ch->offset_hz,
+                              ch->bandwidth_hz, ch->audio_rate_hz);
+        if (!ch->ddc) {
+            ESP_LOGW(TAG, "Channel %d: DDC creation failed for '%s'", idx, plugin->name);
+        }
+    }
 
     ESP_LOGI(TAG, "Channel %d created for '%s' (offset=%d, bw=%lu, demod=%d)",
              idx, plugin->name, (int)ch->offset_hz,
@@ -81,6 +93,10 @@ esp_err_t decoder_channel_manager_remove(decoder_plugin_t *plugin) {
 
                 if (s_channels[i].plugin_count == 0) {
                     s_channels[i].active = false;
+                    if (s_channels[i].ddc) {
+                        ddc_destroy(s_channels[i].ddc);
+                        s_channels[i].ddc = NULL;
+                    }
                     ESP_LOGI(TAG, "Channel %d deactivated (no plugins)", i);
                 }
 
@@ -108,19 +124,15 @@ void decoder_channel_manager_push_iq(const uint8_t *iq_data, uint32_t len,
             if (p->demod_type == DEMOD_RAW_IQ && p->process_iq) {
                 /* Direct IQ pass-through (ADS-B, etc.) */
                 p->process_iq(p->ctx, iq_data, len);
-            } else if (p->process_audio) {
-                /* TODO: Actual DDC + demodulation pipeline
-                 * For now, pass raw IQ as placeholder.
-                 * When DDC is implemented:
-                 * 1. Apply NCO mixing at ch->offset_hz
-                 * 2. Low-pass filter at ch->bandwidth_hz
-                 * 3. Decimate to ch->audio_rate_hz
-                 * 4. Apply demodulator (FM/AM/SSB/FSK)
-                 * 5. Output int16_t audio samples
-                 *
-                 * Reference: components/dsp/ and esp-dsp library
-                 */
-                p->process_iq(p->ctx, iq_data, len);
+            } else if (ch->ddc && p->process_audio) {
+                /* DDC: IQ -> audio */
+                int16_t audio_buf[1024];
+                int num_iq_samples = (int)(len / 2); /* 2 bytes per IQ pair */
+                int audio_count = ddc_process(ch->ddc, iq_data, num_iq_samples,
+                                              audio_buf, 1024);
+                if (audio_count > 0) {
+                    p->process_audio(p->ctx, audio_buf, audio_count, ch->audio_rate_hz);
+                }
             }
         }
     }

@@ -3,64 +3,129 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include <string.h>
+#include <stdlib.h>
+#include <math.h>
 
 /*
- * rtl_power spectrum sweep stub.
- *
- * Sweep algorithm overview (to be implemented):
- *   1. Tune RTL-SDR to freq_start_hz.
- *   2. Collect (sample_rate / bin_size_hz) complex IQ samples per step.
- *   3. Apply window function (Hamming, Blackman, Hann) to reduce spectral leakage.
- *   4. Compute FFT (radix-2 Cooley-Tukey or CMSIS-DSP arm_cfft_f32).
- *   5. Convert FFT magnitude bins to dBm: power_dbm = 20*log10(|X[k]|) - calibration_offset.
- *   6. Advance center frequency by bin_size_hz * FFT_SIZE, repeat until freq_stop_hz.
- *   7. Accumulate sweeps over interval_s, average in linear (mW) domain.
- *   8. Store completed sweep in s_latest_sweep under mutex.
+ * rtl_power spectrum sweep engine.
  *
  * CSV output format (rtl_power compatible):
  *   date, time, Hz_low, Hz_high, Hz_step, samples, dBm, dBm, dBm, ...
- *   e.g.: 2024-01-15, 12:00:00, 88000000, 108000000, 10000, 1024, -85.3, -84.1, ...
  *
- * Spectrogram generation:
- *   - Accumulate N sweeps (rows) x M bins (columns) into a 2-D power matrix.
- *   - Map dBm range [noise_floor, signal_peak] to a color gradient (e.g. viridis).
- *   - Encode as PNG using a lightweight encoder (lodepng or esp_jpg_encode adapted).
- *   - Optionally overlay frequency/time axis labels via 1-bit font rendering.
- *
- * Google Drive upload:
- *   - Use esp_http_client with HTTPS to POST multipart/form-data to
- *     https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart
- *   - Include Authorization: Bearer <access_token> header (OAuth2 service account
- *     or device flow token cached in NVS).
- *   - Retry on HTTP 5xx / network errors with exponential back-off.
+ * Spectrogram and cloud upload are left as future extensions.
  */
 
 static const char *TAG = "rtlpower";
 
-static SemaphoreHandle_t s_mutex = NULL;
-static bool s_running = false;
-static bool s_has_sweep = false;
-static rtlpower_sweep_t s_latest_sweep;
+/* Default RTL-SDR sample rate used for FFT size calculation */
+#define RTLPOWER_SAMPLE_RATE 250000U
+
+typedef struct {
+    rtlpower_config_t config;
+    SemaphoreHandle_t mutex;
+    bool running;
+    bool has_sweep;
+    rtlpower_sweep_t last_sweep;
+} rtlpower_ctx_t;
+
+static rtlpower_ctx_t *s_ctx = NULL;
+
+/* ── Window + DFT helpers ─────────────────────────────────────────────────── */
+
+static void apply_window(const uint8_t *iq, float *windowed_i, float *windowed_q,
+                          int N, const char *window_type) {
+    for (int i = 0; i < N; i++) {
+        float w;
+        if (strcmp(window_type, "hamming") == 0)
+            w = 0.54f - 0.46f * cosf(2.0f * (float)M_PI * i / (N - 1));
+        else if (strcmp(window_type, "blackman") == 0)
+            w = 0.42f - 0.5f * cosf(2.0f * (float)M_PI * i / (N - 1))
+                      + 0.08f * cosf(4.0f * (float)M_PI * i / (N - 1));
+        else  /* rectangular */
+            w = 1.0f;
+        windowed_i[i] = ((float)iq[i*2]   - 128.0f) * w;
+        windowed_q[i] = ((float)iq[i*2+1] - 128.0f) * w;
+    }
+}
+
+/* Simple DFT (for small N; replace with FFT for performance) */
+static void compute_power_spectrum(const float *win_i, const float *win_q, int N,
+                                    float *power_dbm) {
+    for (int k = 0; k < N; k++) {
+        float re = 0, im = 0;
+        for (int n = 0; n < N; n++) {
+            float angle = 2.0f * (float)M_PI * k * n / N;
+            re += win_i[n] * cosf(angle) + win_q[n] * sinf(angle);
+            im += -win_i[n] * sinf(angle) + win_q[n] * cosf(angle);
+        }
+        float mag = (re*re + im*im) / ((float)N * (float)N);
+        power_dbm[k] = 10.0f * log10f(mag + 1e-10f);
+    }
+}
+
+/* ── Sweep processing ─────────────────────────────────────────────────────── */
+
+static void rtlpower_process_sweep(rtlpower_ctx_t *c, const uint8_t *iq, uint32_t num_samples) {
+    int fft_size = (c->config.bin_size_hz > 0) ? (int)(RTLPOWER_SAMPLE_RATE / c->config.bin_size_hz) : 0;
+    if (fft_size > RTLPOWER_MAX_BINS) fft_size = RTLPOWER_MAX_BINS;
+    if (fft_size > (int)num_samples) fft_size = (int)num_samples;
+    if (fft_size <= 0) return;
+
+    float *win_i = malloc(fft_size * sizeof(float));
+    float *win_q = malloc(fft_size * sizeof(float));
+    float *power = malloc(fft_size * sizeof(float));
+    if (!win_i || !win_q || !power) { free(win_i); free(win_q); free(power); return; }
+
+    apply_window(iq, win_i, win_q, fft_size, c->config.window_func);
+    compute_power_spectrum(win_i, win_q, fft_size, power);
+
+    /* Store result */
+    xSemaphoreTake(c->mutex, portMAX_DELAY);
+    if (c->last_sweep.power_dbm) free(c->last_sweep.power_dbm);
+    c->last_sweep.power_dbm    = power;
+    c->last_sweep.num_bins     = (uint16_t)fft_size;
+    c->last_sweep.freq_start_hz = c->config.freq_start_hz;
+    c->last_sweep.freq_stop_hz  = c->config.freq_stop_hz;
+    c->last_sweep.bin_size_hz   = c->config.bin_size_hz;
+    c->last_sweep.timestamp_ms  = (int64_t)xTaskGetTickCount() * portTICK_PERIOD_MS;
+    c->has_sweep = true;
+    xSemaphoreGive(c->mutex);
+
+    free(win_i);
+    free(win_q);
+    /* power is now owned by last_sweep */
+}
+
+/* ── Public API ───────────────────────────────────────────────────────────── */
 
 esp_err_t rtlpower_init(void)
 {
-    s_mutex = xSemaphoreCreateMutex();
-    if (!s_mutex) {
+    if (s_ctx) return ESP_OK;  /* Already initialised */
+
+    s_ctx = calloc(1, sizeof(rtlpower_ctx_t));
+    if (!s_ctx) return ESP_ERR_NO_MEM;
+
+    s_ctx->mutex = xSemaphoreCreateMutex();
+    if (!s_ctx->mutex) {
+        free(s_ctx);
+        s_ctx = NULL;
         ESP_LOGE(TAG, "Failed to create mutex");
         return ESP_ERR_NO_MEM;
     }
-    memset(&s_latest_sweep, 0, sizeof(s_latest_sweep));
-    s_running = false;
-    s_has_sweep = false;
-    ESP_LOGI(TAG, "rtl_power spectrum monitor initialized (stub)");
+    s_ctx->running   = false;
+    s_ctx->has_sweep = false;
+    memset(&s_ctx->last_sweep, 0, sizeof(s_ctx->last_sweep));
+    ESP_LOGI(TAG, "rtl_power spectrum monitor initialized");
     return ESP_OK;
 }
 
 esp_err_t rtlpower_start(const rtlpower_config_t *config)
 {
-    if (!config) {
+    if (!config || !s_ctx) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    s_ctx->config = *config;
 
     uint32_t span_hz = config->freq_stop_hz - config->freq_start_hz;
     uint32_t num_bins = (config->bin_size_hz > 0) ? (span_hz / config->bin_size_hz) : 0;
@@ -80,88 +145,47 @@ esp_err_t rtlpower_start(const rtlpower_config_t *config)
         ESP_LOGI(TAG, "  cloud : disabled");
     }
 
-    s_running = true;
+    s_ctx->running = true;
     return ESP_OK;
 }
 
 esp_err_t rtlpower_stop(void)
 {
-    s_running = false;
+    if (s_ctx) s_ctx->running = false;
     ESP_LOGI(TAG, "rtl_power stopped");
     return ESP_OK;
 }
 
 void rtlpower_push_samples(const uint8_t *data, uint32_t len)
 {
-    (void)data;
-    (void)len;
-
-    if (!s_running) {
+    if (!s_ctx || !s_ctx->running || !data || len < 2) {
         return;
     }
 
-    /*
-     * TODO: Implement FFT sweep engine:
-     *
-     *  1. Buffer incoming 8-bit IQ samples (I = data[2n], Q = data[2n+1], offset by 127).
-     *  2. When FFT_SIZE samples are accumulated for the current frequency step:
-     *       a. Apply window function coefficients (pre-computed float table).
-     *       b. Run arm_cfft_f32() or a software radix-2 FFT.
-     *       c. Run arm_cmplx_mag_f32() to get magnitude spectrum.
-     *       d. Convert to dBm and add to accumulation buffer for this step.
-     *  3. After interval_s seconds of accumulation, average bins (linear domain),
-     *     convert back to dBm, store in s_latest_sweep under mutex.
-     *  4. If generate_spectrogram: append row to spectrogram matrix; when matrix
-     *     has enough rows, render PNG and (optionally) trigger cloud upload task.
-     *  5. Advance tuner frequency to next step; wrap around to freq_start_hz when done.
-     */
+    uint32_t num_samples = len / 2;
+    rtlpower_process_sweep(s_ctx, data, num_samples);
 }
 
 esp_err_t rtlpower_get_latest_sweep(rtlpower_sweep_t *sweep)
 {
-    if (!sweep || !s_mutex) {
+    if (!sweep || !s_ctx || !s_ctx->mutex) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (!s_ctx->has_sweep) return ESP_ERR_NOT_FOUND;
 
-    if (!s_has_sweep) {
-        xSemaphoreGive(s_mutex);
-
-        /*
-         * TODO (when sweep data is available):
-         *   - Copy s_latest_sweep metadata fields into *sweep.
-         *   - Heap-allocate sweep->power_dbm (num_bins * sizeof(float)) and memcpy.
-         *   - Caller is responsible for freeing sweep->power_dbm.
-         *
-         * FFT step computation:
-         *   num_bins = (freq_stop_hz - freq_start_hz) / bin_size_hz
-         *   For each tuner step k:
-         *     center_hz = freq_start_hz + k * bin_size_hz * FFT_SIZE
-         *     Tune RTL, collect FFT_SIZE samples, FFT -> bin[0..FFT_SIZE-1]
-         *     Map FFT bin index to absolute frequency:
-         *       f_bin = center_hz - (sample_rate/2) + i * (sample_rate / FFT_SIZE)
-         *
-         * CSV row example (rtl_power -compatible):
-         *   2024-01-15, 12:00:00, 88000000, 108000000, 10000, 2048, -85.3, -84.1, ...
-         *
-         * PNG spectrogram:
-         *   - Matrix: rows=time_steps, cols=num_bins, value=power_dbm
-         *   - Color map: viridis or jet, clamped to [noise_floor_dbm, -20.0f]
-         *   - Encode with lodepng_encode_file() or equivalent embedded encoder.
-         *
-         * Google Drive HTTPS POST (OAuth2 device flow):
-         *   POST https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart
-         *   Headers: Authorization: Bearer <token>, Content-Type: multipart/related
-         *   Retry policy: 3 attempts, 2^n * 1000 ms back-off on 5xx / ESP_ERR_TIMEOUT.
-         */
-        return ESP_ERR_NOT_FOUND;
+    xSemaphoreTake(s_ctx->mutex, portMAX_DELAY);
+    sweep->timestamp_ms  = s_ctx->last_sweep.timestamp_ms;
+    sweep->freq_start_hz = s_ctx->last_sweep.freq_start_hz;
+    sweep->freq_stop_hz  = s_ctx->last_sweep.freq_stop_hz;
+    sweep->bin_size_hz   = s_ctx->last_sweep.bin_size_hz;
+    sweep->num_bins      = s_ctx->last_sweep.num_bins;
+    sweep->power_dbm     = malloc(sweep->num_bins * sizeof(float));
+    if (sweep->power_dbm) {
+        memcpy(sweep->power_dbm, s_ctx->last_sweep.power_dbm,
+               sweep->num_bins * sizeof(float));
     }
+    xSemaphoreGive(s_ctx->mutex);
 
-    /* Deep-copy sweep (caller frees power_dbm) */
-    *sweep = s_latest_sweep;
-    /* power_dbm pointer copy is intentional; ownership transfers to caller */
-
-    xSemaphoreGive(s_mutex);
-    return ESP_OK;
+    return sweep->power_dbm ? ESP_OK : ESP_ERR_NO_MEM;
 }

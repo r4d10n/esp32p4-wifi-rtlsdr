@@ -21,6 +21,7 @@
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "dsp_ddc.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -206,6 +207,7 @@ typedef struct {
     decoder_plugin_t *plugins[8];     /* Plugins attached to this channel */
     uint8_t         plugin_count;
     bool            active;
+    ddc_state_t    *ddc;              /* DDC instance (NULL for RAW_IQ channels) */
 } decoder_channel_t;
 
 /** Initialize the channel manager. */
