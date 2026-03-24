@@ -338,16 +338,53 @@ static void ax25_handle_frame(ax25_ctx_t *c, const uint8_t *frame, int len) {
     }
 }
 
-/* ── APRS-IS iGate forwarding stub ────────────────────── */
-/* TODO: Implement TCP connection to rotate.aprs2.net:14580
- * Login: user CALLSIGN pass PASSCODE vers ESP32-P4-SDR 1.0
- * Forward: src>dst,path,qAR,IGATECALL:info_field
- */
+/* ── APRS-IS iGate forwarding ─────────────────────────── */
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <netdb.h>
+
+static int s_aprsis_sock = -1;
+
+esp_err_t aprs_is_connect(const char *server, uint16_t port,
+                            const char *callsign, const char *passcode) {
+    struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_STREAM };
+    struct addrinfo *res = NULL;
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%u", port);
+
+    if (getaddrinfo(server, port_str, &hints, &res) != 0 || !res) return ESP_FAIL;
+
+    s_aprsis_sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (s_aprsis_sock < 0) { freeaddrinfo(res); return ESP_FAIL; }
+
+    if (connect(s_aprsis_sock, res->ai_addr, res->ai_addrlen) != 0) {
+        close(s_aprsis_sock);
+        s_aprsis_sock = -1;
+        freeaddrinfo(res);
+        return ESP_FAIL;
+    }
+    freeaddrinfo(res);
+
+    char login[128];
+    snprintf(login, sizeof(login), "user %s pass %s vers ESP32P4-SDR 1.0\r\n",
+             callsign, passcode);
+    send(s_aprsis_sock, login, strlen(login), 0);
+
+    ESP_LOGI("dec_ax25", "APRS-IS connected to %s:%u as %s", server, port, callsign);
+    return ESP_OK;
+}
+
 static void aprs_is_forward(const char *src, const char *dst, const char *path,
                               const char *info) {
-    (void)src; (void)dst; (void)path; (void)info;
-    /* Stub: would open TCP socket and send APRS-IS formatted packet */
-    ESP_LOGD("dec_ax25", "APRS-IS forward: %s>%s,%s:%s", src, dst, path, info);
+    if (s_aprsis_sock < 0) return;
+    char packet[512];
+    int len = snprintf(packet, sizeof(packet), "%s>%s,%s,qAR,ESP32P4:%s\r\n",
+                        src, dst, path, info);
+    if (len > 0 && len < (int)sizeof(packet)) {
+        send(s_aprsis_sock, packet, len, MSG_DONTWAIT);
+    }
 }
 
 /* ═══════════════════════════════════════════════════════════════

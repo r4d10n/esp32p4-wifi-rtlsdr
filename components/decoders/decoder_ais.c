@@ -28,6 +28,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include <sys/socket.h>
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -827,7 +828,7 @@ static void ais_nmea_forward(const uint8_t *payload, int payload_bits, char chan
     if (s_nmea_sock < 0) return;
     char nmea[128];
     int len = ais_build_nmea(payload, payload_bits, channel, nmea, sizeof(nmea));
-    (void)len; /* TODO: send(s_nmea_sock, nmea, len, MSG_DONTWAIT); */
+    if (len > 0) send(s_nmea_sock, nmea, len, MSG_DONTWAIT);
 }
 
 /* ═══════════════════════════════════════════════════════════════

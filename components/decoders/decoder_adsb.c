@@ -1,6 +1,7 @@
 #include <string.h>
 #include <math.h>
 #include <inttypes.h>
+#include <sys/socket.h>
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -361,7 +362,7 @@ static void adsb_sbs1_forward(const adsb_aircraft_t *a, int msg_type) {
     if (s_sbs1_sock < 0) return;
     char sbs[256];
     int len = adsb_build_sbs1(a, msg_type, sbs, sizeof(sbs));
-    (void)len; /* TODO: send(s_sbs1_sock, sbs, len, MSG_DONTWAIT); */
+    if (len > 0) send(s_sbs1_sock, sbs, len, MSG_DONTWAIT);
 }
 
 static esp_err_t adsb_init(void *ctx) {
