@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ESP32-P4 SDR Config</title>
+<link rel="stylesheet" href="/portal.css">
+</head>
+<body>
+<h1>ESP32-P4 <span>SDR</span> Config</h1>
+
+<div class="tabs">
+    <button data-tab="wifi" class="active">WiFi</button>
+    <button data-tab="ethernet">Ethernet</button>
+    <button data-tab="sdr">SDR</button>
+    <button data-tab="services">Services</button>
+    <button data-tab="notify">Notifications</button>
+    <button data-tab="chatbot">Chatbot</button>
+    <button data-tab="system">System</button>
+</div>
+
+<!-- ═══════════ WiFi Tab ═══════════ -->
+<div id="tab-wifi" class="tab-content active">
+    <div class="card">
+        <h3>Connection Status</h3>
+        <div id="wifi-status">Loading...</div>
+    </div>
+
+    <div class="card">
+        <h3>Available Networks <button class="btn btn-sm btn-primary" id="wifi-scan-btn" onclick="scanWifi()">Scan</button></h3>
+        <div id="wifi-list" class="wifi-list"></div>
+    </div>
+
+    <div class="card">
+        <h3>Saved Networks</h3>
+        <div id="saved-networks"></div>
+    </div>
+
+    <div class="card">
+        <h3>Test Connection</h3>
+        <div class="field-row">
+            <div class="field"><label>SSID</label><input id="test-ssid" placeholder="Network name"></div>
+            <div class="field"><label>Password</label><input id="test-pass" type="password" placeholder="Password"></div>
+        </div>
+        <button class="btn btn-primary" onclick="testConnect()">Connect</button>
+    </div>
+</div>
+
+<!-- ═══════════ Ethernet Tab ═══════════ -->
+<div id="tab-ethernet" class="tab-content">
+    <div class="card">
+        <h3>Ethernet Configuration</h3>
+        <div class="field">
+            <label><input type="checkbox" id="eth-enable"> Enable Ethernet</label>
+        </div>
+        <div class="field">
+            <label><input type="checkbox" id="eth-dhcp" onchange="toggleDhcp()"> DHCP</label>
+        </div>
+        <div class="eth-static">
+            <div class="field-row">
+                <div class="field"><label>Static IP</label><input id="eth-static_ip"></div>
+                <div class="field"><label>Subnet Mask</label><input id="eth-static_mask"></div>
+            </div>
+            <div class="field-row">
+                <div class="field"><label>Gateway</label><input id="eth-static_gw"></div>
+                <div class="field"><label>DNS</label><input id="eth-static_dns"></div>
+            </div>
+        </div>
+        <div class="field-row">
+            <div class="field"><label>PHY Type</label>
+                <select id="eth-phy_type"><option>IP101</option><option>LAN8720</option><option>RTL8201</option></select>
+            </div>
+            <div class="field"><label>PHY Address</label><input type="number" id="eth-phy_addr" value="-1" min="-1" max="31"></div>
+        </div>
+        <div class="field-row">
+            <div class="field"><label>MDC GPIO</label><input type="number" id="eth-mdc_gpio" value="31"></div>
+            <div class="field"><label>MDIO GPIO</label><input type="number" id="eth-mdio_gpio" value="27"></div>
+        </div>
+        <div class="field">
+            <label><input type="checkbox" id="eth-prefer_over_wifi"> Prefer Ethernet over WiFi</label>
+        </div>
+        <button class="btn btn-primary" onclick="saveEthConfig()">Save Ethernet Config</button>
+    </div>
+</div>
+
+<!-- ═══════════ SDR Tab ═══════════ -->
+<div id="tab-sdr" class="tab-content">
+    <div class="card">
+        <h3>Tuning</h3>
+        <div class="field-row">
+            <div class="field"><label>Center Frequency (Hz)</label><input type="number" id="sdr-center_freq" step="1000"></div>
+            <div class="field"><label>Sample Rate (Hz)</label>
+                <select id="sdr-sample_rate">
+                    <option value="250000">250 kSPS</option>
+                    <option value="1024000">1024 kSPS</option>
+                    <option value="1800000">1800 kSPS</option>
+                    <option value="2048000">2048 kSPS</option>
+                    <option value="2400000">2400 kSPS</option>
+                    <option value="3200000">3200 kSPS</option>
+                </select>
+            </div>
+        </div>
+        <div class="field-row">
+            <div class="field"><label>PPM Correction</label><input type="number" id="sdr-ppm_correction" min="-200" max="200"></div>
+            <div class="field"><label>Hostname</label><input id="sdr-hostname" maxlength="32"></div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>Gain Control</h3>
+        <div class="field-row">
+            <div class="field"><label>Gain Mode</label>
+                <select id="sdr-gain_mode"><option>auto</option><option>manual</option></select>
+            </div>
+            <div class="field"><label>Tuner Gain (0.1 dB)</label><input type="number" id="sdr-tuner_gain_tenth_db" min="0" max="496"></div>
+        </div>
+        <div class="field">
+            <label><input type="checkbox" id="sdr-rtl_agc"> RTL AGC</label>
+        </div>
+        <div class="field">
+            <label><input type="checkbox" id="sdr-tuner_agc"> Tuner AGC</label>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>Sampling Mode</h3>
+        <div class="field-row">
+            <div class="field"><label>Direct Sampling</label>
+                <select id="sdr-direct_sampling"><option>off</option><option>I-ADC</option><option>Q-ADC</option></select>
+            </div>
+            <div class="field"><label>Offset Frequency (Hz)</label><input type="number" id="sdr-offset_freq_hz"></div>
+        </div>
+        <div class="field">
+            <label><input type="checkbox" id="sdr-offset_tuning"> Offset Tuning</label>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>IQ & Hardware</h3>
+        <div class="field">
+            <label><input type="checkbox" id="sdr-dc_offset_correction"> DC Offset Correction</label>
+        </div>
+        <div class="field">
+            <label><input type="checkbox" id="sdr-iq_imbalance_correction"> IQ Imbalance Correction</label>
+        </div>
+        <div class="field">
+            <label><input type="checkbox" id="sdr-invert_iq"> Invert IQ</label>
+        </div>
+        <div class="field">
+            <label><input type="checkbox" id="sdr-bias_tee"> Bias-T (+5V)</label>
+        </div>
+        <div class="field"><label>Max Total Users</label><input type="number" id="sdr-max_total_users" min="1" max="10"></div>
+    </div>
+
+    <button class="btn btn-primary" onclick="saveSdrConfig()">Save SDR Config</button>
+</div>
+
+<!-- ═══════════ Services Tab ═══════════ -->
+<div id="tab-services" class="tab-content">
+    <div id="services-list"></div>
+</div>
+
+<!-- ═══════════ Notifications Tab ═══════════ -->
+<div id="tab-notify" class="tab-content">
+    <div class="card">
+        <h3>Telegram</h3>
+        <div class="field">
+            <label><input type="checkbox" id="tg-enable"> Enable Telegram</label>
+        </div>
+        <div class="field"><label>Bot Token</label><input id="tg-bot-token" placeholder="123456:ABC-DEF..."></div>
+        <div class="field-row">
+            <div class="field"><label>Chat ID</label><input id="tg-chat-id" placeholder="-1001234567890"></div>
+            <div class="field"><label>Rate Limit (s)</label><input type="number" id="tg-rate-limit" value="60"></div>
+        </div>
+        <div class="btn-group">
+            <button class="btn btn-primary btn-sm" onclick="testNotify('telegram')">Test</button>
+        </div>
+    </div>
+    <div class="card">
+        <h3>Discord</h3>
+        <div class="field">
+            <label><input type="checkbox" id="dc-enable"> Enable Discord</label>
+        </div>
+        <div class="field"><label>Webhook URL</label><input id="dc-webhook" placeholder="https://discord.com/api/webhooks/..."></div>
+        <div class="field"><label>Rate Limit (s)</label><input type="number" id="dc-rate-limit" value="60"></div>
+        <div class="btn-group">
+            <button class="btn btn-primary btn-sm" onclick="testNotify('discord')">Test</button>
+        </div>
+    </div>
+    <button class="btn btn-primary" onclick="saveNotifyConfig()">Save Notification Config</button>
+</div>
+
+<!-- ═══════════ Chatbot Tab ═══════════ -->
+<div id="tab-chatbot" class="tab-content">
+    <div class="card">
+        <h3>LLM Chatbot (Phase 2)</h3>
+        <p style="color:var(--text2);margin-bottom:12px">
+            Natural language interface to query and control SDR services via cloud LLM APIs.
+            Configuration will be available after Phase 2 implementation.
+        </p>
+        <div class="field">
+            <label><input type="checkbox" id="chat-enable" disabled> Enable Chatbot</label>
+        </div>
+        <div class="field"><label>Provider</label>
+            <select id="chat-provider" disabled>
+                <option>gemini</option><option>openai</option><option>claude</option>
+            </select>
+        </div>
+        <div class="field"><label>API Key</label><input id="chat-api-key" type="password" disabled placeholder="Enter API key"></div>
+        <div class="field"><label>Model</label><input id="chat-model" value="gemini-2.0-flash-lite" disabled></div>
+        <div class="field"><label>Allowed Tools</label>
+            <select id="chat-tools" disabled>
+                <option value="query">Query only (read-only)</option>
+                <option value="query,control">Query + Control</option>
+            </select>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════ System Tab ═══════════ -->
+<div id="tab-system" class="tab-content">
+    <div class="card">
+        <h3>Device Info</h3>
+        <table style="width:100%;font-size:13px">
+            <tr><td style="color:var(--text2)">Hostname</td><td id="sys-hostname">—</td></tr>
+            <tr><td style="color:var(--text2)">Firmware</td><td id="sys-version">—</td></tr>
+            <tr><td style="color:var(--text2)">Cores</td><td id="sys-cores">—</td></tr>
+            <tr><td style="color:var(--text2)">Uptime</td><td id="sys-uptime">—</td></tr>
+        </table>
+    </div>
+
+    <div class="card">
+        <h3>Memory</h3>
+        <div style="font-size:12px;color:var(--text2)">Heap</div>
+        <div class="stat-bar"><div class="fill heap" id="sys-heap-bar" style="width:0"></div></div>
+        <div id="sys-heap-text" style="font-size:12px;color:var(--text2);margin-bottom:8px">—</div>
+
+        <div style="font-size:12px;color:var(--text2)">PSRAM</div>
+        <div class="stat-bar"><div class="fill psram" id="sys-psram-bar" style="width:0"></div></div>
+        <div id="sys-psram-text" style="font-size:12px;color:var(--text2)">—</div>
+    </div>
+
+    <div class="card">
+        <h3>Actions</h3>
+        <div class="btn-group" style="flex-wrap:wrap">
+            <button class="btn btn-primary" onclick="backupConfig()">Backup Config</button>
+            <button class="btn btn-ok" onclick="restoreConfig()">Restore Config</button>
+            <button class="btn btn-warn" onclick="rebootDevice()">Reboot</button>
+            <button class="btn btn-danger" onclick="factoryReset()">Factory Reset</button>
+        </div>
+    </div>
+</div>
+
+<div id="toast" class="toast"></div>
+<script src="/portal.js"></script>
+</body>
+</html>
