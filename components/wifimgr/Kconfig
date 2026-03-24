@@ -1,0 +1,71 @@
+menu "WiFi Manager Configuration"
+
+    config WIFIMGR_AP_SSID
+        string "Default SoftAP SSID"
+        default "ESP32P4-SDR-Setup"
+
+    config WIFIMGR_AP_PASSWORD
+        string "Default SoftAP password"
+        default "sdrsetup"
+
+    config WIFIMGR_AP_CHANNEL
+        int "Default SoftAP channel"
+        default 1
+        range 1 13
+
+    config WIFIMGR_AP_MAX_CONN
+        int "SoftAP max connections"
+        default 4
+        range 1 8
+
+    config WIFIMGR_MAX_NETWORKS
+        int "Maximum saved WiFi networks"
+        default 8
+        range 1 16
+
+    config WIFIMGR_SCAN_RSSI_THRESHOLD
+        int "Minimum RSSI threshold (dBm)"
+        default -75
+        range -90 -30
+
+    config WIFIMGR_SCAN_CYCLES_BEFORE_AP
+        int "Scan cycles before AP fallback"
+        default 3
+        range 1 10
+
+    config WIFIMGR_BUTTON_GPIO
+        int "Config mode button GPIO"
+        default 0
+        help
+            GPIO number for config mode button (BOOT=0)
+
+    config WIFIMGR_BUTTON_LONG_PRESS_MS
+        int "Button long-press duration (ms)"
+        default 3000
+        range 1000 10000
+
+    config WIFIMGR_PORTAL_PORT
+        int "Config portal HTTP port"
+        default 80
+
+    config WIFIMGR_NOTIFY_QUEUE_SIZE
+        int "Notification queue depth"
+        default 32
+        range 8 64
+
+    config WIFIMGR_NOTIFY_MAX_RETRIES
+        int "Notification max retries"
+        default 3
+        range 1 5
+
+    config WIFIMGR_LITTLEFS_PARTITION
+        string "LittleFS partition label"
+        default "storage"
+
+    config WIFIMGR_ETHERNET_ENABLE
+        bool "Enable Ethernet support"
+        default n
+        help
+            Enable RMII Ethernet (IP101/LAN8720 PHY). Available on Olimex ESP32-P4.
+
+endmenu
