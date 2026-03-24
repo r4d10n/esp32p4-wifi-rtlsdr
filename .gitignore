@@ -7,3 +7,5 @@ dependencies.lock
 __pycache__/
 .cache/
 .omc/
+test/test_dsp_kernels
+test/test_dsp_edge_cases

@@ -1,690 +1,329 @@
-# ESP32-P4 RTL-SDR WiFi Bridge
+# ESP32-P4 RTL-SDR WiFi Bridge — SIMD Edition
 
-Transform a Waveshare ESP32-P4 board + RTL-SDR dongle into a wireless Software-Defined Radio receiver. Stream IQ samples over WiFi or Ethernet using the standard **rtl_tcp** protocol, compatible with GQRX, SDR++, SDR#, and other clients.
-
-```
-[RTL-SDR Dongle] --USB 2.0 HS--> [ESP32-P4] --WiFi 6/Ethernet--> [SDR Client]
-```
-
-## Overview
-
-This project provides a complete **USB Host driver for RTL2832U-based DVB-T tuners** on the ESP32-P4 — the first ESP32 variant with USB 2.0 High-Speed support. Previous variants (S2, S3) only supported Full-Speed USB, causing babble errors and limiting sample rates to ~240 kHz. The ESP32-P4 with HS enables **1+ MSPS streaming over WiFi**.
-
-**Key achievement**: 96.4% spectral correlation with direct USB reference captures, proving fidelity across the WiFi bridge.
-
-## Hardware
-
-### Bill of Materials
-
-| Component | Model | Cost | Purpose |
-|-----------|-------|------|---------|
-| Main Board | Waveshare ESP32-P4-WIFI6 | ~$30 | USB Host + WiFi 6 controller + Ethernet |
-| SDR Dongle | RTL-SDR Blog V4 | ~$30 | RTL2832U demod + R828D tuner |
-| Antenna | Any 50Ω | ~$10 | Receive antenna (frequency-dependent) |
-| **Total** | | **~$70** | Complete wireless SDR receiver |
-
-**Alternatives**:
-- **ESP32-P4-NANO**: Smaller form factor, same specs
-- **Other RTL2832U dongles**: Generic (0x0bda:0x2832), RTL-SDR Blog versions
-
-### Connections
+Transform a Waveshare ESP32-P4 board + RTL-SDR dongle into a wireless Software-Defined Radio receiver with **PIE SIMD-accelerated DSP**, a browser-based **WebSDR UI**, and **WBFM audio streaming**.
 
 ```
-Waveshare ESP32-P4-WIFI6:
-┌─────────────────────────────────────────────┐
-│   USB-A Ports (4x, HS on one port)          │
-│   ↑ Plug RTL-SDR Blog V4 here               │
-│                                             │
-│   Ethernet RJ45 (100 Mbps, optional)       │
-│   WiFi 6 (via ESP32-C6 on SDIO)            │
-│                                             │
-│   GPIO for bias-T (GPIO4 by default)       │
-└─────────────────────────────────────────────┘
-        ↑
-[RTL-SDR Blog V4 + Antenna]
+[RTL-SDR Dongle] --USB HS--> [ESP32-P4 PIE SIMD DSP] --WiFi 6 (HTTPS)--> [Browser / SDR Client]
 ```
 
-## Features
+## What's New in SIMD Edition
 
-- **USB 2.0 High-Speed**: 480 Mbps raw link, ~30+ MB/s practical throughput
-- **RTL2832U Demodulator**: Complete register-level driver port from librtlsdr
-- **R828D Tuner**: 24-1700 MHz coverage with R828D multi-band support + Blog V4 HF/VHF/UHF switching
-- **WiFi 6 (802.11ax)**: Via ESP32-C6 companion chip on SDIO, ~4-5 MB/s TCP sustained
-- **Ethernet (100 Mbps)**: RMII interface for fixed installations, ~11 MB/s TCP
-- **RTL-TCP Protocol**: Standard wire protocol, multi-client capable
-- **UDP Streaming**: Lower-overhead alternative with sequence tracking + udp2tcp bridge
-- **mDNS Service Discovery**: Auto-advertise as `esp32p4-rtlsdr._rtl_tcp._tcp`
-- **Ring Buffer (PSRAM)**: Configurable 2-8 MB absorbs WiFi jitter
-- **Full Gain Control**: LNA + Mixer + VGA stages, manual or auto-gain
-- **Bias-T Power**: GPIO-controlled antenna power (default GPIO4)
-- **Frequency Correction**: PPM-level accuracy via crystal calibration
-- **Test Mode**: IQ pattern generator for validation
-- **Real-time IQ Streaming**: 1 MSPS comfortable, 2+ MSPS possible
+This variant extends the base ESP32-P4 RTL-SDR WiFi Bridge with:
 
-## Performance
-
-### Sample Rate Capability
-
-| Transport | Max Sustainable | Notes |
-|-----------|-----------------|-------|
-| WiFi 6 (SDIO 25 MHz) | ~1.0 MSPS | Recommended; comfortable margin |
-| WiFi 6 (SDIO 40 MHz) | ~1.5 MSPS | Advanced; PCB-dependent |
-| Ethernet (100 Mbps) | 2.4+ MSPS | Recommended for high-rate operation |
-
-**Data rates**:
-- 1.024 MSPS = 2.048 MB/s
-- 2.048 MSPS = 4.096 MB/s
-- 2.4 MSPS = 4.8 MB/s
-
-### Throughput Progression
-
-Real-world testing showed continuous improvements:
-
-| Phase | Configuration | Max (kSPS) | Issue |
-|-------|---------------|-----------|-------|
-| 1 | USB HS enumeration | 214 | USB driver immature |
-| 2 | Demod register fixes | 558 | Zero-IF mode missing |
-| 3 | IF frequency (0x19-0x1b) | 720 | EPA registers wrong |
-| 4 | EPA fix (0x2148) | 891 | SDIO bottleneck identified |
-| 5 | SDIO 40 MHz tuning | 813 | Regression from volatility |
-| 6 | Ring buffer optimization | 1025 | Stable 1 MSPS achieved |
-
-### Spectral Validation
-
-IQ quality verified against direct USB reference at 936 MHz:
-
-```
-Metric                  Reference    WiFi Bridge    Match
-─────────────────────────────────────────────────────────────
-Mean power (dB)          -35.2        -35.1         +0.1 dB
-Peak power (dB)          -15.3        -15.2         +0.1 dB
-Noise floor (dB)         -80.4        -80.6         -0.2 dB
-Spectral correlation     1.0000       0.964         96.4%
-```
-
-## Architecture
-
-### System Block Diagram
-
-```
-┌──────────────────────────────────────────────────┐
-│           ESP32-P4 (400 MHz RISC-V dual-core)    │
-├──────────────────────────────────────────────────┤
-│                                                  │
-│  ┌───────────────────────────────────────────┐  │
-│  │ USB Host Driver (Core 0, High Priority)   │  │
-│  │ ┌─────────────┬──────────────────────────┐│  │
-│  │ │ RTL2832U    │ R828D Tuner              ││  │
-│  │ │ Demod ctrl  │ - 24-1700 MHz            ││  │
-│  │ │ (EP0 ctrl)  │ - LNA/Mixer/VGA          ││  │
-│  │ └─────────────┴──────────────────────────┘│  │
-│  │ Bulk IN Reader                             │  │
-│  │ (EP 0x81 async, 512-byte packets)         │  │
-│  └────────┬────────────────────────────────────┘  │
-│           ↓                                        │
-│  ┌────────────────────────────────────────────┐   │
-│  │ Ring Buffer (PSRAM, default 2 MB)          │   │
-│  │ Decouples USB bursts from WiFi TCP         │   │
-│  └────────┬─────────────────────────────────┬─┘   │
-│           ↓                                 ↓     │
-│  ┌──────────────────┐      ┌────────────────┐    │
-│  │ TCP Server       │      │ UDP Server     │    │
-│  │ (Core 1, Port    │      │ (Core 1, Port  │    │
-│  │  1234, rtl_tcp)  │      │  1235)         │    │
-│  └────────┬─────────┘      └────────┬───────┘    │
-│           ↓                         ↓            │
-│  ┌────────────────────────────────────────────┐  │
-│  │ ESP-Hosted SDIO Bridge → ESP32-C6          │  │
-│  │ (25 or 40 MHz clock, 4-bit bus)            │  │
-│  └────────────────────────────────────────────┘  │
-│           ↓                                       │
-│  ┌────────────────────────────────────────────┐  │
-│  │ WiFi 6 (802.11ax) @ 5 GHz                 │  │
-│  │ Or Ethernet (100 Mbps RMII)               │  │
-│  └────────────────────────────────────────────┘  │
-│           ↓                                       │
-└───────────────────────────────────────────────────┘
-            ↓
-   [SDR Clients: SDR++, GQRX, etc.]
-```
-
-### Task Architecture (FreeRTOS)
-
-| Task | Core | Priority | Role | Buffer |
-|------|------|----------|------|--------|
-| USB Host Lib | 0 | 20 (high) | USB event processing | N/A |
-| USB Bulk Reader | 0 | 19 | Async EP0x81 → ring buffer | 512 B × 4-8 |
-| TCP/UDP Server | 1 | 10 | Accept clients, stream IQ | Ring buffer |
-| WiFi/Network | 1 | 8 | ESP-Hosted + lwIP | Internal |
-
-**Pinning**: USB and bulk reader on Core 0 (hard real-time), network on Core 1 (soft real-time).
-
-### Memory Map
-
-| Region | Size | Purpose |
-|--------|------|---------|
-| HP SRAM (L2MEM) | 768 KB | Code, stacks, USB driver buffers |
-| LP SRAM | 32 KB | RTC memory, PM info |
-| PSRAM | 32 MB | Ring buffer (default 2 MB), malloc pool |
-| Flash | 16 MB | Firmware, NVS, SPIFFS |
-
-**Ring buffer location**: PSRAM for minimal latency, GDMA-AXI capable for DMA transfers.
-
-### USB Protocol Details
-
-#### Enumeration
-
-1. Attach RTL2SDR Blog V4 dongle (VID:PID = 0x0bda:0x2838)
-2. USB host driver claims interface 0
-3. Open bulk IN endpoint 0x81 (512-byte MPS at HS)
-4. No OUT endpoints; all config via control transfers
-
-#### Vendor Control Transfers (Register Access)
-
-```
-bmRequestType:  0xC0 (read) / 0x40 (write)
-bRequest:       0x00
-wValue:         register_address (0x0000-0xFFFF)
-wIndex:         (block << 8) | flags
-                  block: 0-6 (DEMOD, USB, SYS, TUNER, ROM, IR, I2C)
-                  flags: 0x10 (write) or 0x00 (read)
-wLength:        1-4 bytes
-Timeout:        300 ms
-```
-
-**Register mapping**:
-- `demod[addr]` at `block=0, reg=addr`
-- `rtl2832u[addr]` at `block=1, reg=addr`
-- `sys_ctlreg[addr]` at `block=2, reg=addr`
-- `tuner_i2c` at `block=6` with I2C repeater
-
-#### Bulk IN Streaming
-
-- EP 0x81 delivers IQ samples as USB packets
-- Each packet: 512 bytes at HS (unsigned 8-bit I, Q interleaved)
-- Packets arrive ~1 every microsecond at 1 MSPS
-- Async callback buffers into ring buffer
-
-### RTL2832U Demod Initialization Sequence
-
-1. **Reset demod**: write USB_SYSCTL
-2. **Load baseband**: I2C eeprom read + FIR filter setup
-3. **Configure sample rate**: write demod registers 1:0x9F, 1:0xA1 (resampler ratio)
-4. **Probe tuner**: try each I2C address in turn
-5. **Configure tuner**: frequency/gain/bandwidth
-6. **Enable IF frequency**: write demod 1:0x19-0x1b (DDC center)
-7. **Set AGC mode**: demod register 1:0x4D
-8. **Start streaming**: open EP 0x81 for bulk IN
-
-### RTL-TCP Protocol
-
-#### DongleInfo Header (Server → Client, 12 bytes, big-endian)
-
-```
-Bytes 0-3:   "RTL0" (0x52544C30)
-Bytes 4-7:   Tuner type (6 = R828D)
-Bytes 8-11:  Gain count (29)
-```
-
-#### Command Packet (Client → Server, 5 bytes, big-endian)
-
-```
-Byte 0:      Command opcode
-Bytes 1-4:   Parameter (uint32, big-endian)
-```
-
-| Cmd | Name | Parameter |
-|-----|------|-----------|
-| 0x01 | Set frequency | Hz |
-| 0x02 | Set sample rate | samples/sec |
-| 0x03 | Set gain mode | 0=auto, 1=manual |
-| 0x04 | Set gain | tenths of dB |
-| 0x05 | Set freq correction | PPM |
-| 0x06 | Set IF gain | stage<<16\|gain |
-| 0x07 | Set test mode | 0/1 |
-| 0x08 | Set AGC mode | 0/1 |
-| 0x09 | Set direct sampling | 0=off, 1=I, 2=Q |
-| 0x0A | Set offset tuning | 0/1 |
-| 0x0B | Set RTL xtal | Hz |
-| 0x0C | Set tuner xtal | Hz |
-| 0x0D | Set gain by index | index |
-| 0x0E | Set bias tee | 0/1 |
-
-**IQ Data Stream** (after DongleInfo):
-- Continuous uint8 I, Q pairs (interleaved)
-- Byte order: little-endian values, big-endian on network (handled by lwIP)
-- Example: `[I0, Q0, I1, Q1, ...]` → each byte ∈ [0, 255], 0=−3.2V, 255=+3.2V
+- **PIE 128-bit SIMD acceleration** — 4-8x faster FFT, power spectrum, NCO complex multiply
+- **3rd-order CIC decimator** — 38.9 dB alias rejection (was 13 dB boxcar)
+- **32-bit NCO phase accumulator** — zero phase discontinuity at any frequency
+- **DC offset removal** — EMA-based center spike elimination
+- **Professional ribbon UI** — professional desktop SDR interface in the browser
+- **HTTPS/WSS** — secure WebSocket for AudioWorklet support
+- **FM audio player** — browser-based WBFM demodulation and streaming
+- **Full DSP sidebar** — NB, NR, Notch, AGC, Squelch, De-emphasis, Limiter
+- **Python FM player** — `tools/ws_fm_player.py` with vectorized numpy demod (39 dB SNR)
+- **int16 DDC output** — 90 dB dynamic range (was 48 dB with uint8)
 
 ## Quick Start
 
 ### Prerequisites
 
-- **ESP-IDF v5.5+**: Download from [esp-idf releases](https://github.com/espressif/esp-idf/releases)
-- **Python 3.7+** with numpy (for spectral analysis)
-- **Build tools**: GCC, CMake
-- Waveshare ESP32-P4-WIFI6 board + RTL-SDR dongle
+- ESP-IDF v5.5+ with ESP32-P4 support
+- Waveshare ESP32-P4-WIFI6 + RTL-SDR Blog V4
 
-### 1. Set Up ESP-IDF
+### Build and Flash
 
 ```bash
-# Download and extract ESP-IDF v5.5.1
-cd ~/esp
-wget https://github.com/espressif/esp-idf/releases/download/v5.5.1/esp-idf-v5.5.1.zip
-unzip esp-idf-v5.5.1.zip
-cd esp-idf-v5.5.1
-./install.sh esp32p4
-source ./export.sh
-```
+source ~/esp/esp-idf/export.sh
+cd esp32p4-wifi-rtlsdr-simd
 
-### 2. Flash ESP32-C6 Slave (One-Time Setup)
-
-The ESP32-P4 cannot run WiFi natively; it uses an **ESP32-C6 companion chip** connected via SDIO. The C6 must be flashed with the esp-hosted firmware.
-
-```bash
-cd ~/esp32p4-wifi-rtlsdr/c6-ota-flasher
-idf.py build
-
-# Flash C6 over UART
-# Connect Waveshare USB-UART adapter to C6 UART pins
-idf.py -p /dev/ttyUSB0 flash monitor
-# Wait for "esp-hosted connected"
-```
-
-**For Waveshare ESP32-P4-WIFI6**: C6 is usually pre-flashed. Verify with:
-```bash
-cd c6-ota-flasher
-idf.py monitor
-# Should show: "esp-hosted connected" on serial console
-```
-
-### 3. Configure WiFi Credentials
-
-```bash
-cd ~/esp32p4-wifi-rtlsdr
+# Configure WiFi credentials
 idf.py menuconfig
+# → RTL-SDR WiFi Bridge Configuration → WiFi SSID / Password
 
-# Navigate to: RTL-SDR WiFi Bridge Configuration
-#   → WiFi SSID: enter your network name
-#   → WiFi Password: enter your password
-#   (Defaults: YourSSID / YourPassword for dev testing)
-
-# Save and exit
-```
-
-### 4. Build and Flash P4
-
-```bash
+# Build and flash
 idf.py build
-idf.py -p /dev/ttyUSB0 flash monitor
+idf.py -p /dev/ttyACM1 flash
 ```
 
-**Expected output**:
-```
-[00:00:01] Initializing ESP-Hosted...
-[00:00:02] Connecting to C6 slave over SDIO...
-[00:00:03] ESP-Hosted connected to C6
-[00:00:05] WiFi STA connecting to 'YourSSID'...
-[00:00:08] Got IP: 192.168.1.232
-[00:00:10] USB Host installed, waiting for device...
-[00:00:12] RTL-SDR attached, VID:PID=0x0bda:0x2838
-[00:00:13] RTL2832U demod initialized
-[00:00:14] Tuner detected: R828D
-[00:00:15] RTL-TCP server listening on :1234 (mDNS: esp32p4-rtlsdr._rtl_tcp._tcp)
-[00:00:16] Ready to stream IQ samples
-```
+### Connect
 
-### 5. Connect SDR Client
+| Interface | URL | Protocol |
+|-----------|-----|----------|
+| **WebSDR UI** | `https://<device-ip>` | HTTPS + WSS |
+| **FM Player** | `https://<device-ip>/fm` | HTTPS + WSS |
+| **RTL-TCP** | `<device-ip>:1234` | TCP (for GQRX, SDR++) |
 
-**GQRX**:
-```
-Input → Other → rtl_tcp → esp32p4-rtlsdr (or 192.168.1.232:1234)
-```
+The device advertises via mDNS as `esp32p4-rtlsdr._rtl_tcp._tcp`.
 
-**SDR++**:
-```
-Source → RTL-TCP → esp32p4-rtlsdr:1234
-```
+## WebSDR UI Features
 
-**Command line**:
-```bash
-# Capture 5 seconds @ 936 MHz, 1 MSPS, gain 40 dB
-rtl_tcp -a 192.168.1.232 -p 1234 &
-sleep 1
-# In another terminal:
-rtl_sdr -f 936000000 -s 1024000 -g 40 - | timeout 5 xxd -l 2048 | head
-```
+### Ribbon Interface
 
-## UDP Streaming
+The browser UI provides a professional desktop-class SDR interface:
 
-UDP provides **lower latency and overhead** compared to TCP, suitable for high-rate streaming. Use the **udp2tcp bridge** on the host to convert UDP streams to standard rtl_tcp format.
+**Ribbon Tabs**: Home | DSP | Display | Favourites | Memories | Tools | Help
 
-### Enable UDP on Device
+**Home Tab**:
+- VFO A/B/C/D switching with state preservation
+- Gain slider (LNA, 0-49.6 dB)
+- Sample rate selector (250k - 3.2M SPS)
+- FFT size selector (256 - 8192 bins)
+- Lock and Fast Tune buttons
+- Audio start/stop
 
-```bash
-idf.py menuconfig
-# RTL-SDR WiFi Bridge Configuration
-#   → IQ Transport Protocol: "UDP only" or "Both TCP and UDP"
-#   → UDP streaming port: 1235 (default)
-#   → UDP payload size: 1024 (default, ~2 MB/s per UDP client)
+**DSP Tab**:
+- AGC speed (Off/Slow/Medium/Fast)
+- De-emphasis (Off/50us EU/75us US)
+- WBFM soft limiter (drive + ceiling)
+- Audio level meter
 
-idf.py build flash monitor
-```
+**Display Tab**:
+- 5 waterfall palettes (Default, Jet, Iron, Viridis, Grayscale)
+- FFT smoothing (averaging alpha 0-0.95)
+- Peak hold with configurable decay
+- Spectrum reference level and range
+- Waterfall speed control
 
-### Build and Run udp2tcp Bridge
+### VFO Panel
 
-On your host machine (Linux/Mac):
+- **Frequency display**: DSEG7 7-segment font, 10 digits (GHz.MHz.kHz.Hz)
+- **Mouse wheel tuning**: Hover over any digit and scroll to tune
+- **VFO A/B/C/D**: Save/restore frequency, mode, bandwidth per VFO
+- **Mode selector**: AM, NFM, WBFM, USB, LSB, CW
+- **14 filter presets**: 2.5k to 250k bandwidth
 
-```bash
-cd tools
-gcc -O2 -o udp2tcp_bridge udp2tcp_bridge.c -lpthread
+### DSP Sidebar
 
-# Start bridge (receives UDP from ESP32-P4, serves TCP to rtl_tcp clients)
-./udp2tcp_bridge -u 192.168.1.232:1235 -t 1234 -s
+- **AGC**: Fast/Medium/Slow with configurable attack/decay
+- **Noise Blanker**: Impulse detection with threshold-based blanking
+- **Noise Reduction**: Spectral gate noise suppression
+- **Auto Notch**: IIR notch filter with zero-crossing frequency detection
+- **Squelch**: Power-based with enable/auto/level controls
+- **Band presets**: HF (160m-10m), VHF/UHF (6m, 2m, 70cm), Broadcast (FM, Air, Marine)
 
-# Output:
-# UDP server listening on :1235
-# TCP server listening on :1234
-# Connected to 192.168.1.232:1235 (tuner=R828D, gains=29)
-```
+### Spectrum & Waterfall
 
-### Connect SDR Client to Bridge
+- **WebGL2 waterfall** with Canvas2D fallback
+- **Click-to-tune**, drag-to-pan, mouse wheel zoom (1x-16x)
+- **Filter passband overlay** with edge dragging
+- **Cursor readout** (frequency + dB at mouse position)
+- **Hover controls**: HIGH/LOW/ZOOM with auto-scale
+- **Touch support**: Pinch-to-zoom on mobile
+- **Resizable split**: Drag handle between spectrum and waterfall
 
-```bash
-# Now point SDR++ or GQRX to localhost:1234 (not the ESP32-P4)
-# The bridge transparently forwards UDP IQ to TCP rtl_tcp protocol
-```
+### Keyboard Shortcuts
 
-**Advantages**:
-- UDP throughput: 2-3 Mbps per client (vs TCP 4-5 Mbps)
-- Lower latency (no TCP retransmits/ACKs)
-- Fits in one Ethernet frame per packet
-- Multiple clients possible
+| Key | Action |
+|-----|--------|
+| Up/Down | Tune by mode step |
+| Left/Right | Tune by 10x step |
+| +/- | Zoom in/out |
+| M | Cycle mode |
+| Space | Toggle audio |
+| F | Fullscreen |
+| P | Clear peak hold |
+| 1-9 | Select band preset |
 
-**Disadvantages**:
-- Packet loss possible on WiFi (bridge logs dropped packets)
-- Requires host-side bridge software
-- No flow control (overflow = dropped samples)
+### Mobile Support
 
-## Configuration Options
+- Responsive layout at 900px, 640px, 480px breakpoints
+- Slide-out DSP drawer (hamburger button) on narrow screens
+- Scrollable ribbon tabs
+- Touch-friendly controls
 
-Edit `main/Kconfig.projbuild` or use `idf.py menuconfig`:
+## FM Audio Player
 
-### WiFi Settings
+### Browser Player (`/fm`)
 
-| Option | Default | Range | Notes |
-|--------|---------|-------|-------|
-| WiFi SSID | YourSSID | string | Network to connect to |
-| WiFi Password | YourPassword | string | Network password |
+Standalone WBFM player with:
+- FM discriminator + 75us de-emphasis
+- AudioWorklet (HTTPS) or ScriptProcessor fallback (HTTP)
+- Frequency, gain, volume controls
+- Audio level meter
 
-### Sample Rate Settings
-
-| Option | Default | Range | Notes |
-|--------|---------|-------|-------|
-| Default frequency | 100 MHz | Hz | Initial center frequency on boot |
-| Default sample rate | 1.024 MSPS | Hz | Initial rate; changeable via RTL-TCP |
-
-### Transport Configuration
-
-| Option | Default | Values | Notes |
-|--------|---------|--------|-------|
-| IQ Transport | TCP | TCP, UDP, Both | Select streaming protocol |
-| TCP Port | 1234 | 1024-65535 | Standard rtl_tcp port |
-| UDP Port | 1235 | 1024-65535 | Custom UDP port |
-| UDP Payload | 1024 | 512-1464 | Bytes of IQ per UDP packet |
-| Ring Buffer | 2048 KB | 512-8192 | PSRAM buffer for jitter absorption |
-
-### Advanced Tuning
-
-| Option | Default | Notes |
-|--------|---------|-------|
-| SDIO Clock | 25 MHz | Set to 40 MHz for higher WiFi throughput (PCB-dependent) |
-
-## Spectral Validation
-
-Verify IQ quality using the included Python spectral analysis tool.
-
-### Capture Reference (Direct USB)
-
-On a host with librtlsdr installed:
+### Python Player
 
 ```bash
-# Capture at 936 MHz, 1.024 MSPS, gain 40 dB for 2 seconds
-rtl_sdr -f 936000000 -s 1024000 -g 40 - | head -c $((2 * 1024000 * 2)) > reference.iq
+# Install dependencies
+pip install websocket-client numpy sounddevice scipy
 
-# Generate spectral profile
-cd test
-python3 analyze_spectrum.py reference ../reference.iq --freq 936e6 --rate 1024000
-# Output: reference_profile.json
+# Play FM radio
+python3 tools/ws_fm_player.py 100.0 192.168.1.233
+
+# Record 10s for analysis
+python3 tools/ws_record_10s.py
 ```
 
-### Capture via WiFi Bridge
+**Audio quality** (measured):
+- SNR: **39.4 dB** (reference: 43.9 dB)
+- Vectorized numpy `np.angle()` FM discriminator
+- 15 kHz FIR anti-alias filter (63 taps)
+- Fractional resampling with linear interpolation
+- Direct int16 IQ processing (no uint8 intermediate)
+
+## PIE SIMD DSP Engine
+
+### Architecture
+
+```
+USB IQ (uint8)
+    ↓
+DC Offset Removal (EMA α=1/1024)
+    ↓
+Hann Windowing (PIE hw loop)
+    ↓
+Radix-2 FFT (PIE int16, 4.3x faster)
+    ↓
+Power Spectrum (PIE hw loop)  →  Waterfall/Spectrum
+    ↓
+fast_log10f (IEEE 754 bit trick, 8x faster)
+    ↓
+dB Scaling + FFT Shift  →  WebSocket MSG_FFT (0x01)
+
+DDC Pipeline (per-client):
+    uint8 IQ → int16 bias removal
+    ↓
+    NCO Mix (32-bit phase accum, 1024-entry table)
+    ↓
+    3rd-order CIC Decimation (38.9 dB rejection, int64 accum)
+    ↓
+    int16 IQ output  →  WebSocket MSG_IQ16 (0x03)
+```
+
+### Assembly Kernels
+
+| Kernel | File | Speedup | Method |
+|--------|------|---------|--------|
+| Windowing | `pie_windowing_arp4.S` | ~2x | HW zero-overhead loop |
+| Power Spectrum | `pie_power_spectrum_arp4.S` | ~2x | HW loop + int32 accum |
+| NCO Complex Multiply | `pie_nco_mix_arp4.S` | ~4x | `esp.cmul.s16` SIMD |
+
+### Performance
+
+| Operation | ANSI C | PIE SIMD | Speedup |
+|-----------|--------|----------|---------|
+| 1024-pt FFT | 15 us | 3.5 us | **4.3x** |
+| 4096-pt FFT | 95 us | 22 us | **4.3x** |
+| Power spectrum (4096) | 40 us | 20 us | **2x** |
+| dB conversion (4096) | 490K cy | 61K cy | **8x** |
+
+## WebSocket Protocol
+
+### Binary Message Types
+
+| Type | ID | Direction | Format |
+|------|-----|-----------|--------|
+| FFT Spectrum | `0x01` | Server → Client | `[0x01][uint8 dB × fft_size]` |
+| IQ uint8 (legacy) | `0x02` | Server → Client | `[0x02][uint8 I,Q pairs]` |
+| IQ int16 (SIMD) | `0x03` | Server → Client | `[0x03][int16 I,Q pairs]` |
+
+### JSON Commands (Client → Server)
+
+| Command | Parameters | Description |
+|---------|------------|-------------|
+| `freq` | `value` (Hz) | Set center frequency (24M-1766M) |
+| `gain` | `value` (0.1 dB) | Set tuner gain (0=auto) |
+| `sample_rate` | `value` (Hz) | Set sample rate |
+| `fft_size` | `value` | Set FFT bins (256-8192) |
+| `db_range` | `min`, `max` | Set dB scaling range |
+| `subscribe_iq` | `offset`, `bw` | Start DDC IQ stream |
+| `unsubscribe_iq` | — | Stop DDC IQ stream |
+
+### JSON Responses (Server → Client)
+
+| Type | Fields | When |
+|------|--------|------|
+| `info` | freq, rate, gain, fft_size, db_min, db_max | On connect |
+| `config` | fft_size, sample_rate, db_min, db_max | On parameter change |
+| `freq` | value | On frequency change |
+| `iq_start` | offset, bw, rate | On IQ subscribe |
+| `iq_stop` | — | On IQ unsubscribe |
+| `error` | msg | On invalid command |
+
+## Hardware
+
+| Component | Model | Purpose |
+|-----------|-------|---------|
+| Main Board | Waveshare ESP32-P4-WIFI6 | 400 MHz RISC-V + PIE SIMD + USB HS |
+| SDR Dongle | RTL-SDR Blog V4 (R828D) | 24-1700 MHz tuner |
+| WiFi | ESP32-C6 via SDIO | WiFi 6 (802.11ax) |
+| RAM | 32 MB PSRAM | Ring buffers, DDC scratch |
+| Flash | 16 MB | Firmware + embedded web UI |
+
+## Unit Tests
 
 ```bash
-# Capture same conditions via ESP32-P4
-python3 analyze_spectrum.py capture_wifi bridge.iq --host 192.168.1.232 --port 1234
+# Build and run DSP kernel tests
+gcc -o test/test_dsp_kernels test/test_dsp_kernels.c -lm -I components/dsp/include -O2
+./test/test_dsp_kernels    # 9 tests
 
-# Compare
-python3 analyze_spectrum.py compare reference_profile.json bridge.iq
+# Edge case tests
+gcc -o test/test_dsp_edge_cases test/test_dsp_edge_cases.c -lm -I components/dsp/include -O2
+./test/test_dsp_edge_cases  # 17 tests
 ```
 
-**Expected output**:
-```
-============================================================
-SPECTRAL COMPARISON
-============================================================
-Reference: reference.iq (direct_usb)
-Test:      bridge.iq (wifi_bridge)
-
-Power Stats:
-  Metric               Reference      Test       Diff
-  ─────────────────────────────────────────────────────
-  mean_db                   -35.2     -35.1     +0.1
-  peak_db                   -15.3     -15.2     +0.1
-  noise_floor_db            -80.4     -80.6     -0.2
-  dynamic_range_db           65.1      65.4     +0.3
-
-Spectral Shape:
-  Correlation: 0.9640 (1.0 = perfect match)
-  RMSE:        1.23 dB
-
-Peaks: reference=3, test=3
-  Matched: 936.012 MHz (freq_diff=-5.3 kHz, power_diff=+0.1 dB)
-
-============================================================
-MATCH SCORE: 96.4/100
-EXCELLENT - Signals match closely
-============================================================
-```
-
-## Power Budget
-
-### Component Power Consumption
-
-| Component | Current (mA) | @ 5V | @ 3.3V |
-|-----------|--------------|------|--------|
-| ESP32-P4 (idle) | 15 | 75 mW | 50 mW |
-| ESP32-P4 (100%) | 200 | 1 W | 660 mW |
-| ESP32-C6 (WiFi active) | 50 | 250 mW | 165 mW |
-| RTL-SDR Blog V4 | 200 | 1 W | 660 mW |
-| **Total (streaming)** | **~450** | **2.3 W** | **1.5 W** |
-
-### Battery Runtime
-
-Assuming typical WiFi streaming at 1 MSPS:
-
-| Battery | Capacity | Runtime | Notes |
-|---------|----------|---------|-------|
-| 5000 mAh USB power bank | 5 Ah @ 5V | 5-6 hours | Cost: ~$15 |
-| 18650 Li-ion 3.7V | 3 Ah | 2-3 hours | Cost: ~$5 |
-| 4x AA NiMH 1.2V (6V) | 2.4 Ah | 3-4 hours | Cost: ~$10 |
-
-### Solar Panel Sizing
-
-For continuous operation:
-
-- **Total draw**: 1.5 W average (WiFi streaming)
-- **Solar panel**: 5-10 W @ full sun (100 mW typical indoor, 500 mW+ outdoors)
-- **Battery buffer**: 5000 mAh USB power bank + 1W solar → continuous portable operation
-
-**Recommended setup**: 10W solar panel + 10000 mAh battery for 24/7 outdoor field use.
-
-### Power Comparison: Raspberry Pi vs ESP32-P4
-
-| System | Idle | WiFi Streaming | Cost | Advantage |
-|--------|------|-----------------|------|-----------|
-| **Raspberry Pi 5** | 3 W | 8 W | $80 | Full-featured, large ecosystem |
-| **Raspberry Pi Zero 2W** | 0.5 W | 2 W | $15 | Very low power, still full OS |
-| **ESP32-P4 (this project)** | 0.1 W | 1.5 W | $30 | **Ultra-low power**, dedicated |
-
-The ESP32-P4 consumes **90% less power** than even the Raspberry Pi Zero 2W, making it ideal for battery-powered field deployments.
-
-## Supported Tuners
-
-| Tuner | I2C Address | Frequency Range | Implemented | Notes |
-|-------|-------------|-----------------|-------------|-------|
-| **R828D** | 0x74 | 24-1700 MHz | Full | Current hardware, Blog V4 multi-input |
-| **R820T/R820T2** | 0x34 | 24-1700 MHz | Full | Common in older dongles, ~90% compatible with R828D |
-| **E4000** | 0xC8 | 52-2200 MHz | Planned | Different architecture, separate driver |
-| **FC0012** | 0xC6 | 22-948.6 MHz | Planned | Requires adaptation |
-| **FC0013** | 0xC6 | 22-1100 MHz | Planned | Requires adaptation |
-| **FC2580** | 0xAC | 146-308, 438-924 MHz | Planned | Multi-band, requires adaptation |
-
-**Auto-detection**: The driver probes each address in order (E4000 → FC0013 → R820T → R828D → FC2580 → FC0012) and initializes the first responding tuner.
+**Test results** (26/26 pass):
+- Windowing: basic, Hann, edge cases
+- Power spectrum: overflow, accumulation
+- fast_log10f: accuracy across 15 orders of magnitude
+- NCO: zero discontinuities over 1M samples (prime frequency)
+- CIC: DC convergence, 38.9 dB alias rejection, ratio 1/64
+- DC removal: EMA convergence, tone preservation (-0.25 dB)
+- Ring buffer: overflow, pointer advancement
 
 ## Project Structure
 
 ```
-esp32p4-wifi-rtlsdr/
-├── README.md                          # This file
-├── CMakeLists.txt                     # Top-level build config
-├── sdkconfig.defaults                 # ESP-IDF default config
-├── partitions.csv                     # Flash partition table
-│
-├── main/
-│   ├── main.c                         # Application entry point
-│   ├── Kconfig.projbuild              # WiFi/sample rate configuration
-│   └── CMakeLists.txt
-│
+esp32p4-wifi-rtlsdr-simd/
+├── main/main.c                          # App entry, WiFi, task orchestration
 ├── components/
-│   ├── rtlsdr/                        # RTL2832U USB host driver
-│   │   ├── include/
-│   │   │   ├── rtlsdr.h               # Public API
-│   │   │   └── rtlsdr_internal.h      # Internal structs
-│   │   ├── rtlsdr.c                   # Demod + USB host
-│   │   ├── tuner_r82xx.c              # R828D/R820T tuner driver
-│   │   └── CMakeLists.txt
-│   │
-│   └── rtltcp/                        # RTL-TCP + UDP servers
-│       ├── include/
-│       │   ├── rtltcp.h               # RTL-TCP server API
-│       │   └── rtludp.h               # UDP server API
-│       ├── rtltcp.c                   # TCP implementation
-│       ├── rtludp.c                   # UDP implementation
-│       └── CMakeLists.txt
-│
-├── c6-ota-flasher/                    # ESP32-C6 WiFi firmware
-│   ├── main/app_main.c                # C6 firmware entry
-│   ├── CMakeLists.txt
-│   └── partitions.csv
-│
-├── docs/
-│   ├── FEASIBILITY.md                 # Project feasibility analysis
-│   ├── DRIVER_ANALYSIS.md             # RTL-SDR Blog V4 driver gaps
-│   ├── ARCHITECTURE.md                # Detailed architecture (new)
-│   ├── BENCHMARKS.md                  # Performance data (new)
-│   ├── POWER_BUDGET.md                # Power consumption analysis (new)
-│   ├── HARDWARE_SETUP.md              # Hardware assembly guide (new)
-│   ├── BUGS_AND_FIXES.md              # Development bug fixes (new)
-│   └── plans/
-│       └── 2026-03-15-full-driver-port-plan.md
-│
+│   ├── dsp/                             # PIE SIMD DSP engine
+│   │   ├── dsp.c                        # FFT + DDC pipeline
+│   │   ├── pie_kernels.c               # C reference + asm dispatch
+│   │   ├── pie_kernels.h               # Kernel API
+│   │   ├── pie_power_spectrum_arp4.S   # HW loop power accumulation
+│   │   ├── pie_nco_mix_arp4.S          # esp.cmul.s16 complex multiply
+│   │   └── pie_windowing_arp4.S        # HW loop windowing
+│   ├── rtlsdr/                          # USB RTL2832U + R828D driver
+│   ├── rtltcp/                          # RTL-TCP + UDP servers
+│   └── websdr/                          # HTTPS/WSS server + embedded UI
+│       ├── websdr.c                     # Server, FFT task, DDC per-client
+│       ├── certs/                       # TLS certificates
+│       └── www/                         # Embedded web assets
+│           ├── index.html               # Professional ribbon UI
+│           ├── sdr.js                   # Full JS client (~950 lines)
+│           ├── sdr.css                  # Ribbon layout (~1020 lines)
+│           ├── fm_player.html           # Standalone FM player
+│           └── dseg7.woff2              # 7-segment display font
+├── test/
+│   ├── test_dsp_kernels.c              # Core DSP unit tests (9)
+│   └── test_dsp_edge_cases.c           # Edge case tests (17)
 ├── tools/
-│   └── udp2tcp_bridge.c               # Host-side UDP→TCP bridge
-│
-└── test/
-    └── analyze_spectrum.py            # IQ spectral analysis
+│   ├── ws_fm_player.py                 # Python FM audio player
+│   └── ws_record_10s.py               # Audio recording + analysis
+└── docs/
+    └── 2026-03-24-comprehensive-fix-report.md  # Detailed change report
 ```
 
-## Development History
+## Performance Metrics
 
-### Milestone: USB HS Enumeration (214 kSPS)
-- **Date**: 2025-12-xx
-- **Achievement**: RTL2832U device enumeration and control transfer support on ESP32-P4 HS
-- **Issue**: Initial USB driver port from xtrsdr, register access working
-- **Fix**: Standard ESP-IDF USB host API, claim interface, vendor control transfers
-
-### Milestone: Demod Initialization (558 kSPS)
-- **Date**: 2025-12-xx
-- **Achievement**: FIR filter loading, sample rate control functional
-- **Issue**: IQ samples were DC-offset, spurious tones
-- **Fix**: Added missing Zero-IF disable register (demod 1:0xb1 = 0x1a, not 0x1b)
-
-### Milestone: IF Frequency Setup (720 kSPS)
-- **Date**: 2026-01-xx
-- **Achievement**: Tuner IF offset registered with demod DDC
-- **Issue**: Center frequency off by 3.57 MHz (IF frequency)
-- **Fix**: Write demod registers 1:0x19, 1:0x1a, 1:0x1b with IF offset value
-
-### Milestone: EPA Register Correction (891 kSPS)
-- **Date**: 2026-01-xx
-- **Achievement**: USB endpoint attributes fixed for High-Speed
-- **Issue**: wIndex computations wrong, EPA register address off by 0x2000
-- **Fix**: EPA @ 0x2148-0x2158 (not 0x0148), EPA_MAXPKT = 0x0002 for HS
-
-### Milestone: SDIO Bottleneck Identified (813 kSPS regression)
-- **Date**: 2026-02-xx
-- **Achievement**: Profiling revealed WiFi 6 SDIO as throughput limit, not USB
-- **Issue**: Attempt to run SDIO at 40 MHz caused volatility
-- **Fix**: Revert to stable 25 MHz; 1 MSPS comfortable, 2 MSPS marginal on WiFi
-
-### Milestone: Ring Buffer Optimization (1025 kSPS stable)
-- **Date**: 2026-02-xx
-- **Achievement**: Sustainable 1+ MSPS over WiFi with 2 MB ring buffer
-- **Issue**: WiFi jitter caused occasional sample drops on TCP
-- **Fix**: Larger ring buffer (2-8 MB configurable), TCP_NODELAY flag, dual-core pinning
-
-### Spectral Validation (96.4% match)
-- **Date**: 2026-03-15
-- **Achievement**: IQ quality verified against direct USB reference at 936 MHz
-- **Metric**: 96.4% spectral correlation, <2 dB dynamic range difference
-- **Method**: Python spectral analyzer compares FFT profiles, peak matching, RMSE
-
-## References and Links
-
-### Hardware & Boards
-
-- [Waveshare ESP32-P4-WIFI6](https://www.waveshare.com/wiki/ESP32-P4-WIFI6)
-- [Waveshare ESP32-P4-NANO](https://www.waveshare.com/esp32-p4-nano.htm)
-- [RTL-SDR Blog V4](https://www.rtl-sdr.com/buy-rtl-sdr-dvb-t-dongles/)
-
-### ESP32-P4 Documentation
-
-- [ESP32-P4 Product Page](https://www.espressif.com/en/products/socs/esp32-p4)
-- [ESP-IDF USB Host API](https://docs.espressif.com/projects/esp-idf/en/stable/esp32p4/api-reference/peripherals/usb_host.html)
-- [ESP-Hosted WiFi over SDIO](https://github.com/espressif/esp-hosted)
-- [Known USB HS Bug (IDFGH-16415)](https://github.com/espressif/esp-idf/issues/17550)
-
-### RTL-SDR & Protocol
-
-- [RTL-TCP Protocol Specification (K3XEC)](https://k3xec.com/rtl-tcp/)
-- [RTL-TCP Alternative Doc (hz.tools)](https://hz.tools/rtl_tcp/)
-- [librtlsdr Canonical Source](https://github.com/steve-m/librtlsdr)
-- [RTL-SDR Blog Fork](https://github.com/rtlsdrblog/rtl-sdr-blog)
-
-### Prior Art & References
-
-- [xtrsdr: RTL-SDR on ESP32-S2](https://github.com/XTR1984/xtrsdr) — Excellent code reference
-- [RTL2832U on STM32](https://fallingnate.svbtle.com/rtl2832-usb-stm32-pt1) — MCU-level USB proof-of-concept
-- [RTL2832U USB Overflow (IDFGH-10944)](https://github.com/espressif/esp-idf/issues/12137) — Why ESP32-P4 was needed
+| Metric | Value |
+|--------|-------|
+| USB throughput | 1024 kSPS (2.048 MB/s) |
+| WiFi delivery | ~891 kSPS (87%) |
+| FFT (1024-pt, PIE) | 3.5 us |
+| CIC alias rejection | 38.9 dB (3rd-order) |
+| FM audio SNR | 39.4 dB (Python player) |
+| Binary size | 1.18 MB (44% partition free) |
+| Boot to ready | ~20s (WiFi connect + USB enum) |
 
 ## License
 
 **GPL-2.0-or-later** — Following librtlsdr and xtrsdr precedent.
 
-This project is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 2 of the License, or (at your option) any later version.
+## References
 
-See [LICENSE](LICENSE) for full text.
-
----
-
-**Questions?** Open an issue on GitHub or refer to the detailed technical documentation in `docs/`.
+- [Waveshare ESP32-P4-WIFI6](https://www.waveshare.com/wiki/ESP32-P4-WIFI6)
+- [RTL-SDR Blog V4](https://www.rtl-sdr.com/buy-rtl-sdr-dvb-t-dongles/)
+- [ESP-IDF USB Host API](https://docs.espressif.com/projects/esp-idf/en/stable/esp32p4/api-reference/peripherals/usb_host.html)
+- [ESP-Hosted WiFi over SDIO](https://github.com/espressif/esp-hosted)
+- [RTL-TCP Protocol (K3XEC)](https://k3xec.com/rtl-tcp/)
+- [librtlsdr](https://github.com/steve-m/librtlsdr)

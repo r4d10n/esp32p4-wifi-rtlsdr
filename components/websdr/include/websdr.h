@@ -22,8 +22,9 @@ extern "C" {
 #define WEBSDR_DEFAULT_FFT_RATE 20
 
 /* WebSocket binary message types */
-#define WEBSDR_MSG_FFT  0x01
-#define WEBSDR_MSG_IQ   0x02
+#define WEBSDR_MSG_FFT     0x01
+#define WEBSDR_MSG_IQ      0x02    /* Legacy uint8 IQ */
+#define WEBSDR_MSG_IQ16    0x03    /* int16 IQ (SIMD DDC output) */
 
 typedef struct websdr_server websdr_server_t;
 

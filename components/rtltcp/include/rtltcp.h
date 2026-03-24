@@ -92,6 +92,11 @@ uint32_t rtltcp_push_samples(rtltcp_server_t *server, const uint8_t *data, uint3
  */
 bool rtltcp_is_client_connected(rtltcp_server_t *server);
 
+/**
+ * Dispatch a command to the RTL-SDR device (shared between TCP and UDP).
+ */
+void rtlsdr_dispatch_command(rtlsdr_dev_t *dev, uint8_t cmd, uint32_t param);
+
 #ifdef __cplusplus
 }
 #endif

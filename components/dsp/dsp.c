@@ -69,12 +69,20 @@ static int      fft_n = 0;
 static int      fft_avg_count = 0;
 static int      fft_input_pos = 0;
 
+/* DC offset removal — exponential moving average estimator
+ * Tracks the DC component of I and Q channels independently.
+ * Alpha = 1/1024 ≈ 0.001 (slow tracking, minimal signal distortion) */
+#define DC_ALPHA_SHIFT  10   /* 2^10 = 1024 */
+static int32_t dc_est_i = 0; /* Q8 fixed-point DC estimate for I */
+static int32_t dc_est_q = 0; /* Q8 fixed-point DC estimate for Q */
+
 static void fft_free_buffers(void)
 {
     if (fft_power)       { heap_caps_free(fft_power);       fft_power       = NULL; }
     if (fft_sc16_window) { heap_caps_free(fft_sc16_window); fft_sc16_window = NULL; }
     if (fft_sc16_input)  { heap_caps_free(fft_sc16_input);  fft_sc16_input  = NULL; }
     if (fft_sc16_work)   { heap_caps_free(fft_sc16_work);   fft_sc16_work   = NULL; }
+    pie_pwr_scratch_free();
 }
 
 void dsp_fft_init(int fft_size)
@@ -113,6 +121,11 @@ void dsp_fft_init(int fft_size)
                 fft_sc16_window[j] = (int16_t)(tmp_win[j] * 32767.0f);
             }
             free(tmp_win);
+        } else {
+            ESP_LOGE(TAG, "Failed to allocate temp window buffer (%d floats)", n);
+            fft_free_buffers();
+            fft_n = 0;
+            return;
         }
     }
 
@@ -125,6 +138,9 @@ void dsp_fft_init(int fft_size)
         return;
     }
 
+    /* Initialize heap scratch buffer for PIE assembly power spectrum */
+    pie_pwr_scratch_init(n);
+
     ESP_LOGI(TAG, "FFT initialized: %d-point, int16 PIE SIMD (4.3-4.8x faster)", fft_n);
     dsp_fft_reset();
 }
@@ -136,6 +152,8 @@ void dsp_fft_reset(void)
     }
     fft_avg_count = 0;
     fft_input_pos = 0;
+    dc_est_i = 0;
+    dc_est_q = 0;
 }
 
 int dsp_fft_get_size(void)
@@ -158,7 +176,8 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
 
     if (fft_n == 0 || !fft_sc16_input || !fft_sc16_work || !fft_power) return;
 
-    /* Accumulate IQ samples into int16 interleaved buffer using SIMD-friendly batch conversion */
+    /* Accumulate IQ samples into int16 interleaved buffer.
+     * DC offset removal runs on every sample (scalar) before windowing. */
     uint32_t i = 0;
     while (i + 1 < len) {
         /* How many IQ pairs can we accept before FFT buffer is full? */
@@ -166,24 +185,17 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
         uint32_t pairs_needed = fft_n - fft_input_pos;
         uint32_t batch = pairs_available < pairs_needed ? pairs_available : pairs_needed;
 
-        /* Round down to multiple of 8 for SIMD, process remainder one-by-one */
-        uint32_t batch_simd = batch & ~7u;
-
-        if (batch_simd > 0) {
-            pie_u8iq_to_s16_windowed(
-                iq_data + i,
-                fft_sc16_window + fft_input_pos,
-                fft_sc16_input + fft_input_pos * 2,
-                batch_simd);
-            fft_input_pos += batch_simd;
-            i += batch_simd * 2;
-        }
-
-        /* Handle remaining 0-7 pairs with scalar fallback */
-        uint32_t remainder = batch - batch_simd;
-        for (uint32_t r = 0; r < remainder; r++) {
+        /* Process all pairs: bias remove + DC subtract + window */
+        for (uint32_t b = 0; b < batch; b++) {
             int16_t si = ((int16_t)iq_data[i] - 128) << 8;
             int16_t sq = ((int16_t)iq_data[i + 1] - 128) << 8;
+
+            /* DC offset removal: EMA with alpha = 1/1024 */
+            dc_est_i += ((int32_t)si - dc_est_i) >> DC_ALPHA_SHIFT;
+            dc_est_q += ((int32_t)sq - dc_est_q) >> DC_ALPHA_SHIFT;
+            si -= (int16_t)dc_est_i;
+            sq -= (int16_t)dc_est_q;
+
             int32_t wi = fft_sc16_window[fft_input_pos];
             fft_sc16_input[fft_input_pos * 2]     = (int16_t)((si * wi) >> 15);
             fft_sc16_input[fft_input_pos * 2 + 1] = (int16_t)((sq * wi) >> 15);
@@ -251,7 +263,7 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
 
 /* ──────────────────────── DDC (Digital Down Converter) ──────────────────────── */
 
-#define DDC_BATCH_SIZE  1024    /* Must be multiple of 8 */
+#define DDC_BATCH_SIZE  4096    /* Must be multiple of 8. Larger = fewer iterations = better throughput */
 
 struct dsp_ddc {
     uint32_t    sample_rate;
@@ -266,8 +278,10 @@ struct dsp_ddc {
     int16_t    *buf_s16;       /* uint8 -> int16 conversion [DDC_BATCH_SIZE * 2] */
     int16_t    *mix_s16;       /* NCO mixed output [DDC_BATCH_SIZE * 2] */
 
-    /* CIC decimator persistent state */
-    int32_t     cic_accum[4];  /* {accum_re, accum_im, count, 0} */
+    /* 3rd-order CIC decimator persistent state
+     * Layout: 3 integrator stages (6 words) + 3 comb stages (6 words) + counter
+     * Each stage stores re/im as split int64 (lo32, hi32) = 12+12+1 = 25 words */
+    int32_t     cic_accum[26];
 };
 
 dsp_ddc_t *dsp_ddc_create(uint32_t sample_rate, uint32_t center_offset_hz,
@@ -354,17 +368,20 @@ int dsp_ddc_process(dsp_ddc_t *ddc, const uint8_t *iq_in, uint32_t in_len,
         /* Step 2: Complex multiply with NCO (frequency shift) */
         pie_nco_mix_s16(ddc->buf_s16, ddc->nco, ddc->mix_s16, batch);
 
-        /* Step 3: CIC decimation */
-        int cic_out_pairs = (int)((max_out - out_pos) / 2);
+        /* Step 3: CIC decimation
+         * Output is int16 IQ pairs (4 bytes each), so remaining capacity in pairs: */
+        int cic_out_pairs = (int)((max_out - out_pos) / (2 * sizeof(int16_t)));
         if (cic_out_pairs > DDC_BATCH_SIZE) cic_out_pairs = DDC_BATCH_SIZE;
         pie_cic_decimate_s16(ddc->mix_s16, batch,
                               cic_out, &cic_out_pairs,
                               ddc->decim_ratio, ddc->cic_accum);
 
-        /* Step 4: int16 -> uint8 output conversion */
+        /* Step 4: Output int16 IQ directly (preserves 90 dB dynamic range).
+         * The output buffer is cast from uint8_t* but contains int16_t pairs.
+         * Caller must allocate sufficient space (2 bytes per sample). */
         if (cic_out_pairs > 0) {
-            pie_s16_to_u8(cic_out, iq_out + out_pos, cic_out_pairs * 2);
-            out_pos += cic_out_pairs * 2;
+            memcpy(iq_out + out_pos, cic_out, cic_out_pairs * 2 * sizeof(int16_t));
+            out_pos += cic_out_pairs * 2 * sizeof(int16_t);
         }
 
         i += batch * 2;

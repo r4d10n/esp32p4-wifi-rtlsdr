@@ -9,6 +9,7 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
 #include "esp_log.h"
 #include "esp_check.h"
 #include "esp_event.h"
@@ -27,6 +28,9 @@
 #include "websdr.h"
 
 static const char *TAG = "main";
+
+static EventGroupHandle_t s_net_event_group;
+#define NET_CONNECTED_BIT BIT0
 
 /* WiFi credentials — set via menuconfig or sdkconfig.defaults */
 #define WIFI_SSID       CONFIG_WIFI_SSID
@@ -54,6 +58,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        xEventGroupSetBits(s_net_event_group, NET_CONNECTED_BIT);
     }
 }
 
@@ -320,6 +325,9 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
+    /* Create network event group before WiFi init */
+    s_net_event_group = xEventGroupCreate();
+
     /* Initialize WiFi */
     ESP_ERROR_CHECK(wifi_init_sta());
 
@@ -333,7 +341,11 @@ void app_main(void)
 
     /* Wait for IP address (WiFi or Ethernet) */
     ESP_LOGI(TAG, "Waiting for network connection...");
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    EventBits_t bits = xEventGroupWaitBits(s_net_event_group, NET_CONNECTED_BIT,
+                                            pdFALSE, pdTRUE, pdMS_TO_TICKS(30000));
+    if (!(bits & NET_CONNECTED_BIT)) {
+        ESP_LOGW(TAG, "Network not ready after 30s, starting servers anyway");
+    }
 
 #ifdef CONFIG_RTLSDR_MULTICAST_ENABLE
     /* Initialize Multicast (best on Ethernet) */

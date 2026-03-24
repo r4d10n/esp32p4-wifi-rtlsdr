@@ -50,9 +50,6 @@ struct rtludp_server {
 
 /* ──────────────────────── Command Handler ──────────────────────── */
 
-/* Reuse rtl_tcp command opcodes from rtltcp.h */
-extern void rtltcp_handle_cmd_ext(rtlsdr_dev_t *dev, uint8_t cmd, uint32_t param);
-
 static void handle_udp_command(rtludp_server_t *srv, const uint8_t *data, int len)
 {
     if (len == 5) {
@@ -63,42 +60,7 @@ static void handle_udp_command(rtludp_server_t *srv, const uint8_t *data, int le
                          ((uint32_t)data[3] << 8)  |
                          (uint32_t)data[4];
         ESP_LOGI(TAG, "UDP CMD: 0x%02x param=%lu", cmd, (unsigned long)param);
-
-        /* Apply command to device */
-        switch (cmd) {
-            case RTLTCP_CMD_SET_FREQ:
-                rtlsdr_set_center_freq(srv->dev, param);
-                break;
-            case RTLTCP_CMD_SET_SAMPLE_RATE:
-                rtlsdr_set_sample_rate(srv->dev, param);
-                break;
-            case RTLTCP_CMD_SET_GAIN_MODE:
-                rtlsdr_set_tuner_gain_mode(srv->dev, param);
-                break;
-            case RTLTCP_CMD_SET_GAIN:
-                rtlsdr_set_tuner_gain(srv->dev, param);
-                break;
-            case RTLTCP_CMD_SET_FREQ_CORR:
-                rtlsdr_set_freq_correction(srv->dev, (int)param);
-                break;
-            case RTLTCP_CMD_SET_AGC_MODE:
-                rtlsdr_set_agc_mode(srv->dev, param != 0);
-                break;
-            case RTLTCP_CMD_SET_BIAS_TEE:
-                rtlsdr_set_bias_tee(srv->dev, param != 0);
-                break;
-            case RTLTCP_CMD_SET_GAIN_INDEX: {
-                int count;
-                const int *gains = rtlsdr_get_tuner_gains(srv->dev, &count);
-                if (gains && (int)param < count) {
-                    rtlsdr_set_tuner_gain(srv->dev, gains[param]);
-                }
-                break;
-            }
-            default:
-                ESP_LOGW(TAG, "Unknown UDP command: 0x%02x", cmd);
-                break;
-        }
+        rtlsdr_dispatch_command(srv->dev, cmd, param);
     }
 }
 

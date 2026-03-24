@@ -65,10 +65,9 @@ pie_power_spectrum_accumulate_arp4:
         /* Load existing accumulator value */
         lw      t3, 0(a1)              /* t3 = accum[k] */
         add     t3, t3, t2             /* t3 += power */
-.L_pwr_loop_end:
         sw      t3, 0(a1)              /* store accum[k] */
-        addi    a1, a1, 4              /* advance accum by 1 int32 = 4 bytes */
-        /* Note: addi after label — hardware loop body ends at sw */
+.L_pwr_loop_end:
+        addi    a1, a1, 4              /* advance accum — MUST be inside loop body */
 
 .L_pwr_done:
     ret

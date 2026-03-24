@@ -54,58 +54,65 @@ static void rtltcp_send_dongle_info(rtltcp_server_t *srv)
              rtlsdr_get_tuner_type(srv->dev), gain_count);
 }
 
+/* ──────────────────────── Shared Command Dispatch ──────────────────────── */
+
+void rtlsdr_dispatch_command(rtlsdr_dev_t *dev, uint8_t cmd, uint32_t param)
+{
+    switch (cmd) {
+        case RTLTCP_CMD_SET_FREQ:
+            rtlsdr_set_center_freq(dev, param);
+            break;
+        case RTLTCP_CMD_SET_SAMPLE_RATE:
+            rtlsdr_set_sample_rate(dev, param);
+            break;
+        case RTLTCP_CMD_SET_GAIN_MODE:
+            rtlsdr_set_tuner_gain_mode(dev, (int)param);
+            break;
+        case RTLTCP_CMD_SET_GAIN:
+            rtlsdr_set_tuner_gain(dev, (int)param);
+            break;
+        case RTLTCP_CMD_SET_FREQ_CORR:
+            rtlsdr_set_freq_correction(dev, (int)param);
+            break;
+        case RTLTCP_CMD_SET_IF_GAIN:
+            /* IF gain: high 16 bits = stage, low 16 bits = gain */
+            rtlsdr_set_if_gain(dev, (param >> 16) & 0xFFFF, param & 0xFFFF);
+            break;
+        case RTLTCP_CMD_SET_TEST_MODE:
+            rtlsdr_set_test_mode(dev, param != 0);
+            break;
+        case RTLTCP_CMD_SET_AGC_MODE:
+            rtlsdr_set_agc_mode(dev, param != 0);
+            break;
+        case RTLTCP_CMD_SET_DIRECT_SAMP:
+            rtlsdr_set_direct_sampling(dev, (int)param);
+            break;
+        case RTLTCP_CMD_SET_OFFSET_TUNE:
+            rtlsdr_set_offset_tuning(dev, param != 0);
+            break;
+        case RTLTCP_CMD_SET_BIAS_TEE:
+            rtlsdr_set_bias_tee(dev, param != 0);
+            break;
+        case RTLTCP_CMD_SET_GAIN_INDEX: {
+            int count;
+            const int *gains = rtlsdr_get_tuner_gains(dev, &count);
+            if (gains && (int)param < count) {
+                rtlsdr_set_tuner_gain(dev, gains[param]);
+            }
+            break;
+        }
+        default:
+            ESP_LOGW("rtlcmd", "Unknown command: 0x%02x param=%lu", cmd, (unsigned long)param);
+            break;
+    }
+}
+
 /* ──────────────────────── Command Handler ──────────────────────── */
 
 static void rtltcp_handle_cmd(rtltcp_server_t *srv, uint8_t cmd, uint32_t param)
 {
     ESP_LOGI(TAG, "CMD: 0x%02x param=%lu", cmd, (unsigned long)param);
-
-    switch (cmd) {
-        case RTLTCP_CMD_SET_FREQ:
-            rtlsdr_set_center_freq(srv->dev, param);
-            break;
-        case RTLTCP_CMD_SET_SAMPLE_RATE:
-            rtlsdr_set_sample_rate(srv->dev, param);
-            break;
-        case RTLTCP_CMD_SET_GAIN_MODE:
-            rtlsdr_set_tuner_gain_mode(srv->dev, param);
-            break;
-        case RTLTCP_CMD_SET_GAIN:
-            rtlsdr_set_tuner_gain(srv->dev, param);
-            break;
-        case RTLTCP_CMD_SET_FREQ_CORR:
-            rtlsdr_set_freq_correction(srv->dev, (int)param);
-            break;
-        case RTLTCP_CMD_SET_IF_GAIN:
-            rtlsdr_set_if_gain(srv->dev, (param >> 16) & 0xFFFF, param & 0xFFFF);
-            break;
-        case RTLTCP_CMD_SET_TEST_MODE:
-            rtlsdr_set_test_mode(srv->dev, param != 0);
-            break;
-        case RTLTCP_CMD_SET_AGC_MODE:
-            rtlsdr_set_agc_mode(srv->dev, param != 0);
-            break;
-        case RTLTCP_CMD_SET_DIRECT_SAMP:
-            rtlsdr_set_direct_sampling(srv->dev, param);
-            break;
-        case RTLTCP_CMD_SET_OFFSET_TUNE:
-            rtlsdr_set_offset_tuning(srv->dev, param != 0);
-            break;
-        case RTLTCP_CMD_SET_BIAS_TEE:
-            rtlsdr_set_bias_tee(srv->dev, param != 0);
-            break;
-        case RTLTCP_CMD_SET_GAIN_INDEX: {
-            int count;
-            const int *gains = rtlsdr_get_tuner_gains(srv->dev, &count);
-            if (gains && (int)param < count) {
-                rtlsdr_set_tuner_gain(srv->dev, gains[param]);
-            }
-            break;
-        }
-        default:
-            ESP_LOGW(TAG, "Unknown command: 0x%02x", cmd);
-            break;
-    }
+    rtlsdr_dispatch_command(srv->dev, cmd, param);
 }
 
 /* ──────────────────────── Command Receiver Task ──────────────────────── */

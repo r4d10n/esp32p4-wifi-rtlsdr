@@ -16,6 +16,7 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_check.h"
+#include "esp_https_server.h"
 #include "esp_http_server.h"
 #include "esp_timer.h"
 #include "cJSON.h"
@@ -33,13 +34,21 @@ extern const uint8_t sdr_css_start[]    asm("_binary_sdr_css_start");
 extern const uint8_t sdr_css_end[]      asm("_binary_sdr_css_end");
 extern const uint8_t dseg7_woff2_start[] asm("_binary_dseg7_woff2_start");
 extern const uint8_t dseg7_woff2_end[]   asm("_binary_dseg7_woff2_end");
+extern const uint8_t fm_player_html_start[] asm("_binary_fm_player_html_start");
+extern const uint8_t fm_player_html_end[]   asm("_binary_fm_player_html_end");
+
+/* Embedded TLS certificates (via EMBED_TXTFILES in CMakeLists.txt) */
+extern const uint8_t servercert_start[] asm("_binary_servercert_pem_start");
+extern const uint8_t servercert_end[]   asm("_binary_servercert_pem_end");
+extern const uint8_t prvtkey_start[]    asm("_binary_prvtkey_pem_start");
+extern const uint8_t prvtkey_end[]      asm("_binary_prvtkey_pem_end");
 
 /* ──────────────────────── Constants ──────────────────────── */
 
 #define MAX_WS_CLIENTS      3
 #define IQ_BUF_SIZE         (256 * 1024)    /* IQ ring — 125ms at 1MSPS, PSRAM backed */
 #define TASK_PERIOD_MS      5               /* Internal loop rate (200Hz) for DDC throughput */
-#define DDC_OUT_BUF_SIZE    8192
+#define DDC_OUT_BUF_SIZE    32768   /* Must hold int16 IQ from DDC at full rate */
 
 /* ──────────────────────── Server State ──────────────────────── */
 
@@ -75,14 +84,17 @@ struct websdr_server {
     uint8_t            *fft_out;
 
     /* Deferred FFT size change (applied in task loop to avoid race) */
-    volatile int        pending_fft_size;
+    _Atomic int         pending_fft_size;
 
     /* Deferred freq change — coalesces rapid tuning into one USB call */
-    volatile uint32_t   pending_freq;
+    _Atomic uint32_t    pending_freq;
 
     /* Processing task */
     TaskHandle_t        fft_task;
-    volatile bool       running;
+    _Atomic bool        running;
+
+    /* Mutex serialising concurrent WebSocket sends */
+    SemaphoreHandle_t   send_mutex;
 };
 
 /* ──────────────────────── IQ Ring Buffer ──────────────────────── */
@@ -148,24 +160,30 @@ static void free_client(ws_client_t *c)
     c->iq_subscribed = false;
 }
 
-static esp_err_t send_ws_text(httpd_handle_t hd, int fd, const char *text)
+static esp_err_t send_ws_text(websdr_server_t *srv, int fd, const char *text)
 {
     httpd_ws_frame_t frame = {
         .type = HTTPD_WS_TYPE_TEXT,
         .payload = (uint8_t *)text,
         .len = strlen(text),
     };
-    return httpd_ws_send_frame_async(hd, fd, &frame);
+    xSemaphoreTake(srv->send_mutex, portMAX_DELAY);
+    esp_err_t ret = httpd_ws_send_frame_async(srv->httpd, fd, &frame);
+    xSemaphoreGive(srv->send_mutex);
+    return ret;
 }
 
-static esp_err_t send_ws_binary(httpd_handle_t hd, int fd, const uint8_t *data, size_t len)
+static esp_err_t send_ws_binary(websdr_server_t *srv, int fd, const uint8_t *data, size_t len)
 {
     httpd_ws_frame_t frame = {
         .type = HTTPD_WS_TYPE_BINARY,
         .payload = (uint8_t *)data,
         .len = len,
     };
-    return httpd_ws_send_frame_async(hd, fd, &frame);
+    xSemaphoreTake(srv->send_mutex, portMAX_DELAY);
+    esp_err_t ret = httpd_ws_send_frame_async(srv->httpd, fd, &frame);
+    xSemaphoreGive(srv->send_mutex);
+    return ret;
 }
 
 /* Mark a client as dead by fd.  Must be called WITHOUT client_mutex held. */
@@ -191,7 +209,7 @@ static void send_device_info(websdr_server_t *srv, int fd)
              rtlsdr_get_tuner_gain(srv->dev),
              (unsigned long)srv->fft_size,
              (double)srv->db_min, (double)srv->db_max);
-    send_ws_text(srv->httpd, fd, buf);
+    send_ws_text(srv, fd, buf);
 }
 
 static void send_config_to_all(websdr_server_t *srv)
@@ -207,7 +225,7 @@ static void send_config_to_all(websdr_server_t *srv)
     xSemaphoreTake(srv->client_mutex, portMAX_DELAY);
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
         if (srv->clients[i].active) {
-            send_ws_text(srv->httpd, srv->clients[i].fd, buf);
+            send_ws_text(srv, srv->clients[i].fd, buf);
         }
     }
     xSemaphoreGive(srv->client_mutex);
@@ -236,6 +254,14 @@ static void handle_ws_command(websdr_server_t *srv, ws_client_t *client,
         cJSON *val = cJSON_GetObjectItem(root, "value");
         if (val && cJSON_IsNumber(val)) {
             uint32_t freq = (uint32_t)val->valuedouble;
+            if (freq < 24000000 || freq > 1766000000) {
+                char ebuf[128];
+                snprintf(ebuf, sizeof(ebuf),
+                         "{\"type\":\"error\",\"msg\":\"freq out of range: %lu\"}", (unsigned long)freq);
+                send_ws_text(srv, client->fd, ebuf);
+                cJSON_Delete(root);
+                return;
+            }
             ESP_LOGI(TAG, "Set freq: %lu Hz", (unsigned long)freq);
             /* Defer to FFT task — coalesces rapid tuning so only the
              * latest value hits USB, preventing STALL cascades. */
@@ -245,6 +271,14 @@ static void handle_ws_command(websdr_server_t *srv, ws_client_t *client,
         cJSON *val = cJSON_GetObjectItem(root, "value");
         if (val && cJSON_IsNumber(val)) {
             int gain = (int)val->valuedouble;
+            if (gain < -10 || gain > 496) {
+                char ebuf[128];
+                snprintf(ebuf, sizeof(ebuf),
+                         "{\"type\":\"error\",\"msg\":\"gain out of range: %d\"}", gain);
+                send_ws_text(srv, client->fd, ebuf);
+                cJSON_Delete(root);
+                return;
+            }
             ESP_LOGI(TAG, "Set gain: %d", gain);
             rtlsdr_set_tuner_gain_mode(srv->dev, 1);
             rtlsdr_set_tuner_gain(srv->dev, gain);
@@ -253,6 +287,14 @@ static void handle_ws_command(websdr_server_t *srv, ws_client_t *client,
         cJSON *val = cJSON_GetObjectItem(root, "value");
         if (val && cJSON_IsNumber(val)) {
             uint32_t rate = (uint32_t)val->valuedouble;
+            if (rate < 225001 || rate > 3200000) {
+                char ebuf[128];
+                snprintf(ebuf, sizeof(ebuf),
+                         "{\"type\":\"error\",\"msg\":\"rate out of range: %lu\"}", (unsigned long)rate);
+                send_ws_text(srv, client->fd, ebuf);
+                cJSON_Delete(root);
+                return;
+            }
             ESP_LOGI(TAG, "Set sample rate: %lu", (unsigned long)rate);
             rtlsdr_set_sample_rate(srv->dev, rate);
             dsp_fft_reset();
@@ -309,7 +351,7 @@ static void handle_ws_command(websdr_server_t *srv, ws_client_t *client,
             snprintf(buf, sizeof(buf),
                      "{\"type\":\"iq_start\",\"offset\":%ld,\"bw\":%lu,\"rate\":%lu}",
                      (long)off_hz, (unsigned long)bw_hz, (unsigned long)out_rate);
-            send_ws_text(srv->httpd, client->fd, buf);
+            send_ws_text(srv, client->fd, buf);
         }
     } else if (strcmp(cmd_str, "unsubscribe_iq") == 0) {
         xSemaphoreTake(srv->client_mutex, portMAX_DELAY);
@@ -319,7 +361,11 @@ static void handle_ws_command(websdr_server_t *srv, ws_client_t *client,
         }
         client->iq_subscribed = false;
         xSemaphoreGive(srv->client_mutex);
-        send_ws_text(srv->httpd, client->fd, "{\"type\":\"iq_stop\"}");
+        send_ws_text(srv, client->fd, "{\"type\":\"iq_stop\"}");
+    } else {
+        char ebuf[128];
+        snprintf(ebuf, sizeof(ebuf), "{\"type\":\"error\",\"msg\":\"unknown command: %s\"}", cmd_str);
+        send_ws_text(srv, client->fd, ebuf);
     }
 
     cJSON_Delete(root);
@@ -357,6 +403,14 @@ static esp_err_t font_handler(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=31536000");
     httpd_resp_send(req, (const char *)dseg7_woff2_start,
                     dseg7_woff2_end - dseg7_woff2_start);
+    return ESP_OK;
+}
+
+static esp_err_t fm_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, (const char *)fm_player_html_start,
+                    fm_player_html_end - fm_player_html_start);
     return ESP_OK;
 }
 
@@ -496,7 +550,7 @@ static void fft_process_task(void *arg)
         return;
     }
     fft_frame[0] = WEBSDR_MSG_FFT;
-    iq_frame[0] = WEBSDR_MSG_IQ;
+    iq_frame[0] = WEBSDR_MSG_IQ16;  /* SIMD DDC outputs int16 IQ */
 
     ESP_LOGI(TAG, "DSP task started (FFT %lu bins @ %lu Hz, DDC loop %d ms)",
              (unsigned long)srv->fft_size, (unsigned long)srv->fft_rate,
@@ -537,7 +591,7 @@ static void fft_process_task(void *arg)
                 xSemaphoreTake(srv->client_mutex, portMAX_DELAY);
                 for (int i = 0; i < MAX_WS_CLIENTS; i++) {
                     if (srv->clients[i].active) {
-                        send_ws_text(srv->httpd, srv->clients[i].fd, fbuf);
+                        send_ws_text(srv, srv->clients[i].fd, fbuf);
                     }
                 }
                 xSemaphoreGive(srv->client_mutex);
@@ -579,7 +633,7 @@ static void fft_process_task(void *arg)
                     xSemaphoreGive(srv->client_mutex);
 
                     for (int j = 0; j < fft_fd_count; j++) {
-                        if (send_ws_binary(srv->httpd, fft_fds[j],
+                        if (send_ws_binary(srv, fft_fds[j],
                                            fft_frame, frame_len) != ESP_OK) {
                             evict_client_by_fd(srv, fft_fds[j]);
                         }
@@ -614,11 +668,11 @@ static void fft_process_task(void *arg)
 
             /* Send DDC frames outside mutex */
             for (int j = 0; j < ddc_send_count; j++) {
-                iq_frame[0] = WEBSDR_MSG_IQ;
+                iq_frame[0] = WEBSDR_MSG_IQ16;
                 memcpy(iq_frame + 1,
                        ddc_buf_pool + j * DDC_OUT_BUF_SIZE,
                        ddc_sends[j].len);
-                if (send_ws_binary(srv->httpd, ddc_sends[j].fd,
+                if (send_ws_binary(srv, ddc_sends[j].fd,
                                    iq_frame, 1 + ddc_sends[j].len) != ESP_OK) {
                     evict_client_by_fd(srv, ddc_sends[j].fd);
                 }
@@ -662,6 +716,9 @@ esp_err_t websdr_server_start(websdr_server_t **out_server, const websdr_config_
     srv->client_mutex = xSemaphoreCreateMutex();
     ESP_GOTO_ON_FALSE(srv->client_mutex, ESP_ERR_NO_MEM, err, TAG, "mutex alloc failed");
 
+    srv->send_mutex = xSemaphoreCreateMutex();
+    ESP_GOTO_ON_FALSE(srv->send_mutex, ESP_ERR_NO_MEM, err, TAG, "send_mutex alloc failed");
+
     /* Allocate IQ ring buffer */
     srv->iq_buf = malloc(IQ_BUF_SIZE);
     ESP_GOTO_ON_FALSE(srv->iq_buf, ESP_ERR_NO_MEM, err, TAG, "IQ buf alloc failed");
@@ -678,16 +735,20 @@ esp_err_t websdr_server_start(websdr_server_t **out_server, const websdr_config_
     /* Set global pointer for close callback */
     g_websdr_srv = srv;
 
-    /* Start HTTP server */
-    httpd_config_t httpd_config = HTTPD_DEFAULT_CONFIG();
-    httpd_config.server_port = config->http_port ? config->http_port : WEBSDR_DEFAULT_PORT;
-    httpd_config.max_uri_handlers = 8;
-    httpd_config.max_open_sockets = 3;  /* Keep within lwIP socket limit */
-    httpd_config.close_fn = on_close_socket;
-    httpd_config.stack_size = 8192;
+    /* Start HTTPS server (required for AudioWorklet secure context) */
+    httpd_ssl_config_t httpd_config = HTTPD_SSL_CONFIG_DEFAULT();
+    httpd_config.httpd.server_port = config->http_port ? config->http_port : WEBSDR_DEFAULT_PORT;
+    httpd_config.httpd.max_uri_handlers = 9;
+    httpd_config.httpd.max_open_sockets = 3;  /* Keep within lwIP socket limit */
+    httpd_config.httpd.close_fn = on_close_socket;
+    httpd_config.httpd.stack_size = 12288;   /* TLS needs more stack than plain HTTP */
+    httpd_config.servercert = servercert_start;
+    httpd_config.servercert_len = servercert_end - servercert_start;
+    httpd_config.prvtkey_pem = prvtkey_start;
+    httpd_config.prvtkey_len = prvtkey_end - prvtkey_start;
 
-    ESP_GOTO_ON_ERROR(httpd_start(&srv->httpd, &httpd_config), err, TAG,
-                      "HTTP server start failed");
+    ESP_GOTO_ON_ERROR(httpd_ssl_start(&srv->httpd, &httpd_config), err, TAG,
+                      "HTTPS server start failed");
 
     /* Register HTTP endpoints */
     const httpd_uri_t uri_index = {
@@ -707,11 +768,16 @@ esp_err_t websdr_server_start(websdr_server_t **out_server, const websdr_config_
         .user_ctx = srv, .is_websocket = true,
     };
 
+    const httpd_uri_t uri_fm = {
+        .uri = "/fm", .method = HTTP_GET, .handler = fm_handler,
+    };
+
     httpd_register_uri_handler(srv->httpd, &uri_index);
     httpd_register_uri_handler(srv->httpd, &uri_js);
     httpd_register_uri_handler(srv->httpd, &uri_css);
     httpd_register_uri_handler(srv->httpd, &uri_font);
     httpd_register_uri_handler(srv->httpd, &uri_ws);
+    httpd_register_uri_handler(srv->httpd, &uri_fm);
 
     /* Start FFT processing task on Core 1 */
     BaseType_t xret = xTaskCreatePinnedToCore(fft_process_task, "websdr_fft", 16384,
@@ -720,16 +786,17 @@ esp_err_t websdr_server_start(websdr_server_t **out_server, const websdr_config_
                       "FFT task create failed");
 
     *out_server = srv;
-    ESP_LOGI(TAG, "WebSDR server started on port %d (FFT %lu bins @ %lu Hz)",
-             httpd_config.server_port, (unsigned long)srv->fft_size,
+    ESP_LOGI(TAG, "WebSDR HTTPS server started on port %d (FFT %lu bins @ %lu Hz)",
+             httpd_config.httpd.server_port, (unsigned long)srv->fft_size,
              (unsigned long)srv->fft_rate);
     return ESP_OK;
 
 err_httpd:
-    httpd_stop(srv->httpd);
+    httpd_ssl_stop(srv->httpd);
 err:
     if (srv->fft_out) free(srv->fft_out);
     if (srv->iq_buf) free(srv->iq_buf);
+    if (srv->send_mutex) vSemaphoreDelete(srv->send_mutex);
     if (srv->client_mutex) vSemaphoreDelete(srv->client_mutex);
     free(srv);
     return ESP_FAIL;
@@ -751,10 +818,11 @@ esp_err_t websdr_server_stop(websdr_server_t *srv)
     }
     xSemaphoreGive(srv->client_mutex);
 
-    httpd_stop(srv->httpd);
+    httpd_ssl_stop(srv->httpd);
 
     free(srv->fft_out);
     free(srv->iq_buf);
+    vSemaphoreDelete(srv->send_mutex);
     vSemaphoreDelete(srv->client_mutex);
     free(srv);
 
@@ -764,13 +832,28 @@ esp_err_t websdr_server_stop(websdr_server_t *srv)
 
 void websdr_push_samples(websdr_server_t *srv, const uint8_t *iq_data, uint32_t len)
 {
-    if (!srv || !srv->running) return;
+    if (!srv || !srv->running || len == 0) return;
+    if (len > IQ_BUF_SIZE) len = IQ_BUF_SIZE;  /* clamp to buffer size */
 
-    /* Write to ring buffer using memcpy (overwrite old data if full) */
     uint32_t w = atomic_load_explicit(&srv->iq_write_pos, memory_order_acquire);
+    uint32_t r = atomic_load_explicit(&srv->iq_read_pos, memory_order_acquire);
+
+    /* Check if write would overtake read — if so, advance read (drop oldest) */
+    uint32_t free_space;
+    if (w >= r) {
+        free_space = IQ_BUF_SIZE - (w - r) - 1;
+    } else {
+        free_space = r - w - 1;
+    }
+    if (len > free_space) {
+        /* Advance read pointer to make room (drops oldest data) */
+        uint32_t advance = len - free_space;
+        atomic_store_explicit(&srv->iq_read_pos, (r + advance) % IQ_BUF_SIZE, memory_order_release);
+    }
+
+    /* Write data */
     uint32_t first = IQ_BUF_SIZE - w;
     if (first > len) first = len;
-
     memcpy(srv->iq_buf + w, iq_data, first);
     if (len > first) {
         memcpy(srv->iq_buf, iq_data + first, len - first);

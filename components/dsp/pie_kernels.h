@@ -19,6 +19,18 @@ extern "C" {
 /* ── FFT Pipeline Kernels ── */
 
 /**
+ * Initialize heap-allocated scratch buffer for power spectrum accumulation.
+ * Must be called before pie_power_spectrum_accumulate when using PIE assembly.
+ * Call with the FFT size. Safe to call multiple times (reallocs only if needed).
+ */
+void pie_pwr_scratch_init(int fft_n);
+
+/**
+ * Free the power spectrum scratch buffer.
+ */
+void pie_pwr_scratch_free(void);
+
+/**
  * Convert uint8 IQ pairs to windowed int16 in a single pass.
  *
  * For each IQ pair: output = ((uint8 - 128) << 8) * window_q15 >> 15
@@ -47,7 +59,7 @@ void pie_power_spectrum_accumulate(const int16_t *fft_out, int64_t *accum, int f
 /**
  * Convert int64 power spectrum to uint8 dB with FFT shift.
  *
- * Uses integer log2 approximation (CLZ + LUT) instead of float log10f.
+ * Uses fast_log10f approximation (IEEE 754 bit manipulation) for speed.
  * Output is FFT-shifted: second half first, then first half.
  *
  * @param power     int64 accumulated power [16-byte aligned, fft_n entries]
@@ -63,17 +75,20 @@ void pie_power_to_db_u8(const int64_t *power, uint8_t *db_out, int fft_n,
 /* ── DDC Pipeline Kernels ── */
 
 /**
- * NCO (Numerically Controlled Oscillator) table for int16 Q15 DDC.
+ * NCO (Numerically Controlled Oscillator) with 32-bit phase accumulator.
+ * Uses a fixed-size lookup table with phase accumulator for zero discontinuity.
  * Stores interleaved [cos, -sin] pairs as Q15 int16.
  */
 typedef struct {
     int16_t    *table;       /* Interleaved [cos,-sin,cos,-sin,...] Q15 */
-    uint32_t    table_len;   /* Number of complex entries */
-    uint32_t    phase_pos;   /* Current position in table */
+    uint32_t    table_len;   /* Number of complex entries (power of 2) */
+    uint32_t    phase_acc;   /* 32-bit phase accumulator (wraps naturally) */
+    uint32_t    phase_inc;   /* Phase increment per sample */
 } pie_nco_t;
 
 /**
- * Create NCO table for given offset frequency.
+ * Create NCO with 32-bit phase accumulator for given offset frequency.
+ * Phase wraps naturally at 2^32 with no discontinuity regardless of frequency.
  *
  * @param sample_rate  Input sample rate in Hz
  * @param offset_hz    Frequency offset from center (signed)
@@ -99,15 +114,11 @@ void pie_nco_free(pie_nco_t *nco);
 void pie_u8_to_s16_bias(const uint8_t *src, int16_t *dst, int count);
 
 /**
- * Complex multiply int16 IQ stream with NCO table (frequency shift).
- *
- * Performs: out_re = in_re*nco_cos - in_im*(-nco_sin)  (= in_re*cos + in_im*sin)
- *          out_im = in_re*(-nco_sin) + in_im*nco_cos   (= -in_re*sin + in_im*cos)
- *
- * All values are Q15 int16. Multiply is (a*b) >> 15.
+ * Complex multiply int16 IQ stream with NCO (frequency shift).
+ * Uses 32-bit phase accumulator for zero-discontinuity phase tracking.
  *
  * @param iq_in     int16 interleaved IQ input [16-byte aligned]
- * @param nco       NCO table (position auto-advanced)
+ * @param nco       NCO handle (phase auto-advanced)
  * @param iq_out    int16 interleaved IQ output [16-byte aligned]
  * @param iq_pairs  Number of IQ pairs (must be multiple of 8)
  */
@@ -115,17 +126,18 @@ void pie_nco_mix_s16(const int16_t *iq_in, pie_nco_t *nco,
                       int16_t *iq_out, int iq_pairs);
 
 /**
- * CIC decimation on int16 interleaved IQ.
+ * 3rd-order CIC decimation on int16 interleaved IQ.
  *
- * Accumulates decim_ratio input pairs, outputs averaged pair.
- * Uses int32 accumulator to avoid overflow.
+ * Implements 3 integrator stages (at input rate) followed by
+ * 3 comb stages (at output rate) for -39 dB alias rejection.
+ * Uses int64 internal accumulators to handle bit growth.
  *
  * @param iq_in       int16 interleaved IQ input
  * @param in_pairs    Number of input IQ pairs
  * @param iq_out      int16 interleaved IQ output
  * @param out_pairs   On entry: max output pairs. On exit: actual output pairs.
  * @param decim_ratio Decimation ratio (must be power of 2)
- * @param accum       Persistent state: int32[4] = {accum_re, accum_im, count, 0}
+ * @param accum       Persistent state: int32[26] (integrators + combs + counter)
  */
 void pie_cic_decimate_s16(const int16_t *iq_in, int in_pairs,
                            int16_t *iq_out, int *out_pairs,

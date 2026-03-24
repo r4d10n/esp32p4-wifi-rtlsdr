@@ -64,9 +64,9 @@ pie_u8iq_to_s16_windowed_arp4:
 
         mul     t0, t1, t2             /* reuse t0: Q_scaled * window (int32) */
         srai    t0, t0, 15             /* t0 >>= 15 */
-.L_win_loop_end:
         sh      t0, 2(a2)              /* store windowed Q as int16 */
-        addi    a2, a2, 4              /* advance dst by 2 int16 = 4 bytes */
+.L_win_loop_end:
+        addi    a2, a2, 4              /* advance dst — MUST be inside loop body */
 
 .L_win_done:
     ret
