@@ -2,62 +2,99 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "decoder_common.h"
+#include "decoder_framework.h"
 
-static const char *TAG = "decoder_ais";
+static const char *TAG = "dec_ais";
 
-#define MAX_VESSELS 64
+typedef struct {
+    SemaphoreHandle_t mutex;
+    bool running;
+    int vessel_count;
+} ais_ctx_t;
 
-static ais_vessel_t s_vessels[MAX_VESSELS];
-static int s_vessel_count = 0;
-static SemaphoreHandle_t s_mutex;
-static bool s_running = false;
-static bool s_push_warned = false;
+static ais_ctx_t s_ais_ctx;
 
-esp_err_t decoder_ais_init(void) {
-    s_mutex = xSemaphoreCreateMutex();
-    if (!s_mutex) {
-        return ESP_ERR_NO_MEM;
-    }
-    memset(s_vessels, 0, sizeof(s_vessels));
-    s_vessel_count = 0;
-    ESP_LOGI(TAG, "AIS decoder initialized (stub)");
+static esp_err_t ais_init(void *ctx) {
+    ais_ctx_t *c = (ais_ctx_t *)ctx;
+    c->mutex = xSemaphoreCreateMutex();
+    c->running = false;
+    c->vessel_count = 0;
+    ESP_LOGI(TAG, "AIS decoder initialized");
     return ESP_OK;
 }
 
-esp_err_t decoder_ais_start(void) {
-    s_running = true;
-    s_push_warned = false;
-    ESP_LOGI(TAG, "AIS decoder started (161.975/162.025 MHz GMSK)");
+static esp_err_t ais_start(void *ctx) {
+    ais_ctx_t *c = (ais_ctx_t *)ctx;
+    c->running = true;
+    ESP_LOGI(TAG, "AIS decoder started (162 MHz, GMSK 9600 baud)");
     return ESP_OK;
 }
 
-esp_err_t decoder_ais_stop(void) {
-    s_running = false;
+static esp_err_t ais_stop(void *ctx) {
+    ais_ctx_t *c = (ais_ctx_t *)ctx;
+    c->running = false;
     ESP_LOGI(TAG, "AIS decoder stopped");
     return ESP_OK;
 }
 
-void decoder_ais_push_samples(const uint8_t *data, uint32_t len) {
-    (void)data; (void)len;
-    if (!s_push_warned) {
-        s_push_warned = true;
-        ESP_LOGI(TAG, "push_samples: not implemented");
-    }
-    /* TODO: Implement AIS GMSK demodulation from IQ samples
-     * Reference: libais or gr-ais GNU Radio out-of-tree module
-     * 1. FM discriminator on 161.975 MHz and 162.025 MHz channels
-     * 2. GMSK demodulation (BT=0.4, 9600 baud)
-     * 3. HDLC framing and NRZI decoding
-     * 4. Decode ITU-R M.1371 message types 1/2/3 (position), 5 (voyage), 18/19 (class B)
+static void ais_destroy(void *ctx) { (void)ctx; }
+
+static void ais_process_iq(void *ctx, const uint8_t *iq, uint32_t len) {
+    (void)ctx; (void)iq; (void)len;
+    /* TODO: AIS dual-channel demodulation
+     * Reference: libais, gr-ais GNU Radio module
+     * 1. Dual-channel DDC: offset ±25 kHz for ch A (161.975) and ch B (162.025)
+     * 2. GMSK demodulation (BT=0.4, 9600 baud) on each channel
+     * 3. HDLC framing, NRZI decode, bit unstuffing
+     * 4. 6-bit ASCII unpack for payload
+     * 5. Decode ITU-R M.1371: types 1/2/3 (position), 5 (voyage), 18/19 (class B)
+     * 6. Publish via decode_bus_publish()
      */
 }
 
-int decoder_ais_get_vessels(ais_vessel_t *out, int max_count) {
-    if (!out || !s_mutex) return 0;
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    int n = s_vessel_count < max_count ? s_vessel_count : max_count;
-    memcpy(out, s_vessels, n * sizeof(ais_vessel_t));
-    xSemaphoreGive(s_mutex);
-    return n;
+static void ais_process_audio(void *ctx, const int16_t *samples,
+                               uint32_t count, uint32_t sample_rate) {
+    (void)ctx; (void)samples; (void)count; (void)sample_rate;
+    /* TODO: GMSK demod on FM-discriminated audio at 48 kHz */
+}
+
+static cJSON *ais_get_status(void *ctx) {
+    ais_ctx_t *c = (ais_ctx_t *)ctx;
+    cJSON *j = cJSON_CreateObject();
+    if (j) {
+        cJSON_AddBoolToObject(j, "running", c->running);
+        cJSON_AddNumberToObject(j, "vessel_count", c->vessel_count);
+    }
+    return j;
+}
+
+static cJSON *ais_get_results(void *ctx) {
+    (void)ctx;
+    return decoder_get_global_tracking() ?
+        tracking_table_query(decoder_get_global_tracking(), "ais") :
+        cJSON_CreateArray();
+}
+
+static decoder_plugin_t s_ais_plugin = {
+    .name = "ais",
+    .description = "AIS Marine VHF Vessel Tracker (ITU-R M.1371)",
+    .category = "marine",
+    .demod_type = DEMOD_GFSK,
+    .center_freq_hz = 162000000,
+    .bandwidth_hz = 50000,
+    .audio_rate_hz = 48000,
+    .demod_params.fsk = { .shift_hz = 4800, .baud = 9600 },
+    .init = ais_init,
+    .start = ais_start,
+    .stop = ais_stop,
+    .destroy = ais_destroy,
+    .process_iq = ais_process_iq,
+    .process_audio = ais_process_audio,
+    .get_status = ais_get_status,
+    .get_results = ais_get_results,
+    .ctx = &s_ais_ctx,
+};
+
+void register_ais_decoder(void) {
+    decoder_registry_add(&s_ais_plugin);
 }

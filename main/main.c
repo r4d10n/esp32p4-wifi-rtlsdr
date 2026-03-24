@@ -29,6 +29,7 @@
 #include "wifimgr_chatbot.h"
 #include "spyserver.h"
 #include "soapyremote.h"
+#include "decoder_framework.h"
 
 static const char *TAG = "main";
 
@@ -133,6 +134,7 @@ static void iq_data_cb(uint8_t *buf, uint32_t len, void *ctx)
     if (websdr_srv) websdr_push_samples(websdr_srv, buf, len);
     if (spyserver_srv) spyserver_push_samples(spyserver_srv, buf, len);
     if (soapy_srv) soapyremote_push_samples(soapy_srv, buf, len);
+    decoder_channel_manager_push_iq(buf, len, rtlsdr_get_sample_rate(sdr_dev));
 #ifdef CONFIG_RTLSDR_MULTICAST_ENABLE
     multicast_push_samples(buf, len);
 #endif
@@ -306,6 +308,9 @@ void app_main(void)
 
     /* Initialize chatbot (loads config, starts if enabled) */
     wifimgr_chatbot_init();
+
+    /* Initialize pluggable decoder framework */
+    decoder_registry_init();
 
     ESP_LOGI(TAG, "=== RTL-TCP server ready on port %d ===", RTLTCP_DEFAULT_PORT);
     ESP_LOGI(TAG, "=== RTL-UDP server ready on port %d ===", RTLUDP_DEFAULT_PORT);

@@ -20,6 +20,7 @@
 #include "wifimgr_api.h"
 #include "wifimgr_notify.h"
 #include "wifimgr_chatbot.h"
+#include "decoder_framework.h"
 
 /* OTA handlers (defined in wifimgr_ota.c) */
 extern esp_err_t wifimgr_ota_handler(httpd_req_t *req);
@@ -970,6 +971,115 @@ static esp_err_t api_auth_status(httpd_req_t *req) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+ *  Decode plugin endpoints
+ * ═══════════════════════════════════════════════════════════════ */
+
+/* GET /api/decode/plugins */
+static esp_err_t api_decode_plugins(httpd_req_t *req)
+{
+    cJSON *arr = cJSON_CreateArray();
+    if (!arr) { httpd_resp_send_500(req); return ESP_FAIL; }
+
+    decoder_plugin_t *p = decoder_registry_first();
+    while (p) {
+        cJSON *obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(obj, "name", p->name);
+        cJSON_AddStringToObject(obj, "description", p->description);
+        cJSON_AddStringToObject(obj, "category", p->category);
+        cJSON_AddBoolToObject(obj, "enabled", p->enabled);
+        cJSON_AddBoolToObject(obj, "running", p->running);
+        cJSON_AddNumberToObject(obj, "center_freq_hz", p->center_freq_hz);
+        cJSON_AddNumberToObject(obj, "bandwidth_hz", p->bandwidth_hz);
+        cJSON_AddNumberToObject(obj, "demod_type", p->demod_type);
+        if (p->get_status) {
+            cJSON *status = p->get_status(p->ctx);
+            if (status) cJSON_AddItemToObject(obj, "status", status);
+        }
+        cJSON_AddItemToArray(arr, obj);
+        p = decoder_registry_next(p);
+    }
+
+    esp_err_t err = send_json(req, arr);
+    cJSON_Delete(arr);
+    return err;
+}
+
+/* PUT /api/decode/plugins/:name */
+static esp_err_t api_decode_plugin_put(httpd_req_t *req)
+{
+    if (require_auth(req) != ESP_OK) return ESP_OK;
+
+    const char *uri = req->uri;
+    const char *name = uri + strlen("/api/decode/plugins/");
+    char plugin_name[32] = {0};
+    const char *q = strchr(name, '?');
+    size_t len = q ? (size_t)(q - name) : strlen(name);
+    if (len >= sizeof(plugin_name)) len = sizeof(plugin_name) - 1;
+    memcpy(plugin_name, name, len);
+
+    decoder_plugin_t *p = decoder_registry_find(plugin_name);
+    if (!p) return send_error(req, 404, "Plugin not found");
+
+    cJSON *body = read_req_json(req);
+    if (!body) return send_error(req, 400, "Invalid JSON");
+
+    cJSON *enable = cJSON_GetObjectItem(body, "enabled");
+    if (cJSON_IsBool(enable)) {
+        bool want_enabled = cJSON_IsTrue(enable);
+        if (want_enabled && !p->enabled) {
+            p->enabled = true;
+            if (p->init) p->init(p->ctx);
+            if (p->start) p->start(p->ctx);
+            p->running = true;
+        } else if (!want_enabled && p->enabled) {
+            if (p->stop) p->stop(p->ctx);
+            p->running = false;
+            p->enabled = false;
+        }
+    }
+
+    cJSON *freq = cJSON_GetObjectItem(body, "center_freq_hz");
+    if (cJSON_IsNumber(freq)) {
+        p->center_freq_hz = (uint32_t)cJSON_GetNumberValue(freq);
+    }
+
+    cJSON_Delete(body);
+    return send_ok(req, "Plugin updated");
+}
+
+/* GET /api/decode/tracking */
+static esp_err_t api_decode_tracking(httpd_req_t *req)
+{
+    tracking_table_t *table = decoder_get_global_tracking();
+    if (!table) return send_error(req, 500, "Tracking not initialized");
+
+    /* Check for ?decoder= filter */
+    char query[128] = {0};
+    char decoder_filter[32] = {0};
+    cJSON *result;
+
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "decoder", decoder_filter, sizeof(decoder_filter)) == ESP_OK) {
+        result = tracking_table_query(table, decoder_filter);
+    } else {
+        result = tracking_table_to_json(table);
+    }
+
+    esp_err_t err = send_json(req, result);
+    cJSON_Delete(result);
+    return err;
+}
+
+/* GET /api/decode/events */
+static esp_err_t api_decode_events(httpd_req_t *req)
+{
+    cJSON *events = decode_event_log_get();
+    esp_err_t err = send_json(req, events);
+    cJSON_Delete(events);
+    return err;
+}
+
+/* ═══════════════════════════════════════════════════════════════
  *  Registration
  * ═══════════════════════════════════════════════════════════════ */
 
@@ -1023,6 +1133,11 @@ esp_err_t wifimgr_api_register(httpd_handle_t server)
         /* OTA */
         { "/api/system/ota",     HTTP_POST, wifimgr_ota_handler },
         { "/api/system/ota/info", HTTP_GET, wifimgr_ota_info_handler },
+        /* Decode plugins */
+        { "/api/decode/plugins",   HTTP_GET, api_decode_plugins },
+        { "/api/decode/plugins/*", HTTP_PUT, api_decode_plugin_put },
+        { "/api/decode/tracking",  HTTP_GET, api_decode_tracking },
+        { "/api/decode/events",    HTTP_GET, api_decode_events },
     };
 
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {

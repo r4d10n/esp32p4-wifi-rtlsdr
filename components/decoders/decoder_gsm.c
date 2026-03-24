@@ -2,63 +2,92 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "decoder_common.h"
+#include "decoder_framework.h"
 
-static const char *TAG = "decoder_gsm";
+static const char *TAG = "dec_gsm";
 
-#define MAX_CELLS 32
+typedef struct {
+    SemaphoreHandle_t mutex;
+    bool running;
+    int cell_count;
+} gsm_ctx_t;
 
-static gsm_cell_t s_cells[MAX_CELLS];
-static int s_cell_count = 0;
-static SemaphoreHandle_t s_mutex;
-static bool s_running = false;
-static bool s_push_warned = false;
+static gsm_ctx_t s_gsm_ctx;
 
-esp_err_t decoder_gsm_init(void) {
-    s_mutex = xSemaphoreCreateMutex();
-    if (!s_mutex) {
-        return ESP_ERR_NO_MEM;
-    }
-    memset(s_cells, 0, sizeof(s_cells));
-    s_cell_count = 0;
-    ESP_LOGI(TAG, "GSM scanner initialized (stub)");
+static esp_err_t gsm_init(void *ctx) {
+    gsm_ctx_t *c = (gsm_ctx_t *)ctx;
+    c->mutex = xSemaphoreCreateMutex();
+    c->running = false;
+    c->cell_count = 0;
+    ESP_LOGI(TAG, "GSM scanner initialized");
     return ESP_OK;
 }
 
-esp_err_t decoder_gsm_start(void) {
-    s_running = true;
-    s_push_warned = false;
-    ESP_LOGI(TAG, "GSM scanner started (900/1800 MHz)");
+static esp_err_t gsm_start(void *ctx) {
+    gsm_ctx_t *c = (gsm_ctx_t *)ctx;
+    c->running = true;
+    ESP_LOGI(TAG, "GSM scanner started (935 MHz, 1 MHz span)");
     return ESP_OK;
 }
 
-esp_err_t decoder_gsm_stop(void) {
-    s_running = false;
+static esp_err_t gsm_stop(void *ctx) {
+    gsm_ctx_t *c = (gsm_ctx_t *)ctx;
+    c->running = false;
     ESP_LOGI(TAG, "GSM scanner stopped");
     return ESP_OK;
 }
 
-void decoder_gsm_push_samples(const uint8_t *data, uint32_t len) {
-    (void)data; (void)len;
-    if (!s_push_warned) {
-        s_push_warned = true;
-        ESP_LOGI(TAG, "push_samples: not implemented");
-    }
-    /* TODO: Implement GSM cell scanner from IQ samples
-     * Reference: gr-gsm GNU Radio out-of-tree module, Osmocom GSM stack
-     * 1. Scan ARFCN channels in GSM-900 (935-960 MHz) and GSM-1800 (1805-1880 MHz)
-     * 2. Detect FCCH (frequency correction) and SCH (synchronization) bursts
-     * 3. Decode BCCH (broadcast control channel) System Information messages
-     * 4. Extract MCC, MNC, LAC, CID from SI3/SI4 messages
-     * 5. Measure signal strength (RxLev) per cell
+static void gsm_destroy(void *ctx) { (void)ctx; }
+
+static void gsm_process_iq(void *ctx, const uint8_t *iq, uint32_t len) {
+    (void)ctx; (void)iq; (void)len;
+    /* TODO: GSM cell scanner
+     * Reference: gr-gsm GNU Radio module, Osmocom GSM stack
+     * 1. FFT power scan across 1 MHz span to find active ARFCN channels
+     * 2. Goertzel filter for FCCH (frequency correction channel) burst detection
+     * 3. SCH (synchronisation channel) burst decode: BSIC, frame number
+     * 4. BCCH (broadcast control channel) System Information decode
+     * 5. Extract MCC, MNC, LAC, CID from SI3/SI4 messages
+     * 6. Measure RxLev per cell and publish via decode_bus_publish()
      */
 }
 
-int decoder_gsm_get_cells(gsm_cell_t *out, int max_count) {
-    if (!out || !s_mutex) return 0;
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    int n = s_cell_count < max_count ? s_cell_count : max_count;
-    memcpy(out, s_cells, n * sizeof(gsm_cell_t));
-    xSemaphoreGive(s_mutex);
-    return n;
+static cJSON *gsm_get_status(void *ctx) {
+    gsm_ctx_t *c = (gsm_ctx_t *)ctx;
+    cJSON *j = cJSON_CreateObject();
+    if (j) {
+        cJSON_AddBoolToObject(j, "running", c->running);
+        cJSON_AddNumberToObject(j, "cell_count", c->cell_count);
+    }
+    return j;
+}
+
+static cJSON *gsm_get_results(void *ctx) {
+    (void)ctx;
+    return decoder_get_global_tracking() ?
+        tracking_table_query(decoder_get_global_tracking(), "gsm_scanner") :
+        cJSON_CreateArray();
+}
+
+static decoder_plugin_t s_gsm_plugin = {
+    .name = "gsm_scanner",
+    .description = "GSM 900 Cell Scanner (FCCH/SCH/BCCH)",
+    .category = "cellular",
+    .demod_type = DEMOD_RAW_IQ,
+    .center_freq_hz = 935000000,
+    .bandwidth_hz = 1000000,
+    .audio_rate_hz = 0,
+    .init = gsm_init,
+    .start = gsm_start,
+    .stop = gsm_stop,
+    .destroy = gsm_destroy,
+    .process_iq = gsm_process_iq,
+    .process_audio = NULL,
+    .get_status = gsm_get_status,
+    .get_results = gsm_get_results,
+    .ctx = &s_gsm_ctx,
+};
+
+void register_gsm_decoder(void) {
+    decoder_registry_add(&s_gsm_plugin);
 }
