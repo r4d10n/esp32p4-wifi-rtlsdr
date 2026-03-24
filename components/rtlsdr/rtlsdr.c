@@ -961,16 +961,60 @@ esp_err_t rtlsdr_set_freq_correction(rtlsdr_dev_t *dev, int ppm)
 esp_err_t rtlsdr_set_direct_sampling(rtlsdr_dev_t *dev, int on)
 {
     dev->direct_sampling = on;
-    /* TODO: implement direct sampling mux control */
-    ESP_LOGW(TAG, "Direct sampling mode %d (not yet implemented)", on);
+
+    /* Direct sampling MUX control (from librtlsdr)
+     * on=0: tuner IF input (normal)
+     * on=1: I-ADC input (pins 1-2) for HF 0-14.4 MHz
+     * on=2: Q-ADC input (pins 4-5) for HF 0-14.4 MHz
+     */
+    if (on == 0) {
+        /* Normal tuner path */
+        rtlsdr_demod_write_reg(dev, 0, 0x08, 0x4d, 1); /* AGC auto, IF=0 */
+        rtlsdr_demod_write_reg(dev, 0, 0x09, 0xcd, 1); /* enable IF AGC */
+    } else {
+        /* Direct sampling: disable IF AGC, select ADC input */
+        rtlsdr_demod_write_reg(dev, 0, 0x08, 0xcd, 1); /* bypass IF AGC */
+        rtlsdr_demod_write_reg(dev, 0, 0x09, 0xcd, 1);
+
+        /* Select I or Q ADC path via demod reg page 0, addr 0x06 */
+        if (on == 1) {
+            rtlsdr_demod_write_reg(dev, 0, 0x06, 0x80, 1); /* I-ADC */
+        } else {
+            rtlsdr_demod_write_reg(dev, 0, 0x06, 0x00, 1); /* Q-ADC */
+        }
+
+        /* Disable zero-IF mode for direct sampling */
+        rtlsdr_demod_write_reg(dev, 1, 0xb1, 0x1a, 1);
+        /* Disable spectrum inversion */
+        rtlsdr_demod_write_reg(dev, 1, 0x15, 0x00, 1);
+    }
+
+    ESP_LOGI(TAG, "Direct sampling: %s",
+             on == 0 ? "OFF (tuner)" : on == 1 ? "I-ADC" : "Q-ADC");
     return ESP_OK;
 }
 
 esp_err_t rtlsdr_set_offset_tuning(rtlsdr_dev_t *dev, bool on)
 {
     dev->offset_tuning = on;
-    /* TODO: implement offset tuning */
-    ESP_LOGW(TAG, "Offset tuning %d (not yet implemented)", on);
+
+    /* Offset tuning: shift LO away from center to avoid DC spike
+     * When enabled: IF stage shifts the signal digitally
+     * When disabled: zero-IF mode (LO at center, DC spike present)
+     * Reference: librtlsdr rtlsdr_set_offset_tuning()
+     */
+    if (on) {
+        /* Enable IF mode (non-zero IF) */
+        rtlsdr_demod_write_reg(dev, 1, 0xb1, 0x1a, 1); /* disable zero-IF */
+        /* Set a small IF offset to avoid DC */
+        rtlsdr_demod_write_reg(dev, 0, 0x19, 0x05, 1); /* IF stage on */
+    } else {
+        /* Zero-IF mode (default) */
+        rtlsdr_demod_write_reg(dev, 1, 0xb1, 0x1b, 1); /* enable zero-IF */
+        rtlsdr_demod_write_reg(dev, 0, 0x19, 0x05, 1);
+    }
+
+    ESP_LOGI(TAG, "Offset tuning: %s", on ? "ON" : "OFF");
     return ESP_OK;
 }
 
@@ -987,9 +1031,28 @@ esp_err_t rtlsdr_set_bias_tee(rtlsdr_dev_t *dev, bool on)
 
 esp_err_t rtlsdr_set_if_gain(rtlsdr_dev_t *dev, int stage, int gain)
 {
-    /* TODO: implement IF gain control */
-    ESP_LOGW(TAG, "IF gain stage=%d gain=%d (not yet implemented)", stage, gain);
-    return ESP_OK;
+    /* RTL2832U IF gain control (from librtlsdr)
+     * stage 1: register 0x08, bits [3:0] (0-15, each step ~3.5 dB)
+     * stage 2-6: additional IF amplifier stages
+     * Gain values: -30 to +60 in tenths of dB
+     */
+    if (stage < 1 || stage > 6) {
+        ESP_LOGW(TAG, "IF gain: invalid stage %d (valid: 1-6)", stage);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Map gain to register value (simplified: 16 steps per stage) */
+    int reg_val = (gain + 30) / 4; /* Rough mapping from tenths-dB to 0-15 */
+    if (reg_val < 0) reg_val = 0;
+    if (reg_val > 15) reg_val = 15;
+
+    /* IF gain registers are at page 1, addresses 0x08-0x0d for stages 1-6 */
+    uint8_t reg_addr = 0x08 + (stage - 1);
+    esp_err_t ret = rtlsdr_demod_write_reg(dev, 1, reg_addr, reg_val & 0x0f, 1);
+
+    ESP_LOGI(TAG, "IF gain stage %d: %d (reg 0x%02x = 0x%02x)",
+             stage, gain, reg_addr, reg_val);
+    return ret;
 }
 
 esp_err_t rtlsdr_set_test_mode(rtlsdr_dev_t *dev, bool on)
