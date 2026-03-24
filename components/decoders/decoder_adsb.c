@@ -15,6 +15,87 @@ static const char *TAG = "dec_adsb";
 #define MODES_PREAMBLE_US    8
 #define MODES_FULL_LEN       (MODES_PREAMBLE_US + MODES_LONG_MSG_BITS)
 
+/* ── NL (Number of Longitude zones) table for CPR decode ── */
+/* From ICAO Annex 10, Vol IV. NL(lat) = number of longitude zones at latitude */
+static int cpr_NL(double lat) {
+    if (lat < 0) lat = -lat;
+    if (lat < 10.47047130) return 59;
+    if (lat < 14.82817437) return 58;
+    if (lat < 18.18626357) return 57;
+    if (lat < 21.02939493) return 56;
+    if (lat < 23.54504487) return 55;
+    if (lat < 25.82924707) return 54;
+    if (lat < 27.93898710) return 53;
+    if (lat < 29.91135686) return 52;
+    if (lat < 31.77209708) return 51;
+    if (lat < 33.53993436) return 50;
+    if (lat < 35.22899598) return 49;
+    if (lat < 36.85025108) return 48;
+    if (lat < 38.41241892) return 47;
+    if (lat < 39.92256684) return 46;
+    if (lat < 41.38651832) return 45;
+    if (lat < 42.80914012) return 44;
+    if (lat < 44.19454951) return 43;
+    if (lat < 45.54626723) return 42;
+    if (lat < 46.86733252) return 41;
+    if (lat < 48.16039128) return 40;
+    if (lat < 49.42776439) return 39;
+    if (lat < 50.67150166) return 38;
+    if (lat < 51.89342469) return 37;
+    if (lat < 53.09516153) return 36;
+    if (lat < 54.27817472) return 35;
+    if (lat < 55.44378444) return 34;
+    if (lat < 56.59318756) return 33;
+    if (lat < 57.72747354) return 32;
+    if (lat < 58.84763776) return 31;
+    if (lat < 59.95459277) return 30;
+    if (lat < 61.04917774) return 29;
+    if (lat < 62.13216659) return 28;
+    if (lat < 63.20427479) return 27;
+    if (lat < 64.26616523) return 26;
+    if (lat < 65.31845310) return 25;
+    if (lat < 66.36171008) return 24;
+    if (lat < 67.39646774) return 23;
+    if (lat < 68.42322022) return 22;
+    if (lat < 69.44242631) return 21;
+    if (lat < 70.45451075) return 20;
+    if (lat < 71.45986473) return 19;
+    if (lat < 72.45884545) return 18;
+    if (lat < 73.45177442) return 17;
+    if (lat < 74.43893416) return 16;
+    if (lat < 75.42056257) return 15;
+    if (lat < 76.39684391) return 14;
+    if (lat < 77.36789461) return 13;
+    if (lat < 78.33374083) return 12;
+    if (lat < 79.29428225) return 11;
+    if (lat < 80.24923213) return 10;
+    if (lat < 81.19801349) return 9;
+    if (lat < 82.13956981) return 8;
+    if (lat < 83.07199445) return 7;
+    if (lat < 83.99173563) return 6;
+    if (lat < 84.89166191) return 5;
+    if (lat < 85.75541621) return 4;
+    if (lat < 86.53536998) return 3;
+    if (lat < 87.00000000) return 2;
+    return 1;
+}
+
+static int cpr_N(double lat, int is_odd) {
+    int nl = cpr_NL(lat) - is_odd;
+    if (nl < 1) nl = 1;
+    return nl;
+}
+
+static double cpr_Dlon(double lat, int is_odd) {
+    return 360.0 / cpr_N(lat, is_odd);
+}
+
+static double cpr_mod(double a, double b) {
+    double res = fmod(a, b);
+    if (res < 0) res += b;
+    return res;
+}
+
 /* ── Magnitude lookup table (256x256 = 64KB) ─────────── */
 static uint16_t *s_mag_lut;  /* [i*256+q] = sqrt(i^2+q^2) * 258 */
 
@@ -158,32 +239,52 @@ static void decode_adsb_msg(adsb_ctx_t *c, const uint8_t *msg, int len) {
             a->cpr_odd_time = now;
         }
 
-        /* Global CPR decode if both even and odd are recent (< 10s) */
+        /* Global CPR decode (dump1090 algorithm with NL table) */
         if (a->cpr_even_time > 0 && a->cpr_odd_time > 0 &&
             labs((long)(a->cpr_even_time - a->cpr_odd_time)) < 10000) {
-            double lat_even = (double)a->cpr_even_lat / 131072.0;
-            double lat_odd = (double)a->cpr_odd_lat / 131072.0;
-            double lon_even = (double)a->cpr_even_lon / 131072.0;
-            double lon_odd = (double)a->cpr_odd_lon / 131072.0;
 
-            /* NL computation simplified */
-            int j = (int)floor(59.0 * lat_even - 60.0 * lat_odd + 0.5);
-            double lat0 = (360.0 / 60.0) * (j % 60 + lat_even);
-            double lat1 = (360.0 / 59.0) * (j % 59 + lat_odd);
+            double rlat_even = (double)a->cpr_even_lat / 131072.0;
+            double rlat_odd = (double)a->cpr_odd_lat / 131072.0;
+
+            /* Compute latitude index j */
+            int j = (int)floor(59.0 * rlat_even - 60.0 * rlat_odd + 0.5);
+
+            /* Compute latitudes for even and odd frames */
+            double dlat0 = 360.0 / 60.0;
+            double dlat1 = 360.0 / 59.0;
+            double lat0 = dlat0 * (cpr_mod(j, 60) + rlat_even);
+            double lat1 = dlat1 * (cpr_mod(j, 59) + rlat_odd);
+
             if (lat0 >= 270) lat0 -= 360;
             if (lat1 >= 270) lat1 -= 360;
 
-            /* Use most recent CPR frame */
-            if (a->cpr_even_time > a->cpr_odd_time) {
-                a->lat = lat0;
-                /* Simplified longitude — full NL computation needed for accuracy */
-                a->lon = (360.0 / 60.0) * (0 + lon_even);
-                if (a->lon > 180) a->lon -= 360;
-            } else {
-                a->lat = lat1;
-                a->lon = (360.0 / 59.0) * (0 + lon_odd);
-                if (a->lon > 180) a->lon -= 360;
+            /* Check that both latitudes are in the same NL zone */
+            if (cpr_NL(lat0) != cpr_NL(lat1)) {
+                /* Ambiguity — cannot decode, wait for next pair */
+                xSemaphoreGive(c->mutex);
+                return;
             }
+
+            /* Compute longitude */
+            double rlon_even = (double)a->cpr_even_lon / 131072.0;
+            double rlon_odd = (double)a->cpr_odd_lon / 131072.0;
+
+            if (a->cpr_even_time > a->cpr_odd_time) {
+                /* Use even frame (most recent) */
+                a->lat = lat0;
+                int ni = cpr_N(lat0, 0);
+                int m = (int)floor(rlon_even * (cpr_NL(lat0) - 1) -
+                                    rlon_odd * cpr_NL(lat0) + 0.5);
+                a->lon = cpr_Dlon(lat0, 0) * (cpr_mod(m, ni) + rlon_even);
+            } else {
+                /* Use odd frame (most recent) */
+                a->lat = lat1;
+                int ni = cpr_N(lat1, 1);
+                int m = (int)floor(rlon_even * (cpr_NL(lat1) - 1) -
+                                    rlon_odd * cpr_NL(lat1) + 0.5);
+                a->lon = cpr_Dlon(lat1, 1) * (cpr_mod(m, ni) + rlon_odd);
+            }
+            if (a->lon > 180) a->lon -= 360;
         }
     }
     else if (tc == 19) {
@@ -294,28 +395,26 @@ static void adsb_process_iq(void *ctx, const uint8_t *iq, uint32_t len) {
     for (uint32_t i = 0; i < num_samples - MODES_FULL_LEN * 2; i++) {
         c->messages_total++;
 
-        /* Preamble pattern at 2 MSPS (2 samples per us):
-         * Pulse positions (us): 0, 1, 3.5, 4.5
-         * At 2x: samples 0-1 high, 2-3 low, 7-8 high, 9-10 low
-         * Simplified check: peaks at 0,2,7,9 and valleys at 3-4,5-6,11-13
+        /* dump1090-style preamble check at 2 MSPS:
+         * Preamble: 1 0 1 0 0 0 0 1 0 1 0 0 0 0 0 0 (at 1us resolution)
+         * At 2 MSPS: each position is 2 samples wide
+         * High pulses at: [0-1], [4-5], [14-15], [18-19]
+         * Low gaps at: [2-3], [6-13], [16-17], [20-31]
          */
-        uint16_t p0 = mag[i];
-        uint16_t p2 = mag[i + 2];
-        uint16_t p7 = mag[i + 7];
-        uint16_t p9 = mag[i + 9];
+        if (i + MODES_FULL_LEN * 2 + 16 >= num_samples) break;
 
-        /* Check high pulses */
-        uint16_t high_avg = (p0 + p2 + p7 + p9) / 4;
-        if (high_avg < 20) continue;  /* Too weak */
+        /* Check the 4 high pulses */
+        uint32_t high = mag[i] + mag[i+1] + mag[i+4] + mag[i+5] +
+                        mag[i+14] + mag[i+15] + mag[i+18] + mag[i+19];
 
-        /* Check low valleys */
-        uint16_t v3 = mag[i + 3];
-        uint16_t v4 = mag[i + 4];
-        uint16_t v5 = mag[i + 5];
-        uint16_t v6 = mag[i + 6];
+        /* Check the low gaps between pulses */
+        uint32_t low = mag[i+2] + mag[i+3] + mag[i+6] + mag[i+7] +
+                       mag[i+8] + mag[i+9] + mag[i+10] + mag[i+11] +
+                       mag[i+12] + mag[i+13] + mag[i+16] + mag[i+17];
 
-        uint16_t low_avg = (v3 + v4 + v5 + v6) / 4;
-        if (low_avg * 2 > high_avg) continue;  /* Not enough contrast */
+        /* High must be significantly above low (dump1090 uses ~2x ratio) */
+        if (high < 100) continue;  /* Too weak */
+        if (low * 2 > high) continue;  /* Not enough contrast */
 
         /* Potential preamble found — extract message bits */
         /* PPM encoding: bit period = 2 samples
@@ -325,7 +424,7 @@ static void adsb_process_iq(void *ctx, const uint8_t *iq, uint32_t len) {
         uint8_t msg[14];  /* 112 bits = 14 bytes */
         memset(msg, 0, sizeof(msg));
 
-        int base = i + 16;  /* Skip preamble (16 samples = 8us) */
+        int base = i + 32;  /* Skip preamble (16 us * 2 samples/us = 32 samples) */
 
         for (int bit = 0; bit < MODES_LONG_MSG_BITS; bit++) {
             int pos = base + bit * 2;
@@ -341,9 +440,27 @@ static void adsb_process_iq(void *ctx, const uint8_t *iq, uint32_t len) {
         int msg_bits = (df >= 16) ? MODES_LONG_MSG_BITS : MODES_SHORT_MSG_BITS;
         int msg_bytes = msg_bits / 8;
 
-        /* CRC check */
+        /* CRC check with 1-bit error correction (dump1090 technique) */
         uint32_t crc = modes_checksum(msg, msg_bits);
-        if (crc != 0) continue;  /* CRC failed */
+        if (crc != 0) {
+            /* Try 1-bit error correction for DF17 only */
+            if (df == 17) {
+                int fixed = 0;
+                for (int bit = 0; bit < msg_bits && !fixed; bit++) {
+                    /* Flip bit and recheck CRC */
+                    msg[bit / 8] ^= (1 << (7 - (bit % 8)));
+                    if (modes_checksum(msg, msg_bits) == 0) {
+                        fixed = 1;
+                        ESP_LOGD(TAG, "1-bit error corrected at bit %d", bit);
+                    } else {
+                        msg[bit / 8] ^= (1 << (7 - (bit % 8))); /* Flip back */
+                    }
+                }
+                if (!fixed) continue;
+            } else {
+                continue;
+            }
+        }
 
         c->messages_crc_ok++;
 
