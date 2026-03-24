@@ -26,6 +26,9 @@
 #include "wifimgr.h"
 #include "wifimgr_config.h"
 #include "wifimgr_notify.h"
+#include "wifimgr_chatbot.h"
+#include "spyserver.h"
+#include "soapyremote.h"
 
 static const char *TAG = "main";
 
@@ -33,10 +36,12 @@ static const char *TAG = "main";
 #define DEFAULT_FREQ        100000000   /* 100 MHz */
 #define DEFAULT_SAMPLE_RATE 250000      /* 250 kSPS */
 
-static rtlsdr_dev_t    *sdr_dev = NULL;
-static rtltcp_server_t *tcp_srv = NULL;
-static rtludp_server_t *udp_srv = NULL;
-static websdr_server_t *websdr_srv = NULL;
+static rtlsdr_dev_t        *sdr_dev = NULL;
+static rtltcp_server_t     *tcp_srv = NULL;
+static rtludp_server_t     *udp_srv = NULL;
+static websdr_server_t     *websdr_srv = NULL;
+static spyserver_handle_t   spyserver_srv = NULL;
+static soapyremote_handle_t soapy_srv = NULL;
 
 /* ──────────────────────── Multicast Setup ──────────────────────── */
 
@@ -126,6 +131,8 @@ static void iq_data_cb(uint8_t *buf, uint32_t len, void *ctx)
     if (tcp_srv) rtltcp_push_samples(tcp_srv, buf, len);
     if (udp_srv) rtludp_push_samples(udp_srv, buf, len);
     if (websdr_srv) websdr_push_samples(websdr_srv, buf, len);
+    if (spyserver_srv) spyserver_push_samples(spyserver_srv, buf, len);
+    if (soapy_srv) soapyremote_push_samples(soapy_srv, buf, len);
 #ifdef CONFIG_RTLSDR_MULTICAST_ENABLE
     multicast_push_samples(buf, len);
 #endif
@@ -261,6 +268,44 @@ void app_main(void)
     ESP_ERROR_CHECK(websdr_server_start(&websdr_srv, &websdr_config));
 
     xTaskCreatePinnedToCore(sdr_stream_task, "sdr_stream", 8192, NULL, 8, NULL, 0);
+
+    /* ── Start config-driven services (SpyServer, SoapySDR, Chatbot) ── */
+    {
+        cJSON *services = wifimgr_config_load_services();
+
+        /* SpyServer */
+        cJSON *spy_cfg = cJSON_GetObjectItem(services, "spyserver");
+        if (spy_cfg && cJSON_IsTrue(cJSON_GetObjectItem(spy_cfg, "enable"))) {
+            spyserver_config_t spy_config = SPYSERVER_CONFIG_DEFAULT();
+            spy_config.rtlsdr_dev = sdr_dev;
+            cJSON *port = cJSON_GetObjectItem(spy_cfg, "port");
+            if (port) spy_config.port = (uint16_t)cJSON_GetNumberValue(port);
+            cJSON *max_cl = cJSON_GetObjectItem(spy_cfg, "max_clients");
+            if (max_cl) spy_config.max_clients = (uint8_t)cJSON_GetNumberValue(max_cl);
+            cJSON *fft = cJSON_GetObjectItem(spy_cfg, "fft_fps");
+            if (fft) spy_config.fft_fps = (uint8_t)cJSON_GetNumberValue(fft);
+            if (spyserver_start(&spyserver_srv, &spy_config) == ESP_OK) {
+                ESP_LOGI(TAG, "=== SpyServer ready on port %d ===", spy_config.port);
+            }
+        }
+
+        /* SoapySDR Remote */
+        cJSON *soapy_cfg = cJSON_GetObjectItem(services, "soapysdr");
+        if (soapy_cfg && cJSON_IsTrue(cJSON_GetObjectItem(soapy_cfg, "enable"))) {
+            soapyremote_config_t soapy_config = SOAPYREMOTE_CONFIG_DEFAULT();
+            soapy_config.rtlsdr_dev = sdr_dev;
+            cJSON *port = cJSON_GetObjectItem(soapy_cfg, "port");
+            if (port) soapy_config.port = (uint16_t)cJSON_GetNumberValue(port);
+            if (soapyremote_start(&soapy_srv, &soapy_config) == ESP_OK) {
+                ESP_LOGI(TAG, "=== SoapySDR Remote ready on port %d ===", soapy_config.port);
+            }
+        }
+
+        cJSON_Delete(services);
+    }
+
+    /* Initialize chatbot (loads config, starts if enabled) */
+    wifimgr_chatbot_init();
 
     ESP_LOGI(TAG, "=== RTL-TCP server ready on port %d ===", RTLTCP_DEFAULT_PORT);
     ESP_LOGI(TAG, "=== RTL-UDP server ready on port %d ===", RTLUDP_DEFAULT_PORT);

@@ -5,6 +5,7 @@ set(srcs
     "wifimgr_portal.c"
     "wifimgr_notify.c"
     "wifimgr_ethernet.c"
+    "wifimgr_chatbot.c"
 )
 
 set(embed_files

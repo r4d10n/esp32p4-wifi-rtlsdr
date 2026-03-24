@@ -19,6 +19,7 @@
 #include "wifimgr_config.h"
 #include "wifimgr_api.h"
 #include "wifimgr_notify.h"
+#include "wifimgr_chatbot.h"
 
 static const char *TAG = "wifimgr_api";
 
@@ -789,6 +790,136 @@ static esp_err_t api_system_factory_reset(httpd_req_t *req)
 }
 
 /* ═══════════════════════════════════════════════════════════════
+ *  Chat endpoints
+ * ═══════════════════════════════════════════════════════════════ */
+
+/* POST /api/chat/message — {message: "..."} -> {reply: "..."} */
+static esp_err_t api_chat_message(httpd_req_t *req)
+{
+    cJSON *body = read_req_json(req);
+    if (!body) return send_error(req, 400, "Invalid JSON");
+
+    cJSON *msg_j = cJSON_GetObjectItem(body, "message");
+    if (!cJSON_IsString(msg_j) || msg_j->valuestring[0] == '\0') {
+        cJSON_Delete(body);
+        return send_error(req, 400, "Missing message");
+    }
+
+    char *reply = NULL;
+    esp_err_t err = wifimgr_chatbot_message(msg_j->valuestring, &reply);
+    cJSON_Delete(body);
+
+    if (err != ESP_OK || !reply) {
+        return send_error(req, 500, "Chatbot error");
+    }
+
+    cJSON *resp = cJSON_CreateObject();
+    if (!resp) { free(reply); httpd_resp_send_500(req); return ESP_FAIL; }
+    cJSON_AddStringToObject(resp, "reply", reply);
+    free(reply);
+
+    err = send_json(req, resp);
+    cJSON_Delete(resp);
+    return err;
+}
+
+/* GET /api/chat/history — return conversation history array */
+static esp_err_t api_chat_history_get(httpd_req_t *req)
+{
+    cJSON *history = wifimgr_chatbot_get_history();
+    if (!history) { httpd_resp_send_500(req); return ESP_FAIL; }
+
+    cJSON *resp = cJSON_CreateObject();
+    if (!resp) { cJSON_Delete(history); httpd_resp_send_500(req); return ESP_FAIL; }
+    cJSON_AddItemToObject(resp, "history", history);
+
+    esp_err_t err = send_json(req, resp);
+    cJSON_Delete(resp);
+    return err;
+}
+
+/* DELETE /api/chat/history — clear conversation history */
+static esp_err_t api_chat_history_delete(httpd_req_t *req)
+{
+    if (require_auth(req) != ESP_OK) return ESP_OK;
+    wifimgr_chatbot_clear_history();
+    return send_ok(req, "Chat history cleared");
+}
+
+/* GET /api/chat/config — return chatbot config (API key masked) */
+static esp_err_t api_chat_config_get(httpd_req_t *req)
+{
+    chatbot_config_t cfg;
+    wifimgr_config_load_chatbot(&cfg);
+
+    cJSON *resp = cJSON_CreateObject();
+    if (!resp) { httpd_resp_send_500(req); return ESP_FAIL; }
+
+    cJSON_AddBoolToObject(resp, "enable", cfg.enable);
+    cJSON_AddStringToObject(resp, "provider", cfg.provider);
+    cJSON_AddStringToObject(resp, "model", cfg.model);
+    cJSON_AddBoolToObject(resp, "web_enable", cfg.web_enable);
+    cJSON_AddBoolToObject(resp, "telegram_enable", cfg.telegram_enable);
+    cJSON_AddBoolToObject(resp, "discord_enable", cfg.discord_enable);
+    cJSON_AddNumberToObject(resp, "max_history", cfg.max_history);
+    cJSON_AddStringToObject(resp, "allowed_tools", cfg.allowed_tools);
+
+    /* Mask API key */
+    if (cfg.api_key[0]) {
+        char masked[16] = {0};
+        strncpy(masked, cfg.api_key, 8);
+        strcat(masked, "...");
+        cJSON_AddStringToObject(resp, "api_key", masked);
+    } else {
+        cJSON_AddStringToObject(resp, "api_key", "");
+    }
+
+    esp_err_t err = send_json(req, resp);
+    cJSON_Delete(resp);
+    return err;
+}
+
+/* PUT /api/chat/config — update chatbot config */
+static esp_err_t api_chat_config_put(httpd_req_t *req)
+{
+    if (require_auth(req) != ESP_OK) return ESP_OK;
+    cJSON *body = read_req_json(req);
+    if (!body) return send_error(req, 400, "Invalid JSON");
+
+    chatbot_config_t cfg;
+    wifimgr_config_load_chatbot(&cfg);
+
+    cJSON *item;
+    if ((item = cJSON_GetObjectItem(body, "enable")))
+        cfg.enable = cJSON_IsTrue(item);
+    if ((item = cJSON_GetObjectItem(body, "provider")) && cJSON_IsString(item))
+        strncpy(cfg.provider, item->valuestring, sizeof(cfg.provider) - 1);
+    if ((item = cJSON_GetObjectItem(body, "model")) && cJSON_IsString(item))
+        strncpy(cfg.model, item->valuestring, sizeof(cfg.model) - 1);
+    if ((item = cJSON_GetObjectItem(body, "web_enable")))
+        cfg.web_enable = cJSON_IsTrue(item);
+    if ((item = cJSON_GetObjectItem(body, "telegram_enable")))
+        cfg.telegram_enable = cJSON_IsTrue(item);
+    if ((item = cJSON_GetObjectItem(body, "discord_enable")))
+        cfg.discord_enable = cJSON_IsTrue(item);
+    if ((item = cJSON_GetObjectItem(body, "max_history")) && cJSON_IsNumber(item))
+        cfg.max_history = (uint8_t)item->valueint;
+    if ((item = cJSON_GetObjectItem(body, "allowed_tools")) && cJSON_IsString(item))
+        strncpy(cfg.allowed_tools, item->valuestring, sizeof(cfg.allowed_tools) - 1);
+    /* Only update API key if non-empty and not masked */
+    if ((item = cJSON_GetObjectItem(body, "api_key")) && cJSON_IsString(item) &&
+        item->valuestring[0] != '\0' && !strstr(item->valuestring, "..."))
+        strncpy(cfg.api_key, item->valuestring, sizeof(cfg.api_key) - 1);
+
+    cJSON_Delete(body);
+
+    esp_err_t err = wifimgr_config_save_chatbot(&cfg);
+    if (err != ESP_OK) return send_error(req, 500, "Save failed");
+
+    return send_ok(req, "Chatbot config saved");
+}
+
+/* ═══════════════════════════════════════════════════════════════
  *  Auth endpoints
  * ═══════════════════════════════════════════════════════════════ */
 
@@ -877,6 +1008,12 @@ esp_err_t wifimgr_api_register(httpd_handle_t server)
         /* Auth */
         { "/api/auth/setup",  HTTP_POST, api_auth_setup },
         { "/api/auth/status", HTTP_GET,  api_auth_status },
+        /* Chat */
+        { "/api/chat/message",  HTTP_POST,   api_chat_message },
+        { "/api/chat/history",  HTTP_GET,    api_chat_history_get },
+        { "/api/chat/history",  HTTP_DELETE, api_chat_history_delete },
+        { "/api/chat/config",   HTTP_GET,    api_chat_config_get },
+        { "/api/chat/config",   HTTP_PUT,    api_chat_config_put },
     };
 
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
