@@ -69,7 +69,7 @@ static bool check_auth(httpd_req_t *req) {
     return strcmp((char *)decoded, expected) == 0;
 }
 
-static esp_err_t require_auth(httpd_req_t *req) {
+esp_err_t require_auth(httpd_req_t *req) {
     if (check_auth(req)) return ESP_OK;
     httpd_resp_set_status(req, "401 Unauthorized");
     httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"ESP32-P4 SDR\"");
@@ -674,6 +674,7 @@ static esp_err_t api_notify_config_put(httpd_req_t *req)
 /* POST /api/notify/test */
 static esp_err_t api_notify_test(httpd_req_t *req)
 {
+    if (require_auth(req) != ESP_OK) return ESP_OK;
     cJSON *body = read_req_json(req);
     if (!body) return send_error(req, 400, "Invalid JSON");
 
@@ -800,6 +801,7 @@ static esp_err_t api_system_factory_reset(httpd_req_t *req)
 /* POST /api/chat/message — {message: "..."} -> {reply: "..."} */
 static esp_err_t api_chat_message(httpd_req_t *req)
 {
+    if (require_auth(req) != ESP_OK) return ESP_OK;
     cJSON *body = read_req_json(req);
     if (!body) return send_error(req, 400, "Invalid JSON");
 

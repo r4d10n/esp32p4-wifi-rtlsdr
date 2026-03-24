@@ -28,8 +28,12 @@
 static const char *TAG = "wifimgr_ota";
 
 /* OTA upload handler — receives firmware binary via HTTP POST */
+/* Auth check (defined in wifimgr_api.c) */
+extern esp_err_t require_auth(httpd_req_t *req);
+
 esp_err_t wifimgr_ota_handler(httpd_req_t *req)
 {
+    if (require_auth(req) != ESP_OK) return ESP_OK;
     ESP_LOGI(TAG, "OTA update started, content length: %d", req->content_len);
 
     if (req->content_len <= 0 || req->content_len > 2 * 1024 * 1024) {
