@@ -2,256 +2,633 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ESP32-P4 SDR Config</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>ESP32-P4 SDR Portal</title>
 <link rel="stylesheet" href="/portal.css">
 </head>
 <body>
-<h1>ESP32-P4 <span>SDR</span> Config</h1>
 
-<div class="tabs">
-    <button data-tab="wifi" class="active">WiFi</button>
-    <button data-tab="ethernet">Ethernet</button>
-    <button data-tab="sdr">SDR</button>
-    <button data-tab="services">Services</button>
-    <button data-tab="notify">Notifications</button>
-    <button data-tab="chatbot">Chatbot</button>
-    <button data-tab="system">System</button>
+<header class="app-header">
+  <div class="header-inner">
+    <div class="header-logo">
+      <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <circle cx="14" cy="14" r="12" stroke="#00f0ff" stroke-width="1.5" fill="none" opacity="0.4"/>
+        <circle cx="14" cy="14" r="8" stroke="#00f0ff" stroke-width="1.5" fill="none" opacity="0.6"/>
+        <circle cx="14" cy="14" r="4" fill="#00f0ff"/>
+        <line x1="14" y1="2" x2="14" y2="6" stroke="#00f0ff" stroke-width="1.5"/>
+        <line x1="14" y1="22" x2="14" y2="26" stroke="#00f0ff" stroke-width="1.5"/>
+        <line x1="2" y1="14" x2="6" y2="14" stroke="#00f0ff" stroke-width="1.5"/>
+        <line x1="22" y1="14" x2="26" y2="14" stroke="#00f0ff" stroke-width="1.5"/>
+      </svg>
+      <div class="header-title">
+        <span class="header-device">ESP32-P4</span>
+        <span class="header-sub">SDR Control Portal</span>
+      </div>
+    </div>
+    <div class="header-status">
+      <span class="conn-dot" id="hdr-conn-dot"></span>
+      <span class="conn-label" id="hdr-conn-label">—</span>
+    </div>
+  </div>
+</header>
+
+<nav class="tab-bar" role="tablist" aria-label="Configuration sections">
+  <button role="tab" data-tab="wifi"     class="tab-btn active" aria-selected="true">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1" fill="currentColor"/></svg>
+    WiFi
+  </button>
+  <button role="tab" data-tab="services" class="tab-btn" aria-selected="false">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+    Services
+  </button>
+  <button role="tab" data-tab="sdr"      class="tab-btn" aria-selected="false">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+    SDR
+  </button>
+  <button role="tab" data-tab="ethernet" class="tab-btn" aria-selected="false">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><line x1="5" y1="16" x2="5" y2="10"/><line x1="19" y1="16" x2="19" y2="10"/><line x1="5" y1="10" x2="19" y2="10"/><line x1="12" y1="8" x2="12" y2="10"/></svg>
+    Ethernet
+  </button>
+  <button role="tab" data-tab="notify"   class="tab-btn" aria-selected="false">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+    Notify
+  </button>
+  <button role="tab" data-tab="system"   class="tab-btn" aria-selected="false">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
+    System
+  </button>
+  <button role="tab" data-tab="chatbot"  class="tab-btn" aria-selected="false">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+    Chatbot
+  </button>
+</nav>
+
+<main class="main-content">
+
+<!-- ══════════════════════════ WiFi Tab ══════════════════════════ -->
+<div id="tab-wifi" class="tab-pane active" role="tabpanel" aria-labelledby="tab-wifi">
+
+  <!-- Connection Status -->
+  <div class="glass-card card-status" id="wifi-status-card">
+    <div class="card-header">
+      <span class="card-label">Connection Status</span>
+      <div class="status-pill" id="wifi-state-pill">
+        <span class="pill-dot"></span>
+        <span class="pill-text">Loading</span>
+      </div>
+    </div>
+    <div class="status-body">
+      <div class="signal-display">
+        <svg class="signal-svg" id="wifi-signal-svg" width="52" height="40" viewBox="0 0 52 40" aria-label="Signal strength">
+          <rect class="sig-bar" id="sig-b1" x="2"  y="30" width="9" height="8"  rx="2"/>
+          <rect class="sig-bar" id="sig-b2" x="14" y="22" width="9" height="16" rx="2"/>
+          <rect class="sig-bar" id="sig-b3" x="26" y="14" width="9" height="24" rx="2"/>
+          <rect class="sig-bar" id="sig-b4" x="38" y="6"  width="9" height="32" rx="2"/>
+        </svg>
+        <span class="rssi-val" id="wifi-rssi-val">— dBm</span>
+      </div>
+      <div class="status-details">
+        <div class="detail-row">
+          <span class="detail-lbl">SSID</span>
+          <span class="detail-val mono" id="wifi-ssid">—</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-lbl">IP Address</span>
+          <span class="detail-val mono" id="wifi-ip">—</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-lbl">Mode</span>
+          <span class="detail-val mono" id="wifi-mode">—</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Available Networks -->
+  <div class="glass-card">
+    <div class="card-header">
+      <span class="card-label">Available Networks</span>
+      <button class="icon-btn" id="wifi-scan-btn" onclick="scanWifi()" aria-label="Scan for networks">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.07"/></svg>
+        Scan
+      </button>
+    </div>
+    <div id="wifi-list" class="network-list">
+      <div class="empty-state">Press Scan to discover networks</div>
+    </div>
+  </div>
+
+  <!-- Saved Networks -->
+  <div class="glass-card">
+    <div class="card-header">
+      <span class="card-label">Saved Networks</span>
+    </div>
+    <div id="saved-networks" class="network-list">
+      <div class="empty-state">No saved networks</div>
+    </div>
+  </div>
+
+  <!-- Connect / Test -->
+  <div class="glass-card" id="wifi-connect-card" style="display:none">
+    <div class="card-header">
+      <span class="card-label" id="connect-card-label">Connect to Network</span>
+      <button class="icon-btn icon-btn-ghost" onclick="closeConnectCard()" aria-label="Close">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="form-grid">
+      <div class="form-field">
+        <label class="field-label" for="connect-ssid">SSID</label>
+        <input class="field-input" type="text" id="connect-ssid" placeholder="Network name" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="form-field">
+        <label class="field-label" for="connect-pass">Password</label>
+        <input class="field-input" type="password" id="connect-pass" placeholder="Leave blank if open" autocomplete="off">
+      </div>
+    </div>
+    <div class="btn-row" style="margin-top:16px">
+      <button class="action-btn btn-primary" id="connect-submit-btn" onclick="submitConnect()">
+        <span class="btn-text">Connect</span>
+        <span class="btn-spinner" hidden></span>
+      </button>
+      <div class="connect-result" id="connect-result"></div>
+    </div>
+  </div>
+
+</div><!-- /tab-wifi -->
+
+<!-- ══════════════════════════ Services Tab ══════════════════════════ -->
+<div id="tab-services" class="tab-pane" role="tabpanel" aria-labelledby="tab-services">
+  <div id="services-list" class="services-grid"></div>
 </div>
 
-<!-- ═══════════ WiFi Tab ═══════════ -->
-<div id="tab-wifi" class="tab-content active">
-    <div class="card">
-        <h3>Connection Status</h3>
-        <div id="wifi-status">Loading...</div>
+<!-- ══════════════════════════ SDR Tab ══════════════════════════ -->
+<div id="tab-sdr" class="tab-pane" role="tabpanel" aria-labelledby="tab-sdr">
+
+  <!-- Frequency -->
+  <div class="glass-card">
+    <div class="card-header"><span class="card-label">Tuning</span></div>
+
+    <div class="freq-display">
+      <input class="freq-input" type="number" id="sdr-freq-raw" step="1000" min="0" max="2200000000"
+             aria-label="Center frequency" autocomplete="off">
+      <div class="freq-units">
+        <button class="unit-btn active" data-unit="MHz" onclick="setFreqUnit('MHz')">MHz</button>
+        <button class="unit-btn" data-unit="kHz" onclick="setFreqUnit('kHz')">kHz</button>
+      </div>
     </div>
 
-    <div class="card">
-        <h3>Available Networks <button class="btn btn-sm btn-primary" id="wifi-scan-btn" onclick="scanWifi()">Scan</button></h3>
-        <div id="wifi-list" class="wifi-list"></div>
+    <div class="form-grid" style="margin-top:20px">
+      <div class="form-field">
+        <label class="field-label" for="sdr-sample_rate">Sample Rate</label>
+        <select class="field-select" id="sdr-sample_rate">
+          <option value="250000">250 kSPS</option>
+          <option value="1024000">1.024 MSPS</option>
+          <option value="1800000">1.8 MSPS</option>
+          <option value="2048000">2.048 MSPS</option>
+          <option value="2400000">2.4 MSPS</option>
+          <option value="3200000">3.2 MSPS</option>
+        </select>
+      </div>
+      <div class="form-field">
+        <label class="field-label" for="sdr-hostname">Hostname</label>
+        <input class="field-input" type="text" id="sdr-hostname" maxlength="32" autocomplete="off" spellcheck="false">
+      </div>
+    </div>
+  </div>
+
+  <!-- Gain -->
+  <div class="glass-card">
+    <div class="card-header">
+      <span class="card-label">Gain Control</span>
+      <div class="toggle-pill-wrap">
+        <span class="toggle-pill-label" id="gain-mode-label">Auto</span>
+        <label class="toggle-pill" for="sdr-gain-auto" aria-label="Auto gain">
+          <input type="checkbox" id="sdr-gain-auto" onchange="toggleGainMode()">
+          <span class="toggle-pill-track"></span>
+        </label>
+      </div>
     </div>
 
-    <div class="card">
-        <h3>Saved Networks</h3>
-        <div id="saved-networks"></div>
+    <div class="gain-slider-wrap" id="gain-manual-wrap">
+      <div class="slider-header">
+        <span class="field-label">Tuner Gain</span>
+        <span class="slider-val mono" id="sdr-gain-display">—</span>
+      </div>
+      <input class="range-slider" type="range" id="sdr-tuner_gain_tenth_db"
+             min="0" max="496" step="1" oninput="updateGainDisplay(this.value)">
     </div>
 
-    <div class="card">
-        <h3>Test Connection</h3>
-        <div class="field-row">
-            <div class="field"><label>SSID</label><input id="test-ssid" placeholder="Network name"></div>
-            <div class="field"><label>Password</label><input id="test-pass" type="password" placeholder="Password"></div>
+    <div class="form-grid" style="margin-top:16px">
+      <div class="form-field toggle-field">
+        <label class="field-label" for="sdr-rtl_agc">RTL AGC</label>
+        <label class="toggle" for="sdr-rtl_agc" aria-label="RTL AGC">
+          <input type="checkbox" id="sdr-rtl_agc">
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+      <div class="form-field toggle-field">
+        <label class="field-label" for="sdr-tuner_agc">Tuner AGC</label>
+        <label class="toggle" for="sdr-tuner_agc" aria-label="Tuner AGC">
+          <input type="checkbox" id="sdr-tuner_agc">
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- Advanced (collapsible) -->
+  <details class="glass-card collapsible-card">
+    <summary class="collapsible-header">
+      <span class="card-label">Advanced</span>
+      <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+    </summary>
+    <div class="collapsible-body">
+      <div class="form-grid">
+        <div class="form-field">
+          <label class="field-label" for="sdr-ppm_correction">PPM Correction</label>
+          <input class="field-input mono" type="number" id="sdr-ppm_correction" min="-200" max="200">
         </div>
-        <button class="btn btn-primary" onclick="testConnect()">Connect</button>
+        <div class="form-field">
+          <label class="field-label" for="sdr-direct_sampling">Direct Sampling</label>
+          <select class="field-select" id="sdr-direct_sampling">
+            <option value="off">Off</option>
+            <option value="I-ADC">I-ADC</option>
+            <option value="Q-ADC">Q-ADC</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label class="field-label" for="sdr-offset_freq_hz">Offset Frequency (Hz)</label>
+          <input class="field-input mono" type="number" id="sdr-offset_freq_hz">
+        </div>
+        <div class="form-field">
+          <label class="field-label" for="sdr-max_total_users">Max Total Users</label>
+          <input class="field-input mono" type="number" id="sdr-max_total_users" min="1" max="10">
+        </div>
+      </div>
+      <div class="toggle-grid" style="margin-top:12px">
+        <div class="form-field toggle-field">
+          <label class="field-label" for="sdr-offset_tuning">Offset Tuning</label>
+          <label class="toggle" for="sdr-offset_tuning"><input type="checkbox" id="sdr-offset_tuning"><span class="toggle-track"></span></label>
+        </div>
+        <div class="form-field toggle-field">
+          <label class="field-label" for="sdr-dc_offset_correction">DC Offset Correction</label>
+          <label class="toggle" for="sdr-dc_offset_correction"><input type="checkbox" id="sdr-dc_offset_correction"><span class="toggle-track"></span></label>
+        </div>
+        <div class="form-field toggle-field">
+          <label class="field-label" for="sdr-iq_imbalance_correction">IQ Imbalance Correction</label>
+          <label class="toggle" for="sdr-iq_imbalance_correction"><input type="checkbox" id="sdr-iq_imbalance_correction"><span class="toggle-track"></span></label>
+        </div>
+        <div class="form-field toggle-field">
+          <label class="field-label" for="sdr-invert_iq">Invert IQ</label>
+          <label class="toggle" for="sdr-invert_iq"><input type="checkbox" id="sdr-invert_iq"><span class="toggle-track"></span></label>
+        </div>
+        <div class="form-field toggle-field">
+          <label class="field-label" for="sdr-bias_tee">Bias-T (+5V)</label>
+          <label class="toggle" for="sdr-bias_tee"><input type="checkbox" id="sdr-bias_tee"><span class="toggle-track"></span></label>
+        </div>
+      </div>
     </div>
+  </details>
+
+  <div class="save-row">
+    <button class="action-btn btn-primary" id="sdr-save-btn" onclick="saveSdrConfig()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+      Save SDR Config
+    </button>
+  </div>
+
+</div><!-- /tab-sdr -->
+
+<!-- ══════════════════════════ Ethernet Tab ══════════════════════════ -->
+<div id="tab-ethernet" class="tab-pane" role="tabpanel" aria-labelledby="tab-ethernet">
+  <div class="glass-card">
+    <div class="card-header">
+      <span class="card-label">Ethernet Configuration</span>
+      <div class="toggle-pill-wrap">
+        <span class="toggle-pill-label">Enable</span>
+        <label class="toggle-pill" for="eth-enable" aria-label="Enable Ethernet">
+          <input type="checkbox" id="eth-enable">
+          <span class="toggle-pill-track"></span>
+        </label>
+      </div>
+    </div>
+
+    <div class="form-grid">
+      <div class="form-field">
+        <label class="field-label" for="eth-phy_type">PHY Type</label>
+        <select class="field-select" id="eth-phy_type">
+          <option value="IP101">IP101</option>
+          <option value="LAN8720">LAN8720</option>
+          <option value="RTL8201">RTL8201</option>
+        </select>
+      </div>
+      <div class="form-field">
+        <label class="field-label" for="eth-phy_addr">PHY Address</label>
+        <input class="field-input mono" type="number" id="eth-phy_addr" value="-1" min="-1" max="31">
+      </div>
+      <div class="form-field">
+        <label class="field-label" for="eth-mdc_gpio">MDC GPIO</label>
+        <input class="field-input mono" type="number" id="eth-mdc_gpio" value="31">
+      </div>
+      <div class="form-field">
+        <label class="field-label" for="eth-mdio_gpio">MDIO GPIO</label>
+        <input class="field-input mono" type="number" id="eth-mdio_gpio" value="27">
+      </div>
+    </div>
+
+    <div class="form-field toggle-field" style="margin-top:8px">
+      <label class="field-label" for="eth-prefer_over_wifi">Prefer Ethernet over WiFi</label>
+      <label class="toggle" for="eth-prefer_over_wifi"><input type="checkbox" id="eth-prefer_over_wifi"><span class="toggle-track"></span></label>
+    </div>
+  </div>
+
+  <!-- IP Config -->
+  <div class="glass-card">
+    <div class="card-header">
+      <span class="card-label">IP Configuration</span>
+      <div class="toggle-pill-wrap">
+        <span class="toggle-pill-label" id="dhcp-mode-label">DHCP</span>
+        <label class="toggle-pill" for="eth-dhcp" aria-label="DHCP mode">
+          <input type="checkbox" id="eth-dhcp" onchange="toggleDhcp()">
+          <span class="toggle-pill-track"></span>
+        </label>
+      </div>
+    </div>
+
+    <div id="eth-static-fields" class="form-grid">
+      <div class="form-field">
+        <label class="field-label" for="eth-static_ip">Static IP</label>
+        <input class="field-input mono" type="text" id="eth-static_ip" placeholder="192.168.1.100">
+      </div>
+      <div class="form-field">
+        <label class="field-label" for="eth-static_mask">Subnet Mask</label>
+        <input class="field-input mono" type="text" id="eth-static_mask" placeholder="255.255.255.0">
+      </div>
+      <div class="form-field">
+        <label class="field-label" for="eth-static_gw">Gateway</label>
+        <input class="field-input mono" type="text" id="eth-static_gw" placeholder="192.168.1.1">
+      </div>
+      <div class="form-field">
+        <label class="field-label" for="eth-static_dns">DNS Server</label>
+        <input class="field-input mono" type="text" id="eth-static_dns" placeholder="8.8.8.8">
+      </div>
+    </div>
+  </div>
+
+  <div class="save-row">
+    <button class="action-btn btn-primary" onclick="saveEthConfig()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+      Save Ethernet Config
+    </button>
+  </div>
 </div>
 
-<!-- ═══════════ Ethernet Tab ═══════════ -->
-<div id="tab-ethernet" class="tab-content">
-    <div class="card">
-        <h3>Ethernet Configuration</h3>
-        <div class="field">
-            <label><input type="checkbox" id="eth-enable"> Enable Ethernet</label>
-        </div>
-        <div class="field">
-            <label><input type="checkbox" id="eth-dhcp" onchange="toggleDhcp()"> DHCP</label>
-        </div>
-        <div class="eth-static">
-            <div class="field-row">
-                <div class="field"><label>Static IP</label><input id="eth-static_ip"></div>
-                <div class="field"><label>Subnet Mask</label><input id="eth-static_mask"></div>
-            </div>
-            <div class="field-row">
-                <div class="field"><label>Gateway</label><input id="eth-static_gw"></div>
-                <div class="field"><label>DNS</label><input id="eth-static_dns"></div>
-            </div>
-        </div>
-        <div class="field-row">
-            <div class="field"><label>PHY Type</label>
-                <select id="eth-phy_type"><option>IP101</option><option>LAN8720</option><option>RTL8201</option></select>
-            </div>
-            <div class="field"><label>PHY Address</label><input type="number" id="eth-phy_addr" value="-1" min="-1" max="31"></div>
-        </div>
-        <div class="field-row">
-            <div class="field"><label>MDC GPIO</label><input type="number" id="eth-mdc_gpio" value="31"></div>
-            <div class="field"><label>MDIO GPIO</label><input type="number" id="eth-mdio_gpio" value="27"></div>
-        </div>
-        <div class="field">
-            <label><input type="checkbox" id="eth-prefer_over_wifi"> Prefer Ethernet over WiFi</label>
-        </div>
-        <button class="btn btn-primary" onclick="saveEthConfig()">Save Ethernet Config</button>
+<!-- ══════════════════════════ Notifications Tab ══════════════════════════ -->
+<div id="tab-notify" class="tab-pane" role="tabpanel" aria-labelledby="tab-notify">
+
+  <!-- Telegram -->
+  <div class="glass-card">
+    <div class="card-header">
+      <span class="card-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="color:#29b6f6;margin-right:6px;vertical-align:-3px" aria-hidden="true"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8l-1.7 8.02c-.12.58-.48.72-.97.45l-2.68-1.98-1.29 1.25c-.14.14-.27.27-.56.27l.2-2.79 5.1-4.61c.22-.2-.05-.3-.34-.1l-6.3 3.97-2.72-.85c-.59-.18-.6-.59.12-.87l10.62-4.09c.49-.18.93.12.77.83h-.25z"/></svg>
+        Telegram
+      </span>
+      <div class="toggle-pill-wrap">
+        <label class="toggle-pill" for="tg-enable" aria-label="Enable Telegram">
+          <input type="checkbox" id="tg-enable">
+          <span class="toggle-pill-track"></span>
+        </label>
+      </div>
     </div>
+    <div class="form-grid">
+      <div class="form-field" style="grid-column:1/-1">
+        <label class="field-label" for="tg-bot-token">Bot Token</label>
+        <input class="field-input mono" type="text" id="tg-bot-token" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" autocomplete="off">
+      </div>
+      <div class="form-field">
+        <label class="field-label" for="tg-chat-id">Chat ID</label>
+        <input class="field-input mono" type="text" id="tg-chat-id" placeholder="-1001234567890" autocomplete="off">
+      </div>
+      <div class="form-field">
+        <label class="field-label" for="tg-rate-limit">Rate Limit</label>
+        <div class="slider-header">
+          <input class="range-slider" type="range" id="tg-rate-limit" min="10" max="3600" step="10" oninput="updateRateLabel('tg-rate-limit','tg-rate-val')">
+          <span class="slider-val mono" id="tg-rate-val">60s</span>
+        </div>
+      </div>
+    </div>
+    <div class="btn-row" style="margin-top:16px">
+      <button class="action-btn btn-secondary" id="tg-test-btn" onclick="testNotify('telegram')">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        <span class="btn-text">Send Test</span>
+        <span class="btn-spinner" hidden></span>
+      </button>
+      <span class="test-result" id="tg-test-result"></span>
+    </div>
+  </div>
+
+  <!-- Discord -->
+  <div class="glass-card">
+    <div class="card-header">
+      <span class="card-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="color:#7289da;margin-right:6px;vertical-align:-3px" aria-hidden="true"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057.1 18.079.111 18.1.13 18.114a19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z"/></svg>
+        Discord
+      </span>
+      <div class="toggle-pill-wrap">
+        <label class="toggle-pill" for="dc-enable" aria-label="Enable Discord">
+          <input type="checkbox" id="dc-enable">
+          <span class="toggle-pill-track"></span>
+        </label>
+      </div>
+    </div>
+    <div class="form-grid">
+      <div class="form-field" style="grid-column:1/-1">
+        <label class="field-label" for="dc-webhook">Webhook URL</label>
+        <input class="field-input mono" type="text" id="dc-webhook" placeholder="https://discord.com/api/webhooks/..." autocomplete="off">
+      </div>
+      <div class="form-field">
+        <label class="field-label" for="dc-rate-limit">Rate Limit</label>
+        <div class="slider-header">
+          <input class="range-slider" type="range" id="dc-rate-limit" min="10" max="3600" step="10" oninput="updateRateLabel('dc-rate-limit','dc-rate-val')">
+          <span class="slider-val mono" id="dc-rate-val">60s</span>
+        </div>
+      </div>
+    </div>
+    <div class="btn-row" style="margin-top:16px">
+      <button class="action-btn btn-secondary" id="dc-test-btn" onclick="testNotify('discord')">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        <span class="btn-text">Send Test</span>
+        <span class="btn-spinner" hidden></span>
+      </button>
+      <span class="test-result" id="dc-test-result"></span>
+    </div>
+  </div>
+
+  <div class="save-row">
+    <button class="action-btn btn-primary" onclick="saveNotifyConfig()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+      Save Notification Config
+    </button>
+  </div>
 </div>
 
-<!-- ═══════════ SDR Tab ═══════════ -->
-<div id="tab-sdr" class="tab-content">
-    <div class="card">
-        <h3>Tuning</h3>
-        <div class="field-row">
-            <div class="field"><label>Center Frequency (Hz)</label><input type="number" id="sdr-center_freq" step="1000"></div>
-            <div class="field"><label>Sample Rate (Hz)</label>
-                <select id="sdr-sample_rate">
-                    <option value="250000">250 kSPS</option>
-                    <option value="1024000">1024 kSPS</option>
-                    <option value="1800000">1800 kSPS</option>
-                    <option value="2048000">2048 kSPS</option>
-                    <option value="2400000">2400 kSPS</option>
-                    <option value="3200000">3200 kSPS</option>
-                </select>
-            </div>
-        </div>
-        <div class="field-row">
-            <div class="field"><label>PPM Correction</label><input type="number" id="sdr-ppm_correction" min="-200" max="200"></div>
-            <div class="field"><label>Hostname</label><input id="sdr-hostname" maxlength="32"></div>
-        </div>
-    </div>
+<!-- ══════════════════════════ System Tab ══════════════════════════ -->
+<div id="tab-system" class="tab-pane" role="tabpanel" aria-labelledby="tab-system">
 
-    <div class="card">
-        <h3>Gain Control</h3>
-        <div class="field-row">
-            <div class="field"><label>Gain Mode</label>
-                <select id="sdr-gain_mode"><option>auto</option><option>manual</option></select>
-            </div>
-            <div class="field"><label>Tuner Gain (0.1 dB)</label><input type="number" id="sdr-tuner_gain_tenth_db" min="0" max="496"></div>
-        </div>
-        <div class="field">
-            <label><input type="checkbox" id="sdr-rtl_agc"> RTL AGC</label>
-        </div>
-        <div class="field">
-            <label><input type="checkbox" id="sdr-tuner_agc"> Tuner AGC</label>
-        </div>
+  <!-- Device Info -->
+  <div class="glass-card">
+    <div class="card-header"><span class="card-label">Device Info</span></div>
+    <div class="info-grid">
+      <div class="info-cell">
+        <span class="info-lbl">Hostname</span>
+        <span class="info-val mono" id="sys-hostname">—</span>
+      </div>
+      <div class="info-cell">
+        <span class="info-lbl">Firmware</span>
+        <span class="info-val mono" id="sys-version">—</span>
+      </div>
+      <div class="info-cell">
+        <span class="info-lbl">CPU Cores</span>
+        <span class="info-val mono" id="sys-cores">—</span>
+      </div>
+      <div class="info-cell">
+        <span class="info-lbl">Uptime</span>
+        <span class="info-val mono" id="sys-uptime">—</span>
+      </div>
     </div>
+  </div>
 
-    <div class="card">
-        <h3>Sampling Mode</h3>
-        <div class="field-row">
-            <div class="field"><label>Direct Sampling</label>
-                <select id="sdr-direct_sampling"><option>off</option><option>I-ADC</option><option>Q-ADC</option></select>
-            </div>
-            <div class="field"><label>Offset Frequency (Hz)</label><input type="number" id="sdr-offset_freq_hz"></div>
-        </div>
-        <div class="field">
-            <label><input type="checkbox" id="sdr-offset_tuning"> Offset Tuning</label>
-        </div>
+  <!-- Memory -->
+  <div class="glass-card">
+    <div class="card-header"><span class="card-label">Memory Usage</span></div>
+    <div class="mem-section">
+      <div class="mem-header">
+        <span class="mem-label">Heap</span>
+        <span class="mem-stat mono" id="sys-heap-text">—</span>
+      </div>
+      <div class="mem-track">
+        <div class="mem-fill heap-fill" id="sys-heap-bar" style="width:0%"></div>
+        <span class="mem-pct" id="sys-heap-pct">0%</span>
+      </div>
     </div>
-
-    <div class="card">
-        <h3>IQ & Hardware</h3>
-        <div class="field">
-            <label><input type="checkbox" id="sdr-dc_offset_correction"> DC Offset Correction</label>
-        </div>
-        <div class="field">
-            <label><input type="checkbox" id="sdr-iq_imbalance_correction"> IQ Imbalance Correction</label>
-        </div>
-        <div class="field">
-            <label><input type="checkbox" id="sdr-invert_iq"> Invert IQ</label>
-        </div>
-        <div class="field">
-            <label><input type="checkbox" id="sdr-bias_tee"> Bias-T (+5V)</label>
-        </div>
-        <div class="field"><label>Max Total Users</label><input type="number" id="sdr-max_total_users" min="1" max="10"></div>
+    <div class="mem-section" style="margin-top:20px">
+      <div class="mem-header">
+        <span class="mem-label">PSRAM</span>
+        <span class="mem-stat mono" id="sys-psram-text">—</span>
+      </div>
+      <div class="mem-track">
+        <div class="mem-fill psram-fill" id="sys-psram-bar" style="width:0%"></div>
+        <span class="mem-pct" id="sys-psram-pct">0%</span>
+      </div>
     </div>
+  </div>
 
-    <button class="btn btn-primary" onclick="saveSdrConfig()">Save SDR Config</button>
+  <!-- Actions -->
+  <div class="glass-card">
+    <div class="card-header"><span class="card-label">Actions</span></div>
+    <div class="action-grid">
+
+      <button class="action-btn btn-action-card" onclick="backupConfig()">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        <span class="action-card-label">Backup</span>
+        <span class="action-card-sub">Download config JSON</span>
+      </button>
+
+      <button class="action-btn btn-action-card" onclick="restoreConfig()">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <span class="action-card-label">Restore</span>
+        <span class="action-card-sub">Upload config JSON</span>
+      </button>
+
+      <button class="action-btn btn-action-card btn-warn-card" onclick="rebootDevice()">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
+        <span class="action-card-label">Reboot</span>
+        <span class="action-card-sub">Restart device</span>
+      </button>
+
+      <button class="action-btn btn-action-card btn-danger-card" onclick="factoryReset()">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.07"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <span class="action-card-label">Factory Reset</span>
+        <span class="action-card-sub">Erase all config</span>
+      </button>
+
+    </div>
+  </div>
 </div>
 
-<!-- ═══════════ Services Tab ═══════════ -->
-<div id="tab-services" class="tab-content">
-    <div id="services-list"></div>
+<!-- ══════════════════════════ Chatbot Tab (Phase 2 stub) ══════════════════════════ -->
+<div id="tab-chatbot" class="tab-pane" role="tabpanel" aria-labelledby="tab-chatbot">
+  <div class="glass-card coming-soon-card">
+    <div class="coming-soon-header">
+      <div class="coming-soon-badge">Phase 2</div>
+      <span class="card-label">LLM Chatbot Interface</span>
+    </div>
+    <p class="coming-soon-desc">
+      Natural language interface to query and control SDR services via cloud LLM APIs.
+      Configure once available after Phase 2 implementation.
+    </p>
+    <div class="form-grid" style="opacity:0.35;pointer-events:none;filter:blur(0.5px)">
+      <div class="form-field">
+        <label class="field-label">Provider</label>
+        <select class="field-select" disabled>
+          <option>gemini</option><option>openai</option><option>claude</option>
+        </select>
+      </div>
+      <div class="form-field">
+        <label class="field-label">Model</label>
+        <input class="field-input" type="text" value="gemini-2.0-flash-lite" disabled>
+      </div>
+      <div class="form-field" style="grid-column:1/-1">
+        <label class="field-label">API Key</label>
+        <input class="field-input" type="password" placeholder="Enter API key" disabled>
+      </div>
+      <div class="form-field">
+        <label class="field-label">Allowed Tools</label>
+        <select class="field-select" disabled>
+          <option>Query only (read-only)</option>
+          <option>Query + Control</option>
+        </select>
+      </div>
+      <div class="form-field toggle-field">
+        <label class="field-label">Enable Chatbot</label>
+        <label class="toggle"><input type="checkbox" disabled><span class="toggle-track"></span></label>
+      </div>
+    </div>
+  </div>
 </div>
 
-<!-- ═══════════ Notifications Tab ═══════════ -->
-<div id="tab-notify" class="tab-content">
-    <div class="card">
-        <h3>Telegram</h3>
-        <div class="field">
-            <label><input type="checkbox" id="tg-enable"> Enable Telegram</label>
-        </div>
-        <div class="field"><label>Bot Token</label><input id="tg-bot-token" placeholder="123456:ABC-DEF..."></div>
-        <div class="field-row">
-            <div class="field"><label>Chat ID</label><input id="tg-chat-id" placeholder="-1001234567890"></div>
-            <div class="field"><label>Rate Limit (s)</label><input type="number" id="tg-rate-limit" value="60"></div>
-        </div>
-        <div class="btn-group">
-            <button class="btn btn-primary btn-sm" onclick="testNotify('telegram')">Test</button>
-        </div>
+</main><!-- /main-content -->
+
+<!-- Password modal -->
+<div class="modal-backdrop" id="pw-modal" aria-modal="true" role="dialog" aria-label="Enter password">
+  <div class="modal-box">
+    <div class="modal-header">
+      <span class="modal-title" id="pw-modal-title">Connect to Network</span>
+      <button class="icon-btn icon-btn-ghost" onclick="closeModal('pw-modal')" aria-label="Close">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
     </div>
-    <div class="card">
-        <h3>Discord</h3>
-        <div class="field">
-            <label><input type="checkbox" id="dc-enable"> Enable Discord</label>
-        </div>
-        <div class="field"><label>Webhook URL</label><input id="dc-webhook" placeholder="https://discord.com/api/webhooks/..."></div>
-        <div class="field"><label>Rate Limit (s)</label><input type="number" id="dc-rate-limit" value="60"></div>
-        <div class="btn-group">
-            <button class="btn btn-primary btn-sm" onclick="testNotify('discord')">Test</button>
-        </div>
+    <div class="form-field" style="margin:16px 0 0">
+      <label class="field-label" for="modal-password">Password</label>
+      <input class="field-input" type="password" id="modal-password" placeholder="Leave blank if open" autocomplete="off"
+             onkeydown="if(event.key==='Enter')confirmModal()">
     </div>
-    <button class="btn btn-primary" onclick="saveNotifyConfig()">Save Notification Config</button>
+    <div class="btn-row" style="margin-top:16px">
+      <button class="action-btn btn-primary" id="modal-confirm-btn" onclick="confirmModal()">
+        <span class="btn-text">Connect</span>
+        <span class="btn-spinner" hidden></span>
+      </button>
+      <button class="action-btn btn-ghost" onclick="closeModal('pw-modal')">Cancel</button>
+    </div>
+  </div>
 </div>
 
-<!-- ═══════════ Chatbot Tab ═══════════ -->
-<div id="tab-chatbot" class="tab-content">
-    <div class="card">
-        <h3>LLM Chatbot (Phase 2)</h3>
-        <p style="color:var(--text2);margin-bottom:12px">
-            Natural language interface to query and control SDR services via cloud LLM APIs.
-            Configuration will be available after Phase 2 implementation.
-        </p>
-        <div class="field">
-            <label><input type="checkbox" id="chat-enable" disabled> Enable Chatbot</label>
-        </div>
-        <div class="field"><label>Provider</label>
-            <select id="chat-provider" disabled>
-                <option>gemini</option><option>openai</option><option>claude</option>
-            </select>
-        </div>
-        <div class="field"><label>API Key</label><input id="chat-api-key" type="password" disabled placeholder="Enter API key"></div>
-        <div class="field"><label>Model</label><input id="chat-model" value="gemini-2.0-flash-lite" disabled></div>
-        <div class="field"><label>Allowed Tools</label>
-            <select id="chat-tools" disabled>
-                <option value="query">Query only (read-only)</option>
-                <option value="query,control">Query + Control</option>
-            </select>
-        </div>
-    </div>
-</div>
+<!-- Toast container -->
+<div class="toast-container" id="toast-container" aria-live="polite" aria-atomic="false"></div>
 
-<!-- ═══════════ System Tab ═══════════ -->
-<div id="tab-system" class="tab-content">
-    <div class="card">
-        <h3>Device Info</h3>
-        <table style="width:100%;font-size:13px">
-            <tr><td style="color:var(--text2)">Hostname</td><td id="sys-hostname">—</td></tr>
-            <tr><td style="color:var(--text2)">Firmware</td><td id="sys-version">—</td></tr>
-            <tr><td style="color:var(--text2)">Cores</td><td id="sys-cores">—</td></tr>
-            <tr><td style="color:var(--text2)">Uptime</td><td id="sys-uptime">—</td></tr>
-        </table>
-    </div>
+<input type="file" id="restore-file-input" accept=".json" style="display:none">
 
-    <div class="card">
-        <h3>Memory</h3>
-        <div style="font-size:12px;color:var(--text2)">Heap</div>
-        <div class="stat-bar"><div class="fill heap" id="sys-heap-bar" style="width:0"></div></div>
-        <div id="sys-heap-text" style="font-size:12px;color:var(--text2);margin-bottom:8px">—</div>
-
-        <div style="font-size:12px;color:var(--text2)">PSRAM</div>
-        <div class="stat-bar"><div class="fill psram" id="sys-psram-bar" style="width:0"></div></div>
-        <div id="sys-psram-text" style="font-size:12px;color:var(--text2)">—</div>
-    </div>
-
-    <div class="card">
-        <h3>Actions</h3>
-        <div class="btn-group" style="flex-wrap:wrap">
-            <button class="btn btn-primary" onclick="backupConfig()">Backup Config</button>
-            <button class="btn btn-ok" onclick="restoreConfig()">Restore Config</button>
-            <button class="btn btn-warn" onclick="rebootDevice()">Reboot</button>
-            <button class="btn btn-danger" onclick="factoryReset()">Factory Reset</button>
-        </div>
-    </div>
-</div>
-
-<div id="toast" class="toast"></div>
 <script src="/portal.js"></script>
 </body>
 </html>
