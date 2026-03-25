@@ -284,7 +284,9 @@ static void process_commands(spyserver_client_t *client)
                 if (cmd_hdr.body_size >= 4) {
                     memcpy(&client_proto, body, 4);
                 }
-                ESP_LOGI(TAG, "client %d HELLO proto=0x%04"PRIx32, client->sock, client_proto);
+                ESP_LOGI(TAG, "client %d HELLO proto=0x%08"PRIx32, client->sock, client_proto);
+                /* Must send DeviceInfo first, then ClientSync — SDR++ blocks on DeviceInfo */
+                send_device_info(client);
                 send_client_sync(client);
                 break;
             }
