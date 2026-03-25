@@ -119,18 +119,25 @@ static int send_message(spyserver_client_t *client,
  * ---------------------------------------------------------------------- */
 static void send_device_info(spyserver_client_t *client)
 {
+    /* Report actual device sample rate (not max theoretical).
+     * DecimationStageCount=0 tells SDR++ we do NO server-side decimation.
+     * MinimumIQDecimation=0 means SDR++ uses the rate as-is.
+     * This prevents SDR++ from expecting decimated rates we can't provide. */
+    rtlsdr_dev_t *dev = (rtlsdr_dev_t *)client->server->config.rtlsdr_dev;
+    uint32_t actual_rate = dev ? rtlsdr_get_sample_rate(dev) : RTL_MAX_SAMPLE_RATE;
+
     spyserver_device_info_t info = {
         .device_type          = DEVICE_RTLSDR,
         .device_serial        = client->server->device_serial,
-        .max_sample_rate      = RTL_MAX_SAMPLE_RATE,
-        .max_bandwidth        = RTL_MAX_BANDWIDTH,
-        .decimation_stage_count = RTL_DECIMATION_STAGES,
+        .max_sample_rate      = actual_rate,
+        .max_bandwidth        = actual_rate,
+        .decimation_stage_count = 0,    /* no server-side decimation */
         .gain_stage_count     = RTL_GAIN_STAGES,
         .max_gain_index       = RTL_MAX_GAIN_INDEX,
         .min_frequency        = RTL_MIN_FREQ_HZ,
         .max_frequency        = RTL_MAX_FREQ_HZ,
         .resolution           = RTL_RESOLUTION,
-        .min_iq_decimation    = 1,
+        .min_iq_decimation    = 0,
         .forced_iq_format     = STREAM_FORMAT_UINT8,
     };
     send_message(client, MSG_TYPE_DEVICE_INFO, STREAM_TYPE_STATUS,
