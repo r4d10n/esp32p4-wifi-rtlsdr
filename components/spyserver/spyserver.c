@@ -186,12 +186,21 @@ static void handle_set_setting(spyserver_client_t *client,
             break;
         case SETTING_GAIN:
             client->gain = value;
-            ESP_LOGI(TAG, "client %d gain=%"PRIu32, client->sock, value);
             {
                 rtlsdr_dev_t *dev = (rtlsdr_dev_t *)client->server->config.rtlsdr_dev;
                 if (dev) {
+                    /* value is a gain INDEX (0..MaxGainIndex), not tenths of dB.
+                     * Look up actual gain from the tuner's gain table. */
+                    int count = 0;
+                    const int *gains = rtlsdr_get_tuner_gains(dev, &count);
+                    int gain_tenth_db = 0;
+                    if (gains && (int)value < count) {
+                        gain_tenth_db = gains[value];
+                    }
                     rtlsdr_set_tuner_gain_mode(dev, 1);
-                    rtlsdr_set_tuner_gain(dev, (int)value);
+                    rtlsdr_set_tuner_gain(dev, gain_tenth_db);
+                    ESP_LOGI(TAG, "client %d gain idx=%"PRIu32" -> %d.%d dB",
+                             client->sock, value, gain_tenth_db/10, gain_tenth_db%10);
                 }
             }
             break;
