@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 
-#define SPYSERVER_PROTOCOL_VERSION    0x0302
+#define SPYSERVER_PROTOCOL_VERSION    (((2) << 24) | ((0) << 16) | (1700))
 #define SPYSERVER_MAX_MESSAGE_BODY    (1024 * 1024)
 #define SPYSERVER_MAX_COMMAND_BODY    256
 #define SPYSERVER_INITIAL_FFT_BW      655360
@@ -43,14 +43,12 @@ typedef enum {
     CMD_PING = 3,
 } spyserver_cmd_type_t;
 
-/* Setting types for CMD_SET_SETTING */
+/* Setting types for CMD_SET_SETTING
+ * Reference: https://github.com/miweber67/spyserver_client/blob/master/spyserver_protocol.h */
 typedef enum {
     SETTING_STREAMING_MODE = 0,
     SETTING_STREAMING_ENABLED = 1,
-    SETTING_IQ_SAMPLE_RATE = 2,
-    SETTING_FFT_SAMPLE_RATE = 3,
-    SETTING_IQ_DECIMATION_STAGE_COUNT = 4,
-    SETTING_GAIN = 5,
+    SETTING_GAIN = 2,             /* NOTE: 2, not 5! Matches reference protocol */
     SETTING_IQ_FORMAT = 100,
     SETTING_IQ_FREQUENCY = 101,
     SETTING_IQ_DECIMATION = 102,

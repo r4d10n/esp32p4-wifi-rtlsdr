@@ -207,14 +207,6 @@ static void handle_set_setting(spyserver_client_t *client,
                 if (dev) rtlsdr_set_center_freq(dev, value);
             }
             break;
-        case SETTING_IQ_SAMPLE_RATE:
-        case SETTING_FFT_SAMPLE_RATE:
-            /* Value is decimation stage index, not Hz.
-             * actual_rate = base_rate / 2^value. Store for client sync only. */
-            client->decimation = value;
-            ESP_LOGI(TAG, "client %d decimation=%"PRIu32, client->sock, value);
-            break;
-        case SETTING_IQ_DECIMATION_STAGE_COUNT:
         case SETTING_IQ_DECIMATION:
             /* decimation acknowledged but not applied at hardware layer */
             break;
