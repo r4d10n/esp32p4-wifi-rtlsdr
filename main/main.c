@@ -485,9 +485,11 @@ void app_main(void)
     extern void test_dsp_kernels(void);
     extern void test_fm_demod(void);
     extern void test_fm_stereo_rds(void);
+    extern void test_pipeline_e2e(void);
     test_dsp_kernels();
     test_fm_demod();
     test_fm_stereo_rds();
+    test_pipeline_e2e();
 #endif
 
 #ifdef CONFIG_FM_OLED_ENABLE
