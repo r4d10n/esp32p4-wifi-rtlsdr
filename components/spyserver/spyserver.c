@@ -54,6 +54,7 @@ typedef struct {
     uint32_t             fft_display_pixels;
     uint32_t             fft_db_offset;
     uint32_t             fft_db_range;
+    uint32_t             decimation;
     uint32_t             seq_iq;
     uint32_t             seq_fft;
     RingbufHandle_t      iq_ringbuf;
@@ -208,11 +209,10 @@ static void handle_set_setting(spyserver_client_t *client,
             break;
         case SETTING_IQ_SAMPLE_RATE:
         case SETTING_FFT_SAMPLE_RATE:
-            ESP_LOGI(TAG, "client %d sample_rate=%"PRIu32, client->sock, value);
-            {
-                rtlsdr_dev_t *dev = (rtlsdr_dev_t *)client->server->config.rtlsdr_dev;
-                if (dev && value >= 225001 && value <= 3200000) rtlsdr_set_sample_rate(dev, value);
-            }
+            /* Value is decimation stage index, not Hz.
+             * actual_rate = base_rate / 2^value. Store for client sync only. */
+            client->decimation = value;
+            ESP_LOGI(TAG, "client %d decimation=%"PRIu32, client->sock, value);
             break;
         case SETTING_IQ_DECIMATION_STAGE_COUNT:
         case SETTING_IQ_DECIMATION:
