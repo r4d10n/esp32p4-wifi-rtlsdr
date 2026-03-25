@@ -117,7 +117,7 @@ esp_err_t wifimgr_portal_start(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = CONFIG_WIFIMGR_PORTAL_PORT;
-    config.max_uri_handlers = 32;       /* room for captive + static + API */
+    config.max_uri_handlers = 48;       /* 7 portal + 35 API + 4 decode + CORS */
     config.max_open_sockets = 7;
     config.lru_purge_enable = true;
     config.stack_size = 8192;
