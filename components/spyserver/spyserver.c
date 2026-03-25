@@ -10,6 +10,7 @@
 #include "esp_err.h"
 #include "spyserver.h"
 #include "spyserver_protocol.h"
+#include "rtlsdr.h"
 
 static const char *TAG = "spyserver";
 
@@ -185,6 +186,13 @@ static void handle_set_setting(spyserver_client_t *client,
         case SETTING_GAIN:
             client->gain = value;
             ESP_LOGI(TAG, "client %d gain=%"PRIu32, client->sock, value);
+            {
+                rtlsdr_dev_t *dev = (rtlsdr_dev_t *)client->server->config.rtlsdr_dev;
+                if (dev) {
+                    rtlsdr_set_tuner_gain_mode(dev, 1);
+                    rtlsdr_set_tuner_gain(dev, (int)value);
+                }
+            }
             break;
         case SETTING_IQ_FORMAT:
             client->iq_format = value;
@@ -193,9 +201,22 @@ static void handle_set_setting(spyserver_client_t *client,
             client->iq_frequency = value;
             client->fft_frequency = value;
             ESP_LOGI(TAG, "client %d freq=%"PRIu32, client->sock, value);
+            {
+                rtlsdr_dev_t *dev = (rtlsdr_dev_t *)client->server->config.rtlsdr_dev;
+                if (dev) rtlsdr_set_center_freq(dev, value);
+            }
             break;
+        case SETTING_IQ_SAMPLE_RATE:
+        case SETTING_FFT_SAMPLE_RATE:
+            ESP_LOGI(TAG, "client %d sample_rate=%"PRIu32, client->sock, value);
+            {
+                rtlsdr_dev_t *dev = (rtlsdr_dev_t *)client->server->config.rtlsdr_dev;
+                if (dev && value >= 225001 && value <= 3200000) rtlsdr_set_sample_rate(dev, value);
+            }
+            break;
+        case SETTING_IQ_DECIMATION_STAGE_COUNT:
         case SETTING_IQ_DECIMATION:
-            /* decimation acknowledged but not applied at hardware layer here */
+            /* decimation acknowledged but not applied at hardware layer */
             break;
         case SETTING_IQ_DIGITAL_GAIN:
             break;
