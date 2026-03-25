@@ -244,8 +244,9 @@ static void handle_set_gain_mode(struct soapy_remote_server *srv, int fd,
 }
 
 /*
- * SETUP_STREAM payload: 4-byte udp_port (LE) + optional format string.
- * We record the client's desired UDP port for IQ streaming.
+ * SETUP_STREAM: Client tells us which UDP port to send IQ data to.
+ * If client doesn't specify, use a default (client_tcp_port + 1).
+ * Reply with the port we'll send to, so client can bind and listen.
  */
 static void handle_setup_stream(struct soapy_remote_server *srv, int fd,
                                  const uint8_t *payload, uint32_t len)
@@ -253,12 +254,20 @@ static void handle_setup_stream(struct soapy_remote_server *srv, int fd,
     if (len >= 2) {
         uint16_t udp_port;
         memcpy(&udp_port, payload, sizeof(uint16_t));
-        srv->udp_port = udp_port;
-        ESP_LOGI(TAG, "SETUP_STREAM: UDP port=%u", srv->udp_port);
+        if (udp_port > 0) srv->udp_port = udp_port;
     }
-    /* Return a stream handle (just use 1) */
-    uint32_t stream_handle = 1;
-    rpc_reply(fd, CMD_SETUP_STREAM, &stream_handle, sizeof(stream_handle));
+    /* If client didn't specify a port, use default data port */
+    if (srv->udp_port == 0) {
+        /* Use client's source port + 1 as default data port */
+        struct sockaddr_in peer;
+        socklen_t plen = sizeof(peer);
+        getpeername(fd, (struct sockaddr *)&peer, &plen);
+        srv->udp_port = ntohs(peer.sin_port) + 1;
+    }
+    ESP_LOGI(TAG, "SETUP_STREAM: UDP data port=%u", srv->udp_port);
+    /* Return the UDP port so client knows where to listen */
+    uint32_t resp_port = srv->udp_port;
+    rpc_reply(fd, CMD_SETUP_STREAM, &resp_port, sizeof(resp_port));
 }
 
 /* ──────────────────────── UDP Sender Task ──────────────────────── */
