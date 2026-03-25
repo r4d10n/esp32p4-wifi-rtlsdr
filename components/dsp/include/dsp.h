@@ -50,6 +50,15 @@ void dsp_fft_set_range(float db_min, float db_max);
  */
 int dsp_fft_get_size(void);
 
+/**
+ * Get the last computed FFT spectrum (for scope display).
+ * Thread-safe: copies to provided buffer.
+ * @param fft_out   Output buffer for FFT dB data (uint8, 0-255)
+ * @param max_len   Buffer capacity
+ * @return Number of FFT bins copied (0 if no data available)
+ */
+int dsp_fft_get_spectrum(uint8_t *fft_out, int max_len);
+
 /* ──────────────────────── DDC ──────────────────────── */
 
 typedef struct dsp_ddc dsp_ddc_t;

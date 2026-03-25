@@ -112,6 +112,11 @@ struct fm_stereo {
     rds_decoder_t      *rds;
     int16_t            *rds_buf;        /* 57kHz mixed RDS baseband */
     int                 rds_decim_phase; /* Decimation phase counter */
+
+    /* Stereo blend */
+    int16_t     blend_ratio;        /* 0=mono, 32767=full stereo (Q15) */
+    int16_t     blend_threshold;    /* Signal strength for full mono */
+    int16_t     blend_range;        /* Range above threshold for full stereo */
 };
 
 /* ── FIR Design Helper ── */
@@ -339,6 +344,11 @@ fm_stereo_t *fm_stereo_create(const fm_stereo_config_t *config)
         st->rds_decim_phase = 0;
     }
 
+    /* Init stereo blend */
+    st->blend_threshold = CONFIG_FM_STEREO_BLEND_THRESHOLD * 327; /* Scale 0-100 to 0-32700 */
+    st->blend_range = 10 * 327; /* 10 units of hysteresis */
+    st->blend_ratio = 0;
+
     ESP_LOGI(TAG, "FM stereo decoder created: %lu->%lu Hz, de-emph alpha=%d",
              (unsigned long)config->sample_rate, (unsigned long)config->audio_rate,
              alpha_q15);
@@ -451,21 +461,38 @@ int fm_stereo_process(fm_stereo_t *st, const int16_t *mpx_in, int n_samples,
     /* De-emphasis + stereo matrix */
     bool is_stereo = st->goertzel.pilot_detected && st->pll.locked;
 
+    /* Update blend ratio based on pilot power as signal strength proxy */
+    {
+        int16_t pilot_mag = (int16_t)(st->goertzel.last_power >> 16);
+        if (st->blend_threshold == 0) {
+            st->blend_ratio = 32767; /* Always full stereo */
+        } else if (!is_stereo) {
+            st->blend_ratio = 0;
+        } else if (pilot_mag > st->blend_threshold + st->blend_range) {
+            st->blend_ratio = 32767;
+        } else if (pilot_mag < st->blend_threshold) {
+            st->blend_ratio = 0;
+        } else {
+            /* Linear interpolation in blend range */
+            st->blend_ratio = (int16_t)(((int32_t)(pilot_mag - st->blend_threshold) * 32767)
+                                        / st->blend_range);
+        }
+    }
+
     for (int i = 0; i < n_samples; i++) {
         int16_t lpr_de = deemph_process(&st->deemph_lpr, lpr_filtered[i]);
         int16_t lmr_de = deemph_process(&st->deemph_lmr, lmr_filtered[i]);
 
-        if (is_stereo) {
-            /* Stereo matrix: L = (L+R) + (L-R), R = (L+R) - (L-R) */
-            int32_t left  = (int32_t)lpr_de + lmr_de;
-            int32_t right = (int32_t)lpr_de - lmr_de;
-            st->left_buf[i]  = sat16(left >> 1);
-            st->right_buf[i] = sat16(right >> 1);
-        } else {
-            /* Mono: L = R = L+R */
-            st->left_buf[i]  = lpr_de;
-            st->right_buf[i] = lpr_de;
-        }
+        /* Stereo matrix: L = (L+R) + (L-R), R = (L+R) - (L-R) */
+        int16_t L = sat16(((int32_t)lpr_de + lmr_de) >> 1);
+        int16_t R = sat16(((int32_t)lpr_de - lmr_de) >> 1);
+        int16_t mono = lpr_de;
+
+        /* Apply blend: out = mono*(1-blend) + stereo*blend */
+        st->left_buf[i]  = (int16_t)(((int32_t)mono * (32767 - st->blend_ratio)
+                                      + (int32_t)L * st->blend_ratio) >> 15);
+        st->right_buf[i] = (int16_t)(((int32_t)mono * (32767 - st->blend_ratio)
+                                      + (int32_t)R * st->blend_ratio) >> 15);
     }
 
     /* Resample both channels from sample_rate to audio_rate */
@@ -507,6 +534,13 @@ void fm_stereo_get_rds(fm_stereo_t *st, rds_data_t *out)
     } else {
         memset(out, 0, sizeof(*out));
     }
+}
+
+int fm_stereo_get_blend_ratio(fm_stereo_t *st)
+{
+    if (!st) return 0;
+    /* Convert Q15 (0-32767) to percentage (0-100) */
+    return (int)((int32_t)st->blend_ratio * 100 / 32767);
 }
 
 #endif /* CONFIG_FM_STEREO_ENABLE */

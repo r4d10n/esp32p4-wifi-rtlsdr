@@ -30,6 +30,12 @@
 #include "rds_decoder.h"
 #endif
 #include "ui_hw.h"
+#include "nvs_settings.h"
+#ifdef CONFIG_FM_USB_AUDIO_ENABLE
+#include "usb_audio.h"
+#endif
+#include "civ_emu.h"
+#include "dsp.h"
 
 static const char *TAG = "main";
 
@@ -79,6 +85,18 @@ static rtlsdr_dev_t *sdr_dev = NULL;
 static RingbufHandle_t iq_ringbuf = NULL;
 #define IQ_RINGBUF_SIZE     (128 * 1024)
 
+/* ── Scan State ── */
+
+static volatile bool        scan_active       = false;
+static volatile int         scan_direction    = 0;  /* +1 or -1 */
+static TaskHandle_t         scan_task_handle  = NULL;
+
+#define SCAN_STEP_HZ    100000      /* 100 kHz steps */
+#define SCAN_DWELL_MS   200         /* Listen at each freq for 200ms */
+#define SCAN_THRESHOLD  5000        /* Signal strength threshold */
+#define SCAN_FM_LOW     88000000
+#define SCAN_FM_HIGH    108000000
+
 /* ── Radio Pipeline ── */
 
 typedef struct {
@@ -104,6 +122,32 @@ typedef struct {
 } radio_pipeline_t;
 
 static radio_pipeline_t pipeline;
+
+/* ── CI-V Emulator ── */
+
+static civ_emu_t *civ_emu = NULL;
+
+static void civ_on_change(const civ_params_t *params, void *ctx)
+{
+    (void)ctx;
+    if (params->frequency != radio.frequency) {
+        radio.frequency = params->frequency;
+        rtlsdr_set_center_freq(sdr_dev, params->frequency);
+        fm_demod_reset(pipeline.demod);
+    }
+    if (params->mode != (int)radio.mode) {
+        radio.mode = params->mode == 0 ? FM_MODE_WBFM : FM_MODE_NBFM;
+        fm_demod_set_mode(pipeline.demod, radio.mode == FM_MODE_WBFM ? FM_DEMOD_WBFM : FM_DEMOD_NBFM);
+    }
+    if (params->volume != radio.volume) {
+        radio.volume = params->volume;
+        audio_out_set_volume(params->volume);
+    }
+    if (params->squelch != radio.squelch) {
+        radio.squelch = params->squelch;
+        fm_demod_set_squelch(pipeline.demod, params->squelch);
+    }
+}
 
 /* ── WiFi ── */
 
@@ -326,6 +370,10 @@ static void fm_pipeline_task(void *arg)
                         /* Volume: apply to interleaved L/R (2 samples per pair) */
                         fm_demod_apply_volume(pipe->stereo_buf, stereo_pairs * 2, radio.volume);
                         audio_out_write(pipe->stereo_buf, stereo_pairs * 2, 50);
+#ifdef CONFIG_FM_USB_AUDIO_ENABLE
+                        /* USB audio is mono; send left channel sample count */
+                        usb_audio_write(pipe->stereo_buf, stereo_pairs * 2);
+#endif
                     }
                 }
             } else
@@ -341,6 +389,9 @@ static void fm_pipeline_task(void *arg)
 
                     /* Step 6: Write to I2S */
                     audio_out_write(pipe->audio_buf, audio_count, 50);
+#ifdef CONFIG_FM_USB_AUDIO_ENABLE
+                    usb_audio_write(pipe->audio_buf, audio_count);
+#endif
                 }
             }
         }
@@ -350,6 +401,71 @@ static void fm_pipeline_task(void *arg)
 }
 
 /* ── Runtime Parameter Helpers ── */
+
+static void radio_set_frequency(uint32_t freq_hz); /* forward declaration */
+
+/* ── Scan Task ── */
+
+static void scan_task(void *arg)
+{
+    int dir = (int)(intptr_t)arg;
+    uint32_t start_freq = radio.frequency;
+    uint32_t freq = start_freq;
+
+    ESP_LOGI(TAG, "Scan started: %s from %.3f MHz",
+             dir > 0 ? "UP" : "DOWN", freq / 1e6);
+
+    while (scan_active) {
+        freq += dir * SCAN_STEP_HZ;
+
+        /* Wrap around */
+        if (freq > SCAN_FM_HIGH) freq = SCAN_FM_LOW;
+        if (freq < SCAN_FM_LOW)  freq = SCAN_FM_HIGH;
+
+        /* Check if we've scanned the full band */
+        if (freq == start_freq) {
+            ESP_LOGI(TAG, "Scan: full band scanned, no station found");
+            break;
+        }
+
+        /* Tune to new frequency */
+        radio_set_frequency(freq);
+
+        /* Dwell and measure signal */
+        vTaskDelay(pdMS_TO_TICKS(SCAN_DWELL_MS));
+
+        int16_t sig = fm_demod_get_signal_strength(pipeline.demod);
+
+        if (sig > SCAN_THRESHOLD) {
+            /* Confirm with a second measurement */
+            vTaskDelay(pdMS_TO_TICKS(100));
+            sig = fm_demod_get_signal_strength(pipeline.demod);
+            if (sig > SCAN_THRESHOLD) {
+                ESP_LOGI(TAG, "Scan: found station at %.3f MHz (sig=%d)",
+                         freq / 1e6, sig);
+                break;
+            }
+        }
+    }
+
+    scan_active = false;
+    scan_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static void scan_start(int direction)
+{
+    if (scan_active) return; /* Already scanning */
+    scan_active = true;
+    scan_direction = direction;
+    xTaskCreate(scan_task, "scan", 4096, (void *)(intptr_t)direction, 3, &scan_task_handle);
+}
+
+static void scan_stop(void)
+{
+    scan_active = false;
+    /* Task will self-delete */
+}
 
 /* Called from web API to change frequency */
 static void radio_set_frequency(uint32_t freq_hz)
@@ -417,6 +533,28 @@ static void web_radio_on_change(const web_radio_params_t *params, void *ctx)
         fm_demod_set_noise_blanker(pipeline.demod, radio.nb_enabled, radio.nb_threshold);
     }
     radio.filter_bw = params->filter_bw;
+
+    /* Persist settings to NVS (debounced) */
+    nvs_radio_settings_t to_save = {
+        .frequency    = radio.frequency,
+        .gain         = radio.gain,
+        .volume       = radio.volume,
+        .mode         = (int)radio.mode,
+        .filter_bw    = radio.filter_bw,
+        .squelch      = radio.squelch,
+        .nb_enabled   = radio.nb_enabled,
+        .nb_threshold = radio.nb_threshold,
+    };
+    nvs_settings_save(&to_save);
+
+    /* Handle scan requests */
+    if (params->scan_request == 1) {
+        scan_start(1);
+    } else if (params->scan_request == -1) {
+        scan_start(-1);
+    } else if (params->scan_request == 2) {
+        scan_stop();
+    }
 }
 
 /* ── Main ── */
@@ -437,6 +575,32 @@ void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    /* Load saved radio settings from NVS */
+    nvs_settings_init();
+    nvs_radio_settings_t saved;
+    /* Set defaults first */
+    saved.frequency  = radio.frequency;
+    saved.gain       = radio.gain;
+    saved.volume     = radio.volume;
+    saved.mode       = (int)radio.mode;
+    saved.filter_bw  = radio.filter_bw;
+    saved.squelch    = radio.squelch;
+    saved.nb_enabled = radio.nb_enabled;
+    saved.nb_threshold = radio.nb_threshold;
+
+    if (nvs_settings_load(&saved) == ESP_OK) {
+        radio.frequency   = saved.frequency;
+        radio.gain        = saved.gain;
+        radio.volume      = saved.volume;
+        radio.mode        = (fm_mode_t)saved.mode;
+        radio.filter_bw   = saved.filter_bw;
+        radio.squelch     = saved.squelch;
+        radio.nb_enabled  = saved.nb_enabled;
+        radio.nb_threshold = saved.nb_threshold;
+        ESP_LOGI(TAG, "Restored: %.3f MHz, %s, vol=%d",
+                 radio.frequency / 1e6, radio.mode == FM_MODE_WBFM ? "WBFM" : "NBFM", radio.volume);
+    }
 
     /* WiFi */
     ESP_ERROR_CHECK(wifi_init_sta());
@@ -473,6 +637,11 @@ void app_main(void)
     audio_cfg.volume = radio.volume;
     ESP_ERROR_CHECK(audio_out_init(&audio_cfg));
 
+#ifdef CONFIG_FM_USB_AUDIO_ENABLE
+    /* USB Audio Device (UAC 2.0 + CDC) on Controller 1 */
+    ESP_ERROR_CHECK(usb_audio_init());
+#endif
+
     /* DSP Pipeline Init */
     ESP_ERROR_CHECK(pipeline_init(&pipeline, radio.mode));
 
@@ -486,10 +655,12 @@ void app_main(void)
     extern void test_fm_demod(void);
     extern void test_fm_stereo_rds(void);
     extern void test_pipeline_e2e(void);
+    extern void test_phase4(void);
     test_dsp_kernels();
     test_fm_demod();
     test_fm_stereo_rds();
     test_pipeline_e2e();
+    test_phase4();
 #endif
 
 #ifdef CONFIG_FM_OLED_ENABLE
@@ -502,6 +673,12 @@ void app_main(void)
         ESP_LOGW(TAG, "OLED init failed: %s (continuing without display)", esp_err_to_name(oled_ret));
     }
 #endif
+
+    /* CI-V Protocol Emulator (Icom IC-R8600) */
+    civ_emu = civ_emu_create(civ_on_change, NULL);
+    if (!civ_emu) {
+        ESP_LOGW(TAG, "CI-V emulator creation failed (continuing without CAT control)");
+    }
 
     /* Web Radio Control Interface */
     web_radio_config_t web_cfg = WEB_RADIO_CONFIG_DEFAULT();
@@ -540,6 +717,44 @@ void app_main(void)
         };
         int16_t sig = fm_demod_get_signal_strength(pipeline.demod);
         web_radio_update_status(&wp, sig);
+
+        /* Update CI-V emulator state */
+        if (civ_emu) {
+            civ_emu_update_state(civ_emu, radio.frequency, (int)radio.mode,
+                                  sig, radio.volume, radio.squelch);
+        }
+
+        /* Send spectrum data via CI-V scope command */
+        if (civ_emu) {
+            static int scope_counter = 0;
+            /* Status loop runs every 5000ms; send scope at CONFIG_FM_SCOPE_INTERVAL_MS */
+            if (++scope_counter >= (5000 / CONFIG_FM_SCOPE_INTERVAL_MS)) {
+                scope_counter = 0;
+                int fft_size = dsp_fft_get_size();
+                if (fft_size > 0) {
+                    uint8_t *fft_buf = malloc(fft_size);
+                    if (fft_buf) {
+                        int fft_len = dsp_fft_get_spectrum(fft_buf, fft_size);
+                        if (fft_len > 0) {
+                            int frame_max = fft_len + 17;
+                            uint8_t *scope_frame = malloc(frame_max);
+                            if (scope_frame) {
+                                int frame_len = civ_emu_make_scope_frame(
+                                    civ_emu, fft_buf, fft_len,
+                                    radio.frequency, radio.sample_rate,
+                                    scope_frame, frame_max);
+                                if (frame_len > 0) {
+                                    /* TODO: send scope_frame over USB CDC serial */
+                                    ESP_LOGD(TAG, "Scope frame: %d bytes", frame_len);
+                                }
+                                free(scope_frame);
+                            }
+                        }
+                        free(fft_buf);
+                    }
+                }
+            }
+        }
 
 #ifdef CONFIG_FM_STEREO_ENABLE
         if (pipeline.stereo) {

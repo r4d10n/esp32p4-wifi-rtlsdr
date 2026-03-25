@@ -35,11 +35,17 @@ extern void pie_nco_mix_s16_arp4(const int16_t *iq_in, const int16_t *nco_table,
 extern int32_t pie_fir_mac_arp4(const int16_t *delay_ptr, const int16_t *taps_ptr,
                                  int n_groups);
 #define PIE_ASM_FIR 1
+
+/* CIC integrator: hardware loop over 3 sequential integrator stages */
+extern void pie_cic_integrate_arp4(const int16_t *iq_in, int in_pairs,
+                                    int32_t *accum);
+#define PIE_ASM_CIC 1
 #else
 #define PIE_ASM_POWER_SPECTRUM 0
 #define PIE_ASM_WINDOWING 0
 #define PIE_ASM_NCO_MIX 0
 #define PIE_ASM_FIR 0
+#define PIE_ASM_CIC 0
 #endif
 
 #include <math.h>
@@ -278,6 +284,65 @@ void pie_cic_decimate_s16(const int16_t *iq_in, int in_pairs,
     { int r = decim_ratio; while (r > 1) { shift++; r >>= 1; } }
     shift *= 3;  /* N=3 stages */
 
+    /*
+     * The integrator stages are the hot path (run at full input rate).
+     * On ESP32-P4, use assembly with hardware zero-overhead loop for ~2x speedup.
+     * The comb stages run at the decimated rate and remain in C.
+     *
+     * Strategy: process chunks of decim_ratio samples at a time.
+     * For each chunk, run integrators over decim_ratio samples, then do combs once.
+     */
+#if PIE_ASM_CIC
+    while (in_pairs >= decim_ratio && out_pos < max_out) {
+        /* Skip samples before next decimation point */
+        int remain = decim_ratio - cnt;
+        if (remain > in_pairs) break;
+
+        /* Run integrators over 'remain' samples via assembly */
+        pie_cic_integrate_arp4(iq_in, remain, accum);
+        iq_in += remain * 2;
+        in_pairs -= remain;
+        cnt = 0;
+
+        /* Reload integrator state (assembly updated accum[0..11]) */
+        i3_re = ((int64_t)accum[9]  << 32) | (uint32_t)accum[8];
+        i3_im = ((int64_t)accum[11] << 32) | (uint32_t)accum[10];
+
+        /* 3 comb stages (run at output rate) */
+        int64_t d1_re = i3_re - c1_prev_re;
+        int64_t d1_im = i3_im - c1_prev_im;
+        c1_prev_re = i3_re;
+        c1_prev_im = i3_im;
+
+        int64_t d2_re = d1_re - c2_prev_re;
+        int64_t d2_im = d1_im - c2_prev_im;
+        c2_prev_re = d1_re;
+        c2_prev_im = d1_im;
+
+        int64_t d3_re = d2_re - c3_prev_re;
+        int64_t d3_im = d2_im - c3_prev_im;
+        c3_prev_re = d2_re;
+        c3_prev_im = d2_im;
+
+        /* Normalize and output */
+        iq_out[out_pos * 2]     = (int16_t)(d3_re >> shift);
+        iq_out[out_pos * 2 + 1] = (int16_t)(d3_im >> shift);
+        out_pos++;
+    }
+    /* Process any remaining samples (less than a full decimation period) */
+    if (in_pairs > 0) {
+        pie_cic_integrate_arp4(iq_in, in_pairs, accum);
+        cnt += in_pairs;
+        in_pairs = 0;
+    }
+    /* Reload all integrator state from accum for the save-back below */
+    i1_re = ((int64_t)accum[1]  << 32) | (uint32_t)accum[0];
+    i1_im = ((int64_t)accum[3]  << 32) | (uint32_t)accum[2];
+    i2_re = ((int64_t)accum[5]  << 32) | (uint32_t)accum[4];
+    i2_im = ((int64_t)accum[7]  << 32) | (uint32_t)accum[6];
+    i3_re = ((int64_t)accum[9]  << 32) | (uint32_t)accum[8];
+    i3_im = ((int64_t)accum[11] << 32) | (uint32_t)accum[10];
+#else
     for (int k = 0; k < in_pairs && out_pos < max_out; k++) {
         int64_t x_re = (int64_t)iq_in[k * 2];
         int64_t x_im = (int64_t)iq_in[k * 2 + 1];
@@ -316,6 +381,7 @@ void pie_cic_decimate_s16(const int16_t *iq_in, int in_pairs,
             out_pos++;
         }
     }
+#endif
 
     /* Save state */
     accum[0]  = (int32_t)(i1_re);       accum[1]  = (int32_t)(i1_re >> 32);

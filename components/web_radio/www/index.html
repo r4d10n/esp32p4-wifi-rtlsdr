@@ -95,6 +95,11 @@ select {
             <button class="tune-btn" onclick="tune(100000)">+100k</button>
             <button class="tune-btn" onclick="tune(1000000)">+1M</button>
         </div>
+        <div class="tune-row">
+            <button class="tune-btn" onclick="scanDown()">&#9664; Scan</button>
+            <button class="tune-btn" onclick="scanStop()">Stop</button>
+            <button class="tune-btn" onclick="scanUp()">Scan &#9654;</button>
+        </div>
         <div id="rdsInfo" style="margin-top:10px;text-align:center;font-size:0.9em;color:#888;">
             <span id="rdsPS" style="color:#00ff88;font-family:'Courier New',monospace;font-size:1.2em;"></span>
             <span id="rdsStereo" style="margin-left:8px;color:#e94560;font-size:0.8em;"></span>
@@ -167,6 +172,18 @@ select {
     </div>
 
     <button class="mute-btn" id="muteBtn" onclick="toggleMute()">MUTE</button>
+
+    <div class="control-group" style="margin-top:20px">
+        <div class="control-label">Firmware Update</div>
+        <input type="file" id="otaFile" accept=".bin" style="display:none" onchange="uploadOTA()">
+        <button class="tune-btn" onclick="document.getElementById('otaFile').click()" style="width:100%;padding:12px">
+            Select Firmware (.bin)
+        </button>
+        <div id="otaProgress" style="display:none;margin-top:8px">
+            <div class="meter"><div class="meter-fill" id="otaMeter" style="width:0%"></div></div>
+            <div style="text-align:center;margin-top:4px;font-size:0.85em" id="otaStatus">Uploading...</div>
+        </div>
+    </div>
 </div>
 
 <script>
@@ -253,6 +270,10 @@ async function setNB() {
     await api('noise_blanker', {enabled, threshold});
 }
 
+async function scanUp()   { await api('scan', {direction: 'up'}); }
+async function scanDown()  { await api('scan', {direction: 'down'}); }
+async function scanStop()  { await api('scan', {action: 'stop'}); }
+
 function connectWS() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(proto + '//' + location.host + '/ws');
@@ -281,6 +302,36 @@ async function pollRDS() {
         if (r.stereo !== undefined) {
             document.getElementById('rdsStereo').textContent = r.stereo ? 'STEREO' : '';
         }
+    }
+}
+
+async function uploadOTA() {
+    const file = document.getElementById('otaFile').files[0];
+    if (!file) return;
+
+    document.getElementById('otaProgress').style.display = 'block';
+    document.getElementById('otaStatus').textContent = 'Uploading ' + (file.size/1024).toFixed(0) + ' KB...';
+
+    try {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/ota');
+        xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+                const pct = (e.loaded / e.total * 100).toFixed(0);
+                document.getElementById('otaMeter').style.width = pct + '%';
+                document.getElementById('otaStatus').textContent = 'Uploading... ' + pct + '%';
+            }
+        };
+        xhr.onload = () => {
+            document.getElementById('otaStatus').textContent = 'Complete! Rebooting...';
+            setTimeout(() => location.reload(), 5000);
+        };
+        xhr.onerror = () => {
+            document.getElementById('otaStatus').textContent = 'Upload failed!';
+        };
+        xhr.send(file);
+    } catch(e) {
+        document.getElementById('otaStatus').textContent = 'Error: ' + e.message;
     }
 }
 

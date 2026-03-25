@@ -17,4 +17,12 @@ menu "DSP Configuration"
             0 = Polynomial corrected atan2 (<0.3% THD, ~6 cycles/sample)
             1 = Fast linear approximation (~1% THD, ~4 cycles/sample)
 
+    config FM_SCOPE_INTERVAL_MS
+        int "Spectrum scope update interval (ms)"
+        default 100
+        range 50 1000
+        help
+            How often to send FFT spectrum data over CI-V scope command.
+            100ms = 10 FPS. Lower = more CPU but smoother waterfall.
+
 endmenu

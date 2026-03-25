@@ -89,6 +89,10 @@ static float s_db_max =  90.0f;
 /* Dynamically allocated, 16-byte aligned buffers */
 static float *fft_power   = NULL;   /* [fft_n] — accumulated power spectrum */
 
+/* Last completed spectrum snapshot for scope streaming */
+static uint8_t *fft_spectrum_snap = NULL;   /* [fft_n] — last output frame */
+static int      fft_spectrum_len  = 0;      /* Valid bytes in snapshot */
+
 /* INT16 FFT path (PIE SIMD accelerated — 4.3-4.8x faster than float) */
 static int16_t *fft_sc16_window = NULL;  /* [fft_n] — Hann window as Q15 */
 static int16_t *fft_sc16_input  = NULL;  /* [fft_n * 2] — interleaved I,Q */
@@ -104,12 +108,14 @@ static int      fft_input_pos = 0;
 
 static void fft_free_buffers(void)
 {
-    if (fft_power)       { free(fft_power);       fft_power       = NULL; }
-    if (fft_sc16_window) { free(fft_sc16_window); fft_sc16_window = NULL; }
-    if (fft_sc16_input)  { free(fft_sc16_input);  fft_sc16_input  = NULL; }
-    if (fft_sc16_work)   { free(fft_sc16_work);   fft_sc16_work   = NULL; }
-    if (fft_tmp_a)       { free(fft_tmp_a);       fft_tmp_a       = NULL; }
-    if (fft_tmp_b)       { free(fft_tmp_b);       fft_tmp_b       = NULL; }
+    if (fft_power)         { free(fft_power);         fft_power         = NULL; }
+    if (fft_sc16_window)   { free(fft_sc16_window);   fft_sc16_window   = NULL; }
+    if (fft_sc16_input)    { free(fft_sc16_input);    fft_sc16_input    = NULL; }
+    if (fft_sc16_work)     { free(fft_sc16_work);     fft_sc16_work     = NULL; }
+    if (fft_tmp_a)         { free(fft_tmp_a);         fft_tmp_a         = NULL; }
+    if (fft_tmp_b)         { free(fft_tmp_b);         fft_tmp_b         = NULL; }
+    if (fft_spectrum_snap) { free(fft_spectrum_snap); fft_spectrum_snap = NULL; }
+    fft_spectrum_len = 0;
 }
 
 void dsp_fft_init(int fft_size)
@@ -126,15 +132,16 @@ void dsp_fft_init(int fft_size)
     fft_n = n;
 
     /* Allocate 16-byte aligned buffers */
-    fft_power       = heap_caps_aligned_alloc(16, n * sizeof(float), MALLOC_CAP_DEFAULT);
-    fft_sc16_window = heap_caps_aligned_alloc(16, n * sizeof(int16_t), MALLOC_CAP_DEFAULT);
-    fft_sc16_input  = heap_caps_aligned_alloc(16, n * 2 * sizeof(int16_t), MALLOC_CAP_DEFAULT);
-    fft_sc16_work   = heap_caps_aligned_alloc(16, n * 2 * sizeof(int16_t), MALLOC_CAP_DEFAULT);
-    fft_tmp_a       = heap_caps_aligned_alloc(16, n * sizeof(float), MALLOC_CAP_DEFAULT);
-    fft_tmp_b       = heap_caps_aligned_alloc(16, n * sizeof(float), MALLOC_CAP_DEFAULT);
+    fft_power         = heap_caps_aligned_alloc(16, n * sizeof(float), MALLOC_CAP_DEFAULT);
+    fft_sc16_window   = heap_caps_aligned_alloc(16, n * sizeof(int16_t), MALLOC_CAP_DEFAULT);
+    fft_sc16_input    = heap_caps_aligned_alloc(16, n * 2 * sizeof(int16_t), MALLOC_CAP_DEFAULT);
+    fft_sc16_work     = heap_caps_aligned_alloc(16, n * 2 * sizeof(int16_t), MALLOC_CAP_DEFAULT);
+    fft_tmp_a         = heap_caps_aligned_alloc(16, n * sizeof(float), MALLOC_CAP_DEFAULT);
+    fft_tmp_b         = heap_caps_aligned_alloc(16, n * sizeof(float), MALLOC_CAP_DEFAULT);
+    fft_spectrum_snap = malloc(n * sizeof(uint8_t));
 
     if (!fft_power || !fft_sc16_window || !fft_sc16_input || !fft_sc16_work ||
-        !fft_tmp_a || !fft_tmp_b) {
+        !fft_tmp_a || !fft_tmp_b || !fft_spectrum_snap) {
         ESP_LOGE(TAG, "Failed to allocate FFT buffers for size %d", n);
         fft_free_buffers();
         fft_n = 0;
@@ -279,6 +286,12 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
                 }
                 *fft_out_len = fft_n;
 
+                /* Save snapshot for dsp_fft_get_spectrum() */
+                if (fft_spectrum_snap) {
+                    memcpy(fft_spectrum_snap, fft_out, fft_n);
+                    fft_spectrum_len = fft_n;
+                }
+
                 PERF_END(t_db, perf_db_total_us);
 
 #if DSP_PERF_BENCH
@@ -302,6 +315,14 @@ void dsp_fft_compute(const uint8_t *iq_data, uint32_t len,
             }
         }
     }
+}
+
+int dsp_fft_get_spectrum(uint8_t *fft_out, int max_len)
+{
+    if (!fft_out || max_len <= 0 || !fft_spectrum_snap || fft_spectrum_len <= 0) return 0;
+    int copy_len = fft_spectrum_len < max_len ? fft_spectrum_len : max_len;
+    memcpy(fft_out, fft_spectrum_snap, copy_len);
+    return copy_len;
 }
 
 /* ──────────────────────── DDC (Digital Down Converter) ──────────────────────── */

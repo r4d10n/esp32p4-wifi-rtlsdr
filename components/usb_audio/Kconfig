@@ -1,0 +1,9 @@
+menu "USB Audio Configuration"
+    config FM_USB_AUDIO_ENABLE
+        bool "Enable USB Audio output (UAC 2.0)"
+        default n
+        help
+            Stream demodulated audio to PC as a USB microphone.
+            Uses ESP32-P4 USB Controller 1 (FS, GPIO26/27).
+            Requires separate USB cable from the RTL-SDR port.
+endmenu

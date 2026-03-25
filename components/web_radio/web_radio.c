@@ -13,6 +13,8 @@
 #include "esp_check.h"
 #include "esp_http_server.h"
 #include "esp_timer.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "cJSON.h"
 #include "web_radio.h"
 
@@ -386,6 +388,119 @@ static esp_err_t handler_rds(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── REST: POST /api/ota — firmware binary upload ── */
+
+static esp_err_t handler_ota(httpd_req_t *req)
+{
+    ESP_LOGI(TAG, "OTA update started, content_length=%d", req->content_len);
+
+    const esp_partition_t *update = esp_ota_get_next_update_partition(NULL);
+    if (!update) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No OTA partition");
+        return ESP_FAIL;
+    }
+
+    esp_ota_handle_t ota_handle;
+    esp_err_t ret = esp_ota_begin(update, OTA_WITH_SEQUENTIAL_WRITES, &ota_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "OTA begin failed: %s", esp_err_to_name(ret));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA begin failed");
+        return ESP_FAIL;
+    }
+
+    char *buf = malloc(4096);
+    if (!buf) {
+        esp_ota_abort(ota_handle);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_FAIL;
+    }
+
+    int received = 0;
+    int total = req->content_len;
+
+    while (received < total) {
+        int read_len = httpd_req_recv(req, buf, 4096);
+        if (read_len <= 0) {
+            if (read_len == HTTPD_SOCK_ERR_TIMEOUT) continue;
+            ESP_LOGE(TAG, "OTA recv failed");
+            free(buf);
+            esp_ota_abort(ota_handle);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Recv failed");
+            return ESP_FAIL;
+        }
+
+        ret = esp_ota_write(ota_handle, buf, read_len);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "OTA write failed: %s", esp_err_to_name(ret));
+            free(buf);
+            esp_ota_abort(ota_handle);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Write failed");
+            return ESP_FAIL;
+        }
+
+        received += read_len;
+        ESP_LOGI(TAG, "OTA progress: %d/%d (%d%%)", received, total, received * 100 / total);
+    }
+
+    free(buf);
+
+    ret = esp_ota_end(ota_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "OTA end failed: %s", esp_err_to_name(ret));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Validation failed");
+        return ESP_FAIL;
+    }
+
+    ret = esp_ota_set_boot_partition(update);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Set boot partition failed: %s", esp_err_to_name(ret));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Set boot failed");
+        return ESP_FAIL;
+    }
+
+    send_json(req, "{\"ok\":true,\"msg\":\"OTA complete, rebooting...\"}");
+
+    /* Reboot after short delay */
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+
+    return ESP_OK;
+}
+
+/* ── REST: POST /api/scan — {direction:"up"|"down"} or {action:"stop"} ── */
+
+static esp_err_t handler_scan(httpd_req_t *req)
+{
+    char buf[POST_BODY_MAX];
+    ESP_RETURN_ON_ERROR(read_body(req, buf, sizeof(buf)), TAG, "read_body");
+
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad JSON"); return ESP_FAIL; }
+
+    cJSON *action = cJSON_GetObjectItem(root, "action");
+    cJSON *dir    = cJSON_GetObjectItem(root, "direction");
+
+    if (action && cJSON_IsString(action) && strcmp(action->valuestring, "stop") == 0) {
+        s_params.scan_request = 2; /* stop */
+        if (s_change_cb) s_change_cb(&s_params, s_cb_ctx);
+        s_params.scan_request = 0;
+    } else if (dir && cJSON_IsString(dir)) {
+        if (strcmp(dir->valuestring, "up") == 0) {
+            s_params.scan_request = 1;
+        } else if (strcmp(dir->valuestring, "down") == 0) {
+            s_params.scan_request = -1;
+        }
+        if (s_params.scan_request != 0) {
+            if (s_change_cb) s_change_cb(&s_params, s_cb_ctx);
+            s_params.scan_request = 0;
+        }
+    }
+
+    cJSON_Delete(root);
+    send_json(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
 /* ── URI table ── */
 
 static const httpd_uri_t s_uris[] = {
@@ -399,9 +514,11 @@ static const httpd_uri_t s_uris[] = {
     { .uri = "/api/mute",          .method = HTTP_POST, .handler = handler_mute          },
     { .uri = "/api/squelch",      .method = HTTP_POST, .handler = handler_squelch       },
     { .uri = "/api/noise_blanker",.method = HTTP_POST, .handler = handler_noise_blanker },
+    { .uri = "/api/scan",         .method = HTTP_POST, .handler = handler_scan          },
     { .uri = "/api/rds",          .method = HTTP_GET,  .handler = handler_rds          },
     { .uri = "/ws",               .method = HTTP_GET,  .handler = handler_ws,
       .is_websocket = true                                                      },
+    { .uri = "/api/ota",          .method = HTTP_POST, .handler = handler_ota  },
 };
 
 /* ── Public API ── */

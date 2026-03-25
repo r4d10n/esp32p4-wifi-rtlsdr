@@ -58,6 +58,11 @@ int fm_stereo_process(fm_stereo_t *st, const int16_t *mpx_in, int n_samples,
 bool fm_stereo_is_locked(fm_stereo_t *st);
 bool fm_stereo_is_stereo(fm_stereo_t *st);
 
+/**
+ * Get current stereo blend ratio as a percentage (0=mono, 100=full stereo).
+ */
+int fm_stereo_get_blend_ratio(fm_stereo_t *st);
+
 #include "rds_decoder.h"
 
 /**

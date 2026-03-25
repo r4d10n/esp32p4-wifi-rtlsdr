@@ -28,6 +28,8 @@ typedef struct {
     bool        nb_enabled;
     uint8_t     nb_threshold;
     bool        stereo;         /* true if stereo pilot detected and PLL locked */
+    uint8_t     stereo_blend;   /* blend ratio 0-100 (0=mono, 100=full stereo) */
+    int8_t      scan_request;   /* 0=none, 1=scan up, -1=scan down, 2=stop */
 } web_radio_params_t;
 
 typedef void (*web_radio_change_cb_t)(const web_radio_params_t *params, void *ctx);

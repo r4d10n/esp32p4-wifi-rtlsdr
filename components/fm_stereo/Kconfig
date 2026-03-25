@@ -7,4 +7,14 @@ menu "FM Stereo Decoder"
             Enable FM stereo MPX decoding (L+R/L-R separation via 19 kHz
             pilot PLL) and RDS data extraction from the 57 kHz subcarrier.
 
+    config FM_STEREO_BLEND_THRESHOLD
+        int "Stereo blend threshold (signal strength 0-100)"
+        default 30
+        range 0 100
+        depends on FM_STEREO_ENABLE
+        help
+            Below this signal strength, output is mono.
+            Above threshold+10, output is full stereo.
+            0 = always full stereo (no blending).
+
 endmenu
