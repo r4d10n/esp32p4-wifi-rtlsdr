@@ -41,7 +41,7 @@ CONFIG_MDNS_MAX_SERVICES=4
 # Flash
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 
-# Custom partition table (2MB app)
+# Custom partition table (3MB app)
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
@@ -50,3 +50,12 @@ CONFIG_DSP_MAX_FFT_SIZE=16384
 
 # Log level
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# I2S audio output
+CONFIG_SOC_I2S_SUPPORTED=y
+
+# I2C for audio codec and optional OLED
+CONFIG_I2C_ISR_IRAM_SAFE=y
+
+# DSP optimizations
+CONFIG_DSP_OPTIMIZED=y

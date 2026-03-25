@@ -1,0 +1,20 @@
+menu "DSP Configuration"
+
+    config DSP_OPTIMIZED
+        bool "Enable PIE SIMD optimized DSP kernels"
+        default y
+        depends on IDF_TARGET_ESP32P4
+        help
+            Enable hand-optimized PIE assembly kernels for FFT windowing,
+            power spectrum, and NCO mixing. Provides 2-8x speedup over
+            scalar C implementations on ESP32-P4.
+
+    config FM_DISC_MODE
+        int "FM discriminator mode (0=polynomial, 1=fast linear)"
+        default 0
+        range 0 1
+        help
+            0 = Polynomial corrected atan2 (<0.3% THD, ~6 cycles/sample)
+            1 = Fast linear approximation (~1% THD, ~4 cycles/sample)
+
+endmenu

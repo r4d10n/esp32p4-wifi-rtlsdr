@@ -1,0 +1,10 @@
+menu "FM Stereo Decoder"
+
+    config FM_STEREO_ENABLE
+        bool "Enable FM stereo and RDS decoder"
+        default y
+        help
+            Enable FM stereo MPX decoding (L+R/L-R separation via 19 kHz
+            pilot PLL) and RDS data extraction from the 57 kHz subcarrier.
+
+endmenu

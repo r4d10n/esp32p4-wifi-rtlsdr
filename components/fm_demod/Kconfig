@@ -1,0 +1,37 @@
+menu "FM Demodulator Configuration"
+
+    config FM_FIR_TAPS
+        int "Audio FIR filter tap count"
+        default 63
+        range 31 255
+        help
+            Number of taps for the audio low-pass FIR filter.
+            More taps = sharper cutoff but more CPU. Must be odd.
+            63 is good for WBFM, 31 for NBFM.
+
+    config FM_FIR_WINDOW
+        int "FIR window function (0=Hamming, 1=Blackman, 2=Nuttall)"
+        default 2
+        range 0 2
+        help
+            Window function for FIR filter design.
+            0 = Hamming (-43 dB sidelobes)
+            1 = Blackman (-58 dB sidelobes)
+            2 = Nuttall (-93 dB sidelobes, best for FM)
+
+
+    config FM_NOISE_BLANKER
+        bool "Enable noise blanker by default"
+        default y
+        help
+            Enable impulse noise blanker at startup. Can be toggled at runtime.
+
+    config FM_NOISE_BLANKER_THRESHOLD
+        int "Default noise blanker threshold (1-10)"
+        default 5
+        range 1 10
+        depends on FM_NOISE_BLANKER
+        help
+            Blanking threshold multiplier. Higher value = less aggressive blanking.
+
+endmenu

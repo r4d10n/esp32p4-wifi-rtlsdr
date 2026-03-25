@@ -1,0 +1,30 @@
+menu "Hardware UI Configuration"
+
+    config FM_OLED_ENABLE
+        bool "Enable I2C OLED display and rotary encoder"
+        default n
+        help
+            Enable optional SSD1306 128x64 OLED display and rotary
+            encoder for hardware-based radio control.
+
+    config FM_OLED_I2C_ADDR
+        hex "OLED I2C address"
+        default 0x3C
+        depends on FM_OLED_ENABLE
+
+    config FM_ENCODER_GPIO_A
+        int "Rotary encoder GPIO A"
+        default 4
+        depends on FM_OLED_ENABLE
+
+    config FM_ENCODER_GPIO_B
+        int "Rotary encoder GPIO B"
+        default 5
+        depends on FM_OLED_ENABLE
+
+    config FM_ENCODER_GPIO_BTN
+        int "Rotary encoder button GPIO"
+        default 6
+        depends on FM_OLED_ENABLE
+
+endmenu

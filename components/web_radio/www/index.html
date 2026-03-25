@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32-P4 FM Radio</title>
+<style>
+/* Dark theme radio UI */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: #1a1a2e; color: #e0e0e0;
+    display: flex; justify-content: center; padding: 20px;
+    min-height: 100vh;
+}
+.container { max-width: 480px; width: 100%; }
+h1 { text-align: center; color: #e94560; margin-bottom: 20px; font-size: 1.4em; }
+
+/* Frequency display */
+.freq-display {
+    background: #16213e; border: 2px solid #e94560; border-radius: 12px;
+    padding: 20px; text-align: center; margin-bottom: 20px;
+}
+.freq-value {
+    font-family: 'Courier New', monospace; font-size: 2.8em;
+    color: #00ff88; letter-spacing: 2px;
+}
+.freq-unit { color: #888; font-size: 0.8em; margin-left: 8px; }
+
+/* Tuning buttons */
+.tune-row { display: flex; gap: 8px; justify-content: center; margin-top: 12px; }
+.tune-btn {
+    background: #0f3460; border: 1px solid #e94560; color: #e0e0e0;
+    padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.9em;
+}
+.tune-btn:hover { background: #e94560; color: white; }
+.tune-btn:active { transform: scale(0.95); }
+
+/* Controls */
+.control-group {
+    background: #16213e; border-radius: 10px; padding: 16px; margin-bottom: 12px;
+}
+.control-label { color: #888; font-size: 0.85em; margin-bottom: 6px; display: flex; justify-content: space-between; }
+.control-label span { color: #00ff88; }
+input[type="range"] {
+    width: 100%; accent-color: #e94560; height: 6px;
+    -webkit-appearance: none; background: #0f3460; border-radius: 3px; outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 20px; height: 20px;
+    background: #e94560; border-radius: 50%; cursor: pointer;
+}
+
+/* Mode toggle */
+.mode-row { display: flex; gap: 8px; margin-bottom: 12px; }
+.mode-btn {
+    flex: 1; padding: 12px; text-align: center; border-radius: 8px;
+    background: #0f3460; border: 2px solid transparent; cursor: pointer;
+    font-weight: bold; transition: all 0.2s;
+}
+.mode-btn.active { border-color: #e94560; background: #1a1a4e; color: #e94560; }
+
+/* Signal meter */
+.meter {
+    height: 8px; background: #0f3460; border-radius: 4px; overflow: hidden; margin-top: 4px;
+}
+.meter-fill { height: 100%; background: linear-gradient(90deg, #00ff88, #e94560); transition: width 0.3s; }
+
+/* Mute button */
+.mute-btn {
+    width: 100%; padding: 14px; border-radius: 10px; border: 2px solid #e94560;
+    background: transparent; color: #e94560; font-size: 1.1em; cursor: pointer;
+    font-weight: bold; transition: all 0.2s;
+}
+.mute-btn.muted { background: #e94560; color: white; }
+
+/* Gain selector */
+select {
+    width: 100%; padding: 10px; background: #0f3460; color: #e0e0e0;
+    border: 1px solid #333; border-radius: 6px; font-size: 0.95em;
+}
+</style>
+</head>
+<body>
+<div class="container">
+    <h1>ESP32-P4 FM Radio</h1>
+
+    <div class="freq-display">
+        <div><span class="freq-value" id="freqDisplay">100.000</span><span class="freq-unit">MHz</span></div>
+        <div class="tune-row">
+            <button class="tune-btn" onclick="tune(-1000000)">-1M</button>
+            <button class="tune-btn" onclick="tune(-100000)">-100k</button>
+            <button class="tune-btn" onclick="tune(-25000)">-25k</button>
+            <button class="tune-btn" onclick="tune(25000)">+25k</button>
+            <button class="tune-btn" onclick="tune(100000)">+100k</button>
+            <button class="tune-btn" onclick="tune(1000000)">+1M</button>
+        </div>
+        <div id="rdsInfo" style="margin-top:10px;text-align:center;font-size:0.9em;color:#888;">
+            <span id="rdsPS" style="color:#00ff88;font-family:'Courier New',monospace;font-size:1.2em;"></span>
+            <span id="rdsStereo" style="margin-left:8px;color:#e94560;font-size:0.8em;"></span>
+            <div id="rdsRT" style="margin-top:4px;color:#aaa;font-size:0.85em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>
+        </div>
+    </div>
+
+    <div class="control-group">
+        <div class="control-label">Signal<span id="sigVal">--</span></div>
+        <div class="meter"><div class="meter-fill" id="sigMeter" style="width:0%"></div></div>
+    </div>
+
+    <div class="mode-row">
+        <div class="mode-btn active" id="btnWBFM" onclick="setMode(0)">WBFM</div>
+        <div class="mode-btn" id="btnNBFM" onclick="setMode(1)">NBFM</div>
+    </div>
+
+    <div class="control-group">
+        <div class="control-label">Volume<span id="volVal">70</span></div>
+        <input type="range" id="volume" min="0" max="100" value="70" oninput="setVolume(this.value)">
+    </div>
+
+    <div class="control-group">
+        <div class="control-label">Gain</div>
+        <select id="gain" onchange="setGain(this.value)">
+            <option value="0">Auto</option>
+            <option value="9">0.9 dB</option>
+            <option value="14">1.4 dB</option>
+            <option value="27">2.7 dB</option>
+            <option value="37">3.7 dB</option>
+            <option value="77">7.7 dB</option>
+            <option value="87">8.7 dB</option>
+            <option value="125">12.5 dB</option>
+            <option value="144">14.4 dB</option>
+            <option value="166">16.6 dB</option>
+            <option value="197">19.7 dB</option>
+            <option value="207">20.7 dB</option>
+            <option value="229">22.9 dB</option>
+            <option value="254">25.4 dB</option>
+            <option value="290">29.0 dB</option>
+            <option value="321">32.1 dB</option>
+            <option value="345">34.5 dB</option>
+            <option value="378">37.8 dB</option>
+            <option value="403">40.3 dB</option>
+            <option value="420">42.0 dB</option>
+            <option value="434">43.4 dB</option>
+            <option value="439">43.9 dB</option>
+            <option value="445">44.5 dB</option>
+            <option value="480">48.0 dB</option>
+            <option value="496" selected>49.6 dB</option>
+        </select>
+    </div>
+
+    <div class="control-group">
+        <div class="control-label">Filter BW<span id="bwVal">15 kHz</span></div>
+        <input type="range" id="filterbw" min="3000" max="150000" value="15000" step="1000" oninput="setFilterBW(this.value)">
+    </div>
+
+    <div class="control-group">
+        <div class="control-label">Squelch<span id="sqVal">0</span></div>
+        <input type="range" id="squelch" min="0" max="100" value="0" oninput="setSquelch(this.value)">
+    </div>
+
+    <div class="control-group">
+        <div class="control-label">Noise Blanker
+            <label style="cursor:pointer"><input type="checkbox" id="nbEnable" onchange="setNB()" checked> ON</label>
+        </div>
+        <div class="control-label">NB Threshold<span id="nbVal">5</span></div>
+        <input type="range" id="nbThresh" min="1" max="10" value="5" oninput="setNB()">
+    </div>
+
+    <button class="mute-btn" id="muteBtn" onclick="toggleMute()">MUTE</button>
+</div>
+
+<script>
+let state = {freq: 100000000, gain: 0, volume: 70, mode: 0, filter_bw: 15000, muted: false, squelch: 0, noise_blanker: {enabled: true, threshold: 5}};
+let ws = null;
+
+function updateUI() {
+    document.getElementById('freqDisplay').textContent = (state.freq / 1e6).toFixed(3);
+    document.getElementById('volVal').textContent = state.volume;
+    document.getElementById('bwVal').textContent = (state.filter_bw / 1000) + ' kHz';
+    document.getElementById('volume').value = state.volume;
+    document.getElementById('filterbw').value = state.filter_bw;
+    document.getElementById('btnWBFM').className = 'mode-btn' + (state.mode === 0 ? ' active' : '');
+    document.getElementById('btnNBFM').className = 'mode-btn' + (state.mode === 1 ? ' active' : '');
+    document.getElementById('muteBtn').className = 'mute-btn' + (state.muted ? ' muted' : '');
+    document.getElementById('muteBtn').textContent = state.muted ? 'UNMUTE' : 'MUTE';
+    if (state.squelch !== undefined) {
+        document.getElementById('squelch').value = state.squelch;
+        document.getElementById('sqVal').textContent = state.squelch;
+    }
+    if (state.noise_blanker) {
+        document.getElementById('nbEnable').checked = state.noise_blanker.enabled;
+        document.getElementById('nbThresh').value = state.noise_blanker.threshold;
+        document.getElementById('nbVal').textContent = state.noise_blanker.threshold;
+    }
+}
+
+async function api(path, body) {
+    try {
+        const opts = body !== undefined ? {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)} : {};
+        const r = await fetch('/api/' + path, opts);
+        return await r.json();
+    } catch(e) { console.error('API error:', e); return null; }
+}
+
+async function tune(delta) {
+    state.freq += delta;
+    if (state.freq < 24000000) state.freq = 24000000;
+    if (state.freq > 1766000000) state.freq = 1766000000;
+    updateUI();
+    await api('freq', {value: state.freq});
+}
+
+async function setVolume(v) {
+    state.volume = parseInt(v);
+    document.getElementById('volVal').textContent = v;
+    await api('volume', {value: state.volume});
+}
+
+async function setGain(g) {
+    state.gain = parseInt(g);
+    await api('gain', {value: state.gain});
+}
+
+async function setMode(m) {
+    state.mode = m;
+    state.filter_bw = m === 0 ? 15000 : 3000;
+    updateUI();
+    await api('mode', {value: m});
+}
+
+async function setFilterBW(bw) {
+    state.filter_bw = parseInt(bw);
+    document.getElementById('bwVal').textContent = (state.filter_bw / 1000) + ' kHz';
+    await api('filter_bw', {value: state.filter_bw});
+}
+
+async function setSquelch(v) {
+    state.squelch = parseInt(v);
+    document.getElementById('sqVal').textContent = v;
+    await api('squelch', {value: state.squelch});
+}
+
+async function toggleMute() {
+    state.muted = !state.muted;
+    updateUI();
+    await api('mute', {value: state.muted});
+}
+
+async function setNB() {
+    const enabled = document.getElementById('nbEnable').checked;
+    const threshold = parseInt(document.getElementById('nbThresh').value);
+    document.getElementById('nbVal').textContent = threshold;
+    await api('noise_blanker', {enabled, threshold});
+}
+
+function connectWS() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws');
+    ws.onmessage = (e) => {
+        try {
+            const d = JSON.parse(e.data);
+            if (d.signal_strength !== undefined) {
+                const pct = Math.min(100, Math.max(0, d.signal_strength * 100 / 32767));
+                document.getElementById('sigMeter').style.width = pct + '%';
+                document.getElementById('sigVal').textContent = pct.toFixed(0) + '%';
+            }
+            if (d.stereo !== undefined) {
+                document.getElementById('rdsStereo').textContent = d.stereo ? 'STEREO' : '';
+            }
+        } catch(e) {}
+    };
+    ws.onclose = () => setTimeout(connectWS, 2000);
+    ws.onerror = () => ws.close();
+}
+
+async function pollRDS() {
+    const r = await api('rds');
+    if (r) {
+        document.getElementById('rdsPS').textContent = r.ps_name || '';
+        document.getElementById('rdsRT').textContent = r.radio_text || '';
+        if (r.stereo !== undefined) {
+            document.getElementById('rdsStereo').textContent = r.stereo ? 'STEREO' : '';
+        }
+    }
+}
+
+// Init
+(async () => {
+    const s = await api('status');
+    if (s) { Object.assign(state, s); updateUI(); }
+    connectWS();
+    setInterval(pollRDS, 2000);
+})();
+</script>
+</body>
+</html>
