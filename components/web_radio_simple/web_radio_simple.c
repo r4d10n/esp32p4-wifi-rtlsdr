@@ -33,11 +33,13 @@ extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
 /* ── Constants ── */
 
 #define MAX_WS_CLIENTS      4
-#define WS_TIMER_PERIOD_MS  100     /* 10 Hz signal strength push */
+#define WS_TIMER_PERIOD_MS  500     /* 2 Hz signal strength push (reduced to avoid TLS contention with audio) */
 #define POST_BODY_MAX       256
 
-/* Audio buffer: 4800 samples = 100ms @ 48kHz mono */
-#define AUDIO_BUF_SAMPLES   4800
+/* Audio buffer: 9600 samples = 200ms @ 48kHz mono.
+ * Larger buffer reduces TLS frame rate (5/s instead of 10/s),
+ * preventing mbedTLS overload that causes connection drops. */
+#define AUDIO_BUF_SAMPLES   9600
 static int16_t              s_audio_buf[AUDIO_BUF_SAMPLES];
 static int                  s_audio_buf_pos = 0;
 
@@ -102,15 +104,23 @@ static void ws_timer_cb(void *arg)
 {
     if (!s_httpd) return;
 
-    char buf[64];
-    int len = snprintf(buf, sizeof(buf), "{\"signal_strength\":%d}",
-                       (int)s_signal_strength);
-
+    /* Skip signal strength push if any client has audio active —
+     * avoid TLS frame contention that causes connection drops. */
     taskENTER_CRITICAL(&s_ws_mux);
     int count = s_ws_count;
     int fds[MAX_WS_CLIENTS];
-    for (int i = 0; i < count; i++) fds[i] = s_ws_fds[i];
+    bool any_audio = false;
+    for (int i = 0; i < count; i++) {
+        fds[i] = s_ws_fds[i];
+        if (s_ws_audio[i]) any_audio = true;
+    }
     taskEXIT_CRITICAL(&s_ws_mux);
+
+    if (any_audio) return;  /* Audio frames have priority */
+
+    char buf[64];
+    int len = snprintf(buf, sizeof(buf), "{\"signal_strength\":%d}",
+                       (int)s_signal_strength);
 
     for (int i = 0; i < count; i++) {
         httpd_ws_frame_t frame = {

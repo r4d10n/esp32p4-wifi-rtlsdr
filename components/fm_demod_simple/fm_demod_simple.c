@@ -19,8 +19,8 @@
 
 /* ── FIR LPF Design ── */
 
-#define FIR_TAPS    63
-#define CIC_DECIMATION  4
+#define FIR_TAPS    31     /* 31 taps sufficient for mono (no 19kHz pilot to reject) */
+/* CIC decimation: 4 for high rates (>=512kSPS), 1 (bypass) for <=256kSPS */
 #define DEEMPH_TAU_US   75  /* 75us for NA/Japan, 50us for Europe */
 
 /* Nuttall window coefficients */
@@ -70,6 +70,7 @@ struct fm_demod_simple {
     uint32_t sample_rate;       /* Input sample rate */
     uint32_t audio_rate;        /* Output audio rate */
     uint32_t cic_rate;          /* Rate after CIC decimation */
+    int      cic_decim;         /* CIC decimation ratio (1=bypass, 4=normal) */
 
     /* CIC decimator state (3rd order, complex).
      * Use int64 — float loses precision (24-bit mantissa), double is
@@ -113,7 +114,9 @@ fm_demod_simple_t *fm_demod_simple_create(uint32_t sample_rate, uint32_t audio_r
 
     d->sample_rate = sample_rate;
     d->audio_rate = audio_rate;
-    d->cic_rate = sample_rate / CIC_DECIMATION;
+    /* Auto-select CIC decimation: bypass for low rates, 4x for high rates */
+    d->cic_decim = (sample_rate > 512000) ? 4 : 1;
+    d->cic_rate = sample_rate / d->cic_decim;
 
     /* FM discriminator scale: max angle per sample at 75kHz deviation.
      * atan2 output range is [-pi, pi]. For WBFM, max deviation = 75kHz,
@@ -156,7 +159,7 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
     /* Temporary buffer for post-CIC demodulated samples.
      * After CIC decimation by 4, we get at most iq_pairs/4 samples.
      * After demod, same count. We process in the same buffer. */
-    int max_cic_out = iq_pairs / CIC_DECIMATION + 1;
+    int max_cic_out = iq_pairs / d->cic_decim + 1;
 
     /* Stack-allocate for reasonable sizes, heap for large */
     float *demod_buf;
@@ -180,51 +183,44 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
         d->signal_acc += fi * fi + fq * fq;
         d->signal_count++;
 
-        /* Step 2: CIC decimator (3rd order) using int64.
-         * Scale float [-1,1] → int32 Q23 for integer accumulation. */
-        int32_t si = (int32_t)(fi * 8388608.0f);  /* Q23 */
-        int32_t sq = (int32_t)(fq * 8388608.0f);
+        /* Step 2: CIC decimation or bypass */
+        float ci_f, cq_f;
+        if (d->cic_decim <= 1) {
+            /* Bypass: direct passthrough at input rate */
+            ci_f = fi;
+            cq_f = fq;
+        } else {
+            /* CIC decimator (3rd order) using int64 */
+            int32_t si = (int32_t)(fi * 8388608.0f);
+            int32_t sq = (int32_t)(fq * 8388608.0f);
 
-        d->cic_integrator_i[0] += si;
-        d->cic_integrator_q[0] += sq;
-        d->cic_integrator_i[1] += d->cic_integrator_i[0];
-        d->cic_integrator_q[1] += d->cic_integrator_q[0];
-        d->cic_integrator_i[2] += d->cic_integrator_i[1];
-        d->cic_integrator_q[2] += d->cic_integrator_q[1];
+            d->cic_integrator_i[0] += si;
+            d->cic_integrator_q[0] += sq;
+            d->cic_integrator_i[1] += d->cic_integrator_i[0];
+            d->cic_integrator_q[1] += d->cic_integrator_q[0];
+            d->cic_integrator_i[2] += d->cic_integrator_i[1];
+            d->cic_integrator_q[2] += d->cic_integrator_q[1];
 
-        d->cic_count++;
-        if (d->cic_count < CIC_DECIMATION) continue;
-        d->cic_count = 0;
+            d->cic_count++;
+            if (d->cic_count < d->cic_decim) continue;
+            d->cic_count = 0;
 
-        /* CIC comb stage (int64) */
-        int64_t ci = d->cic_integrator_i[2];
-        int64_t cq = d->cic_integrator_q[2];
+            int64_t ci = d->cic_integrator_i[2];
+            int64_t cq = d->cic_integrator_q[2];
+            int64_t di, dq;
 
-        int64_t di, dq;
-        di = ci - d->cic_comb_delay_i[0];
-        d->cic_comb_delay_i[0] = ci;
-        ci = di;
-        dq = cq - d->cic_comb_delay_q[0];
-        d->cic_comb_delay_q[0] = cq;
-        cq = dq;
+            di = ci - d->cic_comb_delay_i[0]; d->cic_comb_delay_i[0] = ci; ci = di;
+            dq = cq - d->cic_comb_delay_q[0]; d->cic_comb_delay_q[0] = cq; cq = dq;
+            di = ci - d->cic_comb_delay_i[1]; d->cic_comb_delay_i[1] = ci; ci = di;
+            dq = cq - d->cic_comb_delay_q[1]; d->cic_comb_delay_q[1] = cq; cq = dq;
+            di = ci - d->cic_comb_delay_i[2]; d->cic_comb_delay_i[2] = ci; ci = di;
+            dq = cq - d->cic_comb_delay_q[2]; d->cic_comb_delay_q[2] = cq; cq = dq;
 
-        di = ci - d->cic_comb_delay_i[1];
-        d->cic_comb_delay_i[1] = ci;
-        ci = di;
-        dq = cq - d->cic_comb_delay_q[1];
-        d->cic_comb_delay_q[1] = cq;
-        cq = dq;
-
-        di = ci - d->cic_comb_delay_i[2];
-        d->cic_comb_delay_i[2] = ci;
-        ci = di;
-        dq = cq - d->cic_comb_delay_q[2];
-        d->cic_comb_delay_q[2] = cq;
-        cq = dq;
-
-        /* Normalize: CIC gain = R^N = 64, Q23 → float [-1,1] */
-        float ci_f = (float)ci / (64.0f * 8388608.0f);
-        float cq_f = (float)cq / (64.0f * 8388608.0f);
+            /* Normalize: CIC gain = R^N, Q23 → float */
+            float cic_gain = (float)(d->cic_decim * d->cic_decim * d->cic_decim);
+            ci_f = (float)ci / (cic_gain * 8388608.0f);
+            cq_f = (float)cq / (cic_gain * 8388608.0f);
+        }
 
         /* Step 3: FM discriminator using atan2f(cross, dot) */
         float dot   = ci_f * d->prev_i + cq_f * d->prev_q;

@@ -88,8 +88,8 @@ esp_err_t audio_out_simple_init(const audio_out_simple_config_t *config)
     /* 2. Initialize I2S TX channel — always STEREO */
     i2s_chan_config_t i2s_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     i2s_cfg.auto_clear = true;
-    i2s_cfg.dma_desc_num = 6;
-    i2s_cfg.dma_frame_num = 240;
+    i2s_cfg.dma_desc_num = 12;       /* 12 DMA descriptors */
+    i2s_cfg.dma_frame_num = 960;    /* 960 frames each = 11520 total = 240ms @ 48kHz */
     ret = i2s_new_channel(&i2s_cfg, &s_i2s_tx, NULL);
     ESP_RETURN_ON_ERROR(ret, TAG, "I2S channel create failed");
 

@@ -13,6 +13,7 @@
 #include "freertos/task.h"
 #include "freertos/ringbuf.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_hosted.h"
@@ -34,7 +35,7 @@ static const char *TAG = "main";
 #define WIFI_PASS       CONFIG_WIFI_PASSWORD
 
 /* DSP parameters */
-#define SDR_SAMPLE_RATE     1024000
+#define SDR_SAMPLE_RATE     256000
 #define SDR_CENTER_FREQ     100000000   /* 100.0 MHz */
 #define SDR_GAIN            496         /* 49.6 dB */
 #define AUDIO_RATE          48000
@@ -194,20 +195,13 @@ static void fm_pipeline_task(void *arg)
         uint8_t *iq = (uint8_t *)xRingbufferReceive(iq_ringbuf, &item_size, pdMS_TO_TICKS(100));
         if (!iq || item_size == 0) continue;
 
-        /* Process IQ in chunks to avoid watchdog timeout.
-         * Float atan2f is expensive — process max 2048 bytes (1024 IQ pairs) per chunk,
-         * yielding between chunks so the IDLE task can reset the watchdog. */
-        int offset = 0;
-        while (offset < (int)item_size) {
-            int chunk = (int)item_size - offset;
-            if (chunk > 2048) chunk = 2048;  /* 1024 IQ pairs max per chunk */
+        /* Process entire ring buffer item at once. */
+        int64_t t0 = esp_timer_get_time();
+        int n = fm_demod_simple_process(demod, iq, (int)item_size,
+                                        audio_float_buf, AUDIO_BUF_SIZE);
+        int64_t t1 = esp_timer_get_time();
 
-            int n = fm_demod_simple_process(demod, iq + offset, chunk,
-                                            audio_float_buf, AUDIO_BUF_SIZE);
-            offset += chunk;
-
-            if (n <= 0) continue;
-
+        if (n > 0) {
             /* Convert float [-1,1] to int16, using full range for loud audio */
             for (int i = 0; i < n; i++) {
                 float s = audio_float_buf[i] * 32000.0f;
@@ -216,17 +210,32 @@ static void fm_pipeline_task(void *arg)
                 audio_s16_buf[i] = (int16_t)s;
             }
 
-            /* Write to I2S audio output */
-            audio_out_simple_write(audio_s16_buf, n, 200);
+            /* Write to I2S audio output — use timeout=0 to avoid blocking */
+            audio_out_simple_write(audio_s16_buf, n, 0);
 
             /* Push to web radio for browser streaming */
             web_radio_simple_push_audio(audio_s16_buf, n);
-
-            /* Yield to let IDLE task feed the watchdog */
-            taskYIELD();
         }
 
-        /* Return ring buffer item after all chunks processed */
+        int64_t t2 = esp_timer_get_time();
+
+        /* Performance logging */
+        {
+            static int perf_cnt = 0;
+            static int64_t perf_demod = 0, perf_total = 0;
+            perf_demod += (t1 - t0);
+            perf_total += (t2 - t0);
+            if (++perf_cnt >= 50) {
+                ESP_LOGE(TAG, "PERF: demod=%lldus total=%lldus/block in=%d out=%d",
+                         perf_demod / perf_cnt, perf_total / perf_cnt,
+                         (int)item_size, n);
+                perf_cnt = 0;
+                perf_demod = 0;
+                perf_total = 0;
+            }
+        }
+
+        /* Return ring buffer item */
         vRingbufferReturnItem(iq_ringbuf, iq);
 
         /* Update signal strength for web UI */
