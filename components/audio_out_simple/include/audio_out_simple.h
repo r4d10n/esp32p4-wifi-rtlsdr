@@ -46,6 +46,7 @@ typedef struct {
 esp_err_t audio_out_simple_init(const audio_out_simple_config_t *config);
 esp_err_t audio_out_simple_deinit(void);
 esp_err_t audio_out_simple_write(const int16_t *samples, int count, int timeout_ms);
+esp_err_t audio_out_simple_write_stereo(const int16_t *stereo_pairs, int n_pairs, int timeout_ms);
 esp_err_t audio_out_simple_set_volume(uint8_t volume);
 uint8_t   audio_out_simple_get_volume(void);
 esp_err_t audio_out_simple_set_speaker(bool enable);

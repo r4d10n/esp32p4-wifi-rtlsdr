@@ -1,13 +1,13 @@
 /*
- * Simple WBFM Demodulator — Plain C, Floating Point
+ * WBFM Demodulator with Stereo — Plain C, Floating Point
  *
- * Pipeline: U8 IQ -> float IQ -> CIC decimate x4 -> FM discriminator ->
- *           de-emphasis -> FIR LPF 15kHz -> resample to 48kHz -> float output
- *
- * Input:  1024 kSPS uint8 IQ
- * After CIC: 256 kSPS float IQ
- * After demod: 256 kSPS float mono
- * After resample: 48 kHz float mono
+ * Pipeline:
+ *   U8 IQ @ 256kSPS → atan2f discriminator → MPX baseband
+ *   MPX → Goertzel 19kHz pilot detect → PLL lock
+ *   MPX → 15kHz LPF → de-emphasis → L+R (mono)
+ *   MPX × 38kHz ref → 15kHz LPF → de-emphasis → L-R
+ *   L = (L+R + L-R) / 2,  R = (L+R - L-R) / 2
+ *   Resample 256k→48k → int16 stereo [L,R,L,R,...]
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -17,89 +17,95 @@
 #include <math.h>
 #include "fm_demod_simple.h"
 
+/* ── Configuration ── */
+
+#define FIR_TAPS        31
+#define GOERTZEL_N      1024
+#define PLL_LUT_SIZE    256
+#define DEEMPH_TAU_US   75      /* 75us NA/Japan, 50us Europe */
+#define FM_DEVIATION    75000.0f
+
 /* ── FIR LPF Design ── */
 
-#define FIR_TAPS    31     /* 31 taps sufficient for mono (no 19kHz pilot to reject) */
-/* CIC decimation: 4 for high rates (>=512kSPS), 1 (bypass) for <=256kSPS */
-#define DEEMPH_TAU_US   75  /* 75us for NA/Japan, 50us for Europe */
-
-/* Nuttall window coefficients */
-static void nuttall_window(float *w, int n)
-{
-    const float a0 = 0.355768f;
-    const float a1 = 0.487396f;
-    const float a2 = 0.144232f;
-    const float a3 = 0.012604f;
-
-    for (int i = 0; i < n; i++) {
-        float x = 2.0f * (float)M_PI * (float)i / (float)(n - 1);
-        w[i] = a0 - a1 * cosf(x) + a2 * cosf(2.0f * x) - a3 * cosf(3.0f * x);
-    }
-}
-
-/* Design a windowed sinc LPF */
 static void design_lpf(float *taps, int ntaps, float cutoff_hz, float sample_rate)
 {
     float fc = cutoff_hz / sample_rate;
-    float window[FIR_TAPS];
-    nuttall_window(window, ntaps);
-
     int mid = ntaps / 2;
     float sum = 0.0f;
 
     for (int i = 0; i < ntaps; i++) {
         int n = i - mid;
-        if (n == 0) {
-            taps[i] = 2.0f * fc;
-        } else {
-            taps[i] = sinf(2.0f * (float)M_PI * fc * (float)n) / ((float)M_PI * (float)n);
-        }
-        taps[i] *= window[i];
+        float sinc = (n == 0) ? 2.0f * fc
+                     : sinf(2.0f * (float)M_PI * fc * (float)n) / ((float)M_PI * (float)n);
+        /* Nuttall window */
+        float w = 2.0f * (float)M_PI * (float)i / (float)(ntaps - 1);
+        float win = 0.355768f - 0.487396f * cosf(w) + 0.144232f * cosf(2.0f * w)
+                  - 0.012604f * cosf(3.0f * w);
+        taps[i] = sinc * win;
         sum += taps[i];
     }
+    for (int i = 0; i < ntaps; i++) taps[i] /= sum;
+}
 
-    /* Normalize for unity gain at DC */
-    for (int i = 0; i < ntaps; i++) {
-        taps[i] /= sum;
+/* ── FIR Filter State ── */
+
+typedef struct {
+    float taps[FIR_TAPS];
+    float delay[FIR_TAPS];
+    int   pos;
+} fir_state_t;
+
+static float fir_process_sample(fir_state_t *f, float in)
+{
+    f->delay[f->pos] = in;
+    f->pos = (f->pos + 1) % FIR_TAPS;
+    float acc = 0.0f;
+    int idx = f->pos;
+    for (int t = 0; t < FIR_TAPS; t++) {
+        idx--;
+        if (idx < 0) idx = FIR_TAPS - 1;
+        acc += f->delay[idx] * f->taps[t];
     }
+    return acc;
 }
 
 /* ── Demodulator State ── */
 
 struct fm_demod_simple {
-    uint32_t sample_rate;       /* Input sample rate */
-    uint32_t audio_rate;        /* Output audio rate */
-    uint32_t cic_rate;          /* Rate after CIC decimation */
-    int      cic_decim;         /* CIC decimation ratio (1=bypass, 4=normal) */
+    uint32_t sample_rate;
+    uint32_t audio_rate;
+    float    fm_scale;          /* 1/max_angle for normalization */
+    float    resample_ratio;    /* sample_rate / audio_rate */
+    float    resample_phase;
+    int      volume;            /* 0-100, applied as float multiply */
 
-    /* CIC decimator state (3rd order, complex).
-     * Use int64 — float loses precision (24-bit mantissa), double is
-     * software-emulated (ESP32-P4 FPU is single-precision only).
-     * Input is scaled: float [-1,1] → int32 [-8388608, 8388608] (Q23).
-     * CIC gain R^N=64 fits in int64 even after hours. */
-    int64_t cic_integrator_i[3];
-    int64_t cic_integrator_q[3];
-    int64_t cic_comb_delay_i[3];
-    int64_t cic_comb_delay_q[3];
-    int   cic_count;
+    /* FM discriminator */
+    float prev_i, prev_q;
 
-    /* FM discriminator state */
-    float prev_i;
-    float prev_q;
-    float fm_scale;         /* 1.0 / max_angle for normalization */
+    /* L+R path: LPF + de-emphasis */
+    fir_state_t fir_lpr;
+    float       deemph_lpr;
+    float       deemph_alpha;
 
-    /* De-emphasis IIR state */
-    float deemph_alpha;
-    float deemph_prev;
+    /* L-R path: LPF + de-emphasis */
+    fir_state_t fir_lmr;
+    float       deemph_lmr;
 
-    /* FIR LPF state */
-    float fir_taps[FIR_TAPS];
-    float fir_delay[FIR_TAPS];
-    int   fir_pos;
+    /* Goertzel 19kHz pilot detector */
+    float goertzel_s1, goertzel_s2;
+    float goertzel_coeff;       /* 2*cos(2*pi*19000/sample_rate) */
+    int   goertzel_count;
+    float goertzel_power;
+    bool  pilot_detected;
 
-    /* Resampler state */
-    float resample_ratio;       /* cic_rate / audio_rate */
-    float resample_phase;
+    /* PLL for 19kHz pilot */
+    float pll_phase;            /* radians */
+    float pll_freq;             /* radians/sample (nominal 19kHz) */
+    float pll_integrator;
+    bool  pll_locked;
+
+    /* Stereo blend */
+    float blend_ratio;          /* 0=mono, 1=full stereo */
 
     /* Signal strength */
     float signal_rms;
@@ -114,189 +120,204 @@ fm_demod_simple_t *fm_demod_simple_create(uint32_t sample_rate, uint32_t audio_r
 
     d->sample_rate = sample_rate;
     d->audio_rate = audio_rate;
-    /* Auto-select CIC decimation: bypass for low rates, 4x for high rates */
-    d->cic_decim = (sample_rate > 512000) ? 4 : 1;
-    d->cic_rate = sample_rate / d->cic_decim;
+    d->volume = 90;
 
-    /* FM discriminator scale: max angle per sample at 75kHz deviation.
-     * atan2 output range is [-pi, pi]. For WBFM, max deviation = 75kHz,
-     * max_angle = 2*pi*75000/256000 = 1.842 rad.
-     * Scale output to [-1, 1] at max deviation. */
-    float max_angle = 2.0f * (float)M_PI * 75000.0f / (float)d->cic_rate;
+    /* FM discriminator scale */
+    float max_angle = 2.0f * (float)M_PI * FM_DEVIATION / (float)sample_rate;
     d->fm_scale = 1.0f / max_angle;
 
-    /* De-emphasis: y[n] = alpha * x[n] + (1 - alpha) * y[n-1]
-     * alpha = 1 - exp(-1 / (tau * fs))
-     * For 75us at 256kHz: alpha ~ 0.051 */
+    /* De-emphasis */
     float tau = (float)DEEMPH_TAU_US * 1e-6f;
-    d->deemph_alpha = 1.0f - expf(-1.0f / (tau * (float)d->cic_rate));
+    d->deemph_alpha = 1.0f - expf(-1.0f / (tau * (float)sample_rate));
 
-    /* Design 15 kHz LPF at the CIC output rate */
-    design_lpf(d->fir_taps, FIR_TAPS, 15000.0f, (float)d->cic_rate);
+    /* Design 15kHz LPF for both L+R and L-R paths */
+    design_lpf(d->fir_lpr.taps, FIR_TAPS, 15000.0f, (float)sample_rate);
+    memcpy(d->fir_lmr.taps, d->fir_lpr.taps, sizeof(d->fir_lpr.taps));
 
-    /* Resample ratio: how many input samples per output sample */
-    d->resample_ratio = (float)d->cic_rate / (float)audio_rate;
+    /* Goertzel: 2*cos(2*pi*19000/sample_rate) */
+    d->goertzel_coeff = 2.0f * cosf(2.0f * (float)M_PI * 19000.0f / (float)sample_rate);
+
+    /* PLL nominal frequency */
+    d->pll_freq = 2.0f * (float)M_PI * 19000.0f / (float)sample_rate;
+
+    /* Resampler */
+    d->resample_ratio = (float)sample_rate / (float)audio_rate;
     d->resample_phase = 0.0f;
 
     return d;
 }
 
-void fm_demod_simple_free(fm_demod_simple_t *d)
-{
-    free(d);
-}
+void fm_demod_simple_free(fm_demod_simple_t *d) { free(d); }
 
-/* ── Processing Pipeline ── */
+/* ── Processing ── */
 
 int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_bytes,
-                            float *audio_out, int audio_max)
+                            int16_t *audio_out, int max_pairs)
 {
     if (!d || !iq_u8 || !audio_out || iq_bytes < 2) return 0;
 
     int iq_pairs = iq_bytes / 2;
     int audio_count = 0;
 
-    /* Temporary buffer for post-CIC demodulated samples.
-     * After CIC decimation by 4, we get at most iq_pairs/4 samples.
-     * After demod, same count. We process in the same buffer. */
-    int max_cic_out = iq_pairs / d->cic_decim + 1;
-
-    /* Stack-allocate for reasonable sizes, heap for large */
-    float *demod_buf;
-    int heap_alloc = 0;
-    if (max_cic_out <= 4096) {
-        demod_buf = alloca(max_cic_out * sizeof(float));
-    } else {
-        demod_buf = malloc(max_cic_out * sizeof(float));
-        heap_alloc = 1;
-        if (!demod_buf) return 0;
+    /* Temp buffers for one block of MPX-rate samples.
+     * Use heap, not stack — 8192 pairs × 3 buffers × 4 bytes = 96KB,
+     * far exceeds the 16KB task stack. */
+    int max_mpx = iq_pairs + 1;
+    float *mpx_buf = malloc(max_mpx * sizeof(float));
+    float *lpr_buf = malloc(max_mpx * sizeof(float));
+    float *lmr_buf = malloc(max_mpx * sizeof(float));
+    if (!mpx_buf || !lpr_buf || !lmr_buf) {
+        free(mpx_buf); free(lpr_buf); free(lmr_buf);
+        return 0;
     }
+    int mpx_count = 0;
 
-    int demod_count = 0;
-
+    /* Step 1: U8→float IQ + FM discriminator → MPX */
     for (int i = 0; i < iq_pairs; i++) {
-        /* Step 1: U8 to float [-1, 1] */
         float fi = ((float)iq_u8[i * 2]     - 127.5f) / 127.5f;
         float fq = ((float)iq_u8[i * 2 + 1] - 127.5f) / 127.5f;
 
-        /* Signal strength accumulator */
+        /* Signal strength */
         d->signal_acc += fi * fi + fq * fq;
         d->signal_count++;
 
-        /* Step 2: CIC decimation or bypass */
-        float ci_f, cq_f;
-        if (d->cic_decim <= 1) {
-            /* Bypass: direct passthrough at input rate */
-            ci_f = fi;
-            cq_f = fq;
-        } else {
-            /* CIC decimator (3rd order) using int64 */
-            int32_t si = (int32_t)(fi * 8388608.0f);
-            int32_t sq = (int32_t)(fq * 8388608.0f);
+        /* FM discriminator: atan2(cross, dot) */
+        float dot   = fi * d->prev_i + fq * d->prev_q;
+        float cross = fq * d->prev_i - fi * d->prev_q;
+        d->prev_i = fi;
+        d->prev_q = fq;
 
-            d->cic_integrator_i[0] += si;
-            d->cic_integrator_q[0] += sq;
-            d->cic_integrator_i[1] += d->cic_integrator_i[0];
-            d->cic_integrator_q[1] += d->cic_integrator_q[0];
-            d->cic_integrator_i[2] += d->cic_integrator_i[1];
-            d->cic_integrator_q[2] += d->cic_integrator_q[1];
-
-            d->cic_count++;
-            if (d->cic_count < d->cic_decim) continue;
-            d->cic_count = 0;
-
-            int64_t ci = d->cic_integrator_i[2];
-            int64_t cq = d->cic_integrator_q[2];
-            int64_t di, dq;
-
-            di = ci - d->cic_comb_delay_i[0]; d->cic_comb_delay_i[0] = ci; ci = di;
-            dq = cq - d->cic_comb_delay_q[0]; d->cic_comb_delay_q[0] = cq; cq = dq;
-            di = ci - d->cic_comb_delay_i[1]; d->cic_comb_delay_i[1] = ci; ci = di;
-            dq = cq - d->cic_comb_delay_q[1]; d->cic_comb_delay_q[1] = cq; cq = dq;
-            di = ci - d->cic_comb_delay_i[2]; d->cic_comb_delay_i[2] = ci; ci = di;
-            dq = cq - d->cic_comb_delay_q[2]; d->cic_comb_delay_q[2] = cq; cq = dq;
-
-            /* Normalize: CIC gain = R^N, Q23 → float */
-            float cic_gain = (float)(d->cic_decim * d->cic_decim * d->cic_decim);
-            ci_f = (float)ci / (cic_gain * 8388608.0f);
-            cq_f = (float)cq / (cic_gain * 8388608.0f);
-        }
-
-        /* Step 3: FM discriminator using atan2f(cross, dot) */
-        float dot   = ci_f * d->prev_i + cq_f * d->prev_q;
-        float cross = cq_f * d->prev_i - ci_f * d->prev_q;
-        d->prev_i = ci_f;
-        d->prev_q = cq_f;
-
-        float fm_out = atan2f(cross, dot);
-
-        /* Scale so max deviation (75kHz) maps to [-1, 1] */
-        fm_out *= d->fm_scale;
-
-        /* Step 4: De-emphasis IIR */
-        d->deemph_prev = d->deemph_alpha * fm_out + (1.0f - d->deemph_alpha) * d->deemph_prev;
-        float demod_sample = d->deemph_prev;
-
-        if (demod_count < max_cic_out) {
-            demod_buf[demod_count++] = demod_sample;
-        }
+        float mpx = atan2f(cross, dot) * d->fm_scale;
+        mpx_buf[mpx_count++] = mpx;
     }
 
-    /* Step 5: FIR LPF + Step 6: Resample 256k -> 48k using linear interpolation */
-    /* First apply FIR to demod_buf in-place */
-    /* We use direct-form FIR with circular delay line */
+    /* Step 2: Per-MPX-sample processing: Goertzel + PLL + L+R/L-R extraction */
+    for (int i = 0; i < mpx_count; i++) {
+        float mpx = mpx_buf[i];
 
-    for (int i = 0; i < demod_count; i++) {
-        /* Push sample into FIR delay line */
-        d->fir_delay[d->fir_pos] = demod_buf[i];
-        d->fir_pos = (d->fir_pos + 1) % FIR_TAPS;
+        /* Goertzel pilot detector */
+        float s0 = d->goertzel_coeff * d->goertzel_s1 - d->goertzel_s2 + mpx;
+        d->goertzel_s2 = d->goertzel_s1;
+        d->goertzel_s1 = s0;
+        d->goertzel_count++;
 
-        /* Compute FIR output */
-        float acc = 0.0f;
-        int idx = d->fir_pos;
-        for (int t = 0; t < FIR_TAPS; t++) {
-            idx--;
-            if (idx < 0) idx = FIR_TAPS - 1;
-            acc += d->fir_delay[idx] * d->fir_taps[t];
+        if (d->goertzel_count >= GOERTZEL_N) {
+            float power = d->goertzel_s1 * d->goertzel_s1
+                        + d->goertzel_s2 * d->goertzel_s2
+                        - d->goertzel_coeff * d->goertzel_s1 * d->goertzel_s2;
+            d->goertzel_power = power;
+            /* Threshold: empirically tuned for 256kSPS FM signal */
+            float thresh = 0.001f;
+            d->pilot_detected = (power > thresh);
+            d->goertzel_s1 = 0;
+            d->goertzel_s2 = 0;
+            d->goertzel_count = 0;
         }
-        demod_buf[i] = acc;
+
+        /* PLL tracking 19kHz pilot */
+        float nco_sin = sinf(d->pll_phase);
+
+        /* Phase detector: quadrature error */
+        float pd_q = mpx * nco_sin;
+
+        /* PI loop filter */
+        d->pll_integrator += 0.0001f * pd_q;
+        float correction = 0.01f * pd_q + d->pll_integrator;
+
+        d->pll_phase += d->pll_freq + correction;
+        /* Keep phase in [0, 2*pi) */
+        if (d->pll_phase > 2.0f * (float)M_PI) d->pll_phase -= 2.0f * (float)M_PI;
+        if (d->pll_phase < 0) d->pll_phase += 2.0f * (float)M_PI;
+
+        /* PLL lock: |pd_q| should be small when locked */
+        d->pll_locked = d->pilot_detected;
+
+        /* L+R: MPX directly (below 15kHz is L+R) → LPF → de-emphasis */
+        float lpr_filt = fir_process_sample(&d->fir_lpr, mpx);
+        d->deemph_lpr = d->deemph_alpha * lpr_filt + (1.0f - d->deemph_alpha) * d->deemph_lpr;
+        lpr_buf[i] = d->deemph_lpr;
+
+        /* L-R: multiply MPX by 38kHz reference (2× pilot phase) */
+        float ref_38k = sinf(2.0f * d->pll_phase);
+        float lmr_raw = mpx * ref_38k * 2.0f;  /* ×2 for DSB-SC amplitude recovery */
+        float lmr_filt = fir_process_sample(&d->fir_lmr, lmr_raw);
+        d->deemph_lmr = d->deemph_alpha * lmr_filt + (1.0f - d->deemph_alpha) * d->deemph_lmr;
+        lmr_buf[i] = d->deemph_lmr;
     }
 
-    /* Resample using linear interpolation */
-    while (d->resample_phase < (float)demod_count && audio_count < audio_max) {
+    /* Step 3: Stereo blend */
+    bool is_stereo = d->pilot_detected && d->pll_locked;
+    if (is_stereo) {
+        /* Ramp blend toward 1.0 */
+        d->blend_ratio += 0.01f;
+        if (d->blend_ratio > 1.0f) d->blend_ratio = 1.0f;
+    } else {
+        /* Ramp blend toward 0.0 (mono) */
+        d->blend_ratio -= 0.01f;
+        if (d->blend_ratio < 0.0f) d->blend_ratio = 0.0f;
+    }
+
+    /* Step 4: Resample 256k→48k + stereo matrix → int16 output */
+    float vol = (float)d->volume / 100.0f;
+
+    while (d->resample_phase < (float)mpx_count && audio_count < max_pairs) {
         int idx0 = (int)d->resample_phase;
         float frac = d->resample_phase - (float)idx0;
+        int idx1 = (idx0 + 1 < mpx_count) ? idx0 + 1 : idx0;
 
-        float s0 = demod_buf[idx0];
-        float s1 = (idx0 + 1 < demod_count) ? demod_buf[idx0 + 1] : s0;
+        /* Interpolate L+R and L-R */
+        float lpr = lpr_buf[idx0] + frac * (lpr_buf[idx1] - lpr_buf[idx0]);
+        float lmr = lmr_buf[idx0] + frac * (lmr_buf[idx1] - lmr_buf[idx0]);
 
-        float sample = s0 + frac * (s1 - s0);
+        /* Stereo matrix with blend */
+        float L, R;
+        if (d->blend_ratio > 0.01f) {
+            float stereo_L = (lpr + lmr) * 0.5f;
+            float stereo_R = (lpr - lmr) * 0.5f;
+            L = lpr * (1.0f - d->blend_ratio) + stereo_L * d->blend_ratio;
+            R = lpr * (1.0f - d->blend_ratio) + stereo_R * d->blend_ratio;
+        } else {
+            L = lpr;
+            R = lpr;
+        }
 
-        /* Clamp to [-1, 1] */
-        if (sample > 1.0f) sample = 1.0f;
-        if (sample < -1.0f) sample = -1.0f;
+        /* Volume + clip + convert to int16 */
+        L *= vol * 32000.0f;
+        R *= vol * 32000.0f;
+        if (L > 32767.0f) L = 32767.0f;
+        if (L < -32768.0f) L = -32768.0f;
+        if (R > 32767.0f) R = 32767.0f;
+        if (R < -32768.0f) R = -32768.0f;
 
-        audio_out[audio_count++] = sample;
+        audio_out[audio_count * 2]     = (int16_t)L;
+        audio_out[audio_count * 2 + 1] = (int16_t)R;
+        audio_count++;
+
         d->resample_phase += d->resample_ratio;
     }
 
-    /* Adjust phase for next call */
-    d->resample_phase -= (float)demod_count;
+    d->resample_phase -= (float)mpx_count;
     if (d->resample_phase < 0.0f) d->resample_phase = 0.0f;
 
-    /* Update signal strength RMS */
+    /* Update signal strength */
     if (d->signal_count > 0) {
         d->signal_rms = sqrtf(d->signal_acc / (float)d->signal_count);
         d->signal_acc = 0.0f;
         d->signal_count = 0;
     }
 
-    if (heap_alloc) free(demod_buf);
+    free(mpx_buf);
+    free(lpr_buf);
+    free(lmr_buf);
     return audio_count;
 }
 
 float fm_demod_simple_get_signal_strength(fm_demod_simple_t *d)
 {
-    if (!d) return 0.0f;
-    return d->signal_rms;
+    return d ? d->signal_rms : 0.0f;
+}
+
+bool fm_demod_simple_is_stereo(fm_demod_simple_t *d)
+{
+    return d ? (d->pilot_detected && d->pll_locked) : false;
 }

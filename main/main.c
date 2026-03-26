@@ -44,10 +44,9 @@ static const char *TAG = "main";
 static RingbufHandle_t iq_ringbuf = NULL;
 #define IQ_RINGBUF_SIZE     (128 * 1024)
 
-/* Audio output buffer */
-#define AUDIO_BUF_SIZE      2048
-static float    audio_float_buf[AUDIO_BUF_SIZE];
-static int16_t  audio_s16_buf[AUDIO_BUF_SIZE];
+/* Audio output buffer — stereo pairs (L,R interleaved) */
+#define AUDIO_BUF_PAIRS     2048
+static int16_t  audio_s16_buf[AUDIO_BUF_PAIRS * 2];  /* L,R,L,R,... */
 
 /* Shared state */
 static rtlsdr_dev_t         *sdr_dev = NULL;
@@ -195,26 +194,18 @@ static void fm_pipeline_task(void *arg)
         uint8_t *iq = (uint8_t *)xRingbufferReceive(iq_ringbuf, &item_size, pdMS_TO_TICKS(100));
         if (!iq || item_size == 0) continue;
 
-        /* Process entire ring buffer item at once. */
+        /* Process entire ring buffer item → stereo int16 pairs */
         int64_t t0 = esp_timer_get_time();
-        int n = fm_demod_simple_process(demod, iq, (int)item_size,
-                                        audio_float_buf, AUDIO_BUF_SIZE);
+        int pairs = fm_demod_simple_process(demod, iq, (int)item_size,
+                                             audio_s16_buf, AUDIO_BUF_PAIRS);
         int64_t t1 = esp_timer_get_time();
 
-        if (n > 0) {
-            /* Convert float [-1,1] to int16, using full range for loud audio */
-            for (int i = 0; i < n; i++) {
-                float s = audio_float_buf[i] * 32000.0f;
-                if (s > 32767.0f) s = 32767.0f;
-                if (s < -32768.0f) s = -32768.0f;
-                audio_s16_buf[i] = (int16_t)s;
-            }
+        if (pairs > 0) {
+            /* Write stereo to I2S (already interleaved L,R) */
+            audio_out_simple_write_stereo(audio_s16_buf, pairs, 0);
 
-            /* Write to I2S audio output — use timeout=0 to avoid blocking */
-            audio_out_simple_write(audio_s16_buf, n, 0);
-
-            /* Push to web radio for browser streaming */
-            web_radio_simple_push_audio(audio_s16_buf, n);
+            /* Push interleaved stereo to WebSocket */
+            web_radio_simple_push_audio(audio_s16_buf, pairs * 2);
         }
 
         int64_t t2 = esp_timer_get_time();
@@ -228,7 +219,7 @@ static void fm_pipeline_task(void *arg)
             if (++perf_cnt >= 50) {
                 ESP_LOGE(TAG, "PERF: demod=%lldus total=%lldus/block in=%d out=%d",
                          perf_demod / perf_cnt, perf_total / perf_cnt,
-                         (int)item_size, n);
+                         (int)item_size, pairs);
                 perf_cnt = 0;
                 perf_demod = 0;
                 perf_total = 0;

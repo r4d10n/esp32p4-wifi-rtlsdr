@@ -245,6 +245,27 @@ esp_err_t audio_out_simple_write(const int16_t *samples, int count, int timeout_
     return ESP_OK;
 }
 
+esp_err_t audio_out_simple_write_stereo(const int16_t *stereo_pairs, int n_pairs, int timeout_ms)
+{
+    if (!s_i2s_tx || !stereo_pairs || n_pairs <= 0) return ESP_ERR_INVALID_STATE;
+
+    /* Data is already interleaved [L,R,L,R,...] — write directly to I2S */
+    if (s_muted) {
+        /* Still need to write silence to keep I2S DMA running */
+        size_t bytes = n_pairs * 2 * sizeof(int16_t);
+        memset(s_stereo_buf, 0, bytes > sizeof(s_stereo_buf) ? sizeof(s_stereo_buf) : bytes);
+        size_t written = 0;
+        return i2s_channel_write(s_i2s_tx, s_stereo_buf,
+                                  bytes > sizeof(s_stereo_buf) ? sizeof(s_stereo_buf) : bytes,
+                                  &written, timeout_ms);
+    }
+
+    size_t bytes_written = 0;
+    return i2s_channel_write(s_i2s_tx, stereo_pairs,
+                              n_pairs * 2 * sizeof(int16_t),
+                              &bytes_written, timeout_ms);
+}
+
 esp_err_t audio_out_simple_set_volume(uint8_t volume)
 {
     if (volume > 100) volume = 100;
