@@ -81,6 +81,7 @@ struct fm_demod_simple {
     /* FM discriminator state */
     float prev_i;
     float prev_q;
+    float fm_scale;         /* 1.0 / max_angle for normalization */
 
     /* De-emphasis IIR state */
     float deemph_alpha;
@@ -109,6 +110,13 @@ fm_demod_simple_t *fm_demod_simple_create(uint32_t sample_rate, uint32_t audio_r
     d->sample_rate = sample_rate;
     d->audio_rate = audio_rate;
     d->cic_rate = sample_rate / CIC_DECIMATION;
+
+    /* FM discriminator scale: max angle per sample at 75kHz deviation.
+     * atan2 output range is [-pi, pi]. For WBFM, max deviation = 75kHz,
+     * max_angle = 2*pi*75000/256000 = 1.842 rad.
+     * Scale output to [-1, 1] at max deviation. */
+    float max_angle = 2.0f * (float)M_PI * 75000.0f / (float)d->cic_rate;
+    d->fm_scale = 1.0f / max_angle;
 
     /* De-emphasis: y[n] = alpha * x[n] + (1 - alpha) * y[n-1]
      * alpha = 1 - exp(-1 / (tau * fs))
@@ -218,8 +226,8 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
 
         float fm_out = atan2f(cross, dot);
 
-        /* Normalize: max deviation = +/-pi per sample -> scale to [-1, 1] */
-        fm_out /= (float)M_PI;
+        /* Scale so max deviation (75kHz) maps to [-1, 1] */
+        fm_out *= d->fm_scale;
 
         /* Step 4: De-emphasis IIR */
         d->deemph_prev = d->deemph_alpha * fm_out + (1.0f - d->deemph_alpha) * d->deemph_prev;

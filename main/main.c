@@ -194,28 +194,40 @@ static void fm_pipeline_task(void *arg)
         uint8_t *iq = (uint8_t *)xRingbufferReceive(iq_ringbuf, &item_size, pdMS_TO_TICKS(100));
         if (!iq || item_size == 0) continue;
 
-        /* Process IQ through demodulator */
-        int n = fm_demod_simple_process(demod, iq, (int)item_size,
-                                        audio_float_buf, AUDIO_BUF_SIZE);
+        /* Process IQ in chunks to avoid watchdog timeout.
+         * Float atan2f is expensive — process max 2048 bytes (1024 IQ pairs) per chunk,
+         * yielding between chunks so the IDLE task can reset the watchdog. */
+        int offset = 0;
+        while (offset < (int)item_size) {
+            int chunk = (int)item_size - offset;
+            if (chunk > 2048) chunk = 2048;  /* 1024 IQ pairs max per chunk */
 
-        /* Return ring buffer item */
-        vRingbufferReturnItem(iq_ringbuf, iq);
+            int n = fm_demod_simple_process(demod, iq + offset, chunk,
+                                            audio_float_buf, AUDIO_BUF_SIZE);
+            offset += chunk;
 
-        if (n <= 0) continue;
+            if (n <= 0) continue;
 
-        /* Convert float [-1,1] to int16, using full range for loud audio */
-        for (int i = 0; i < n; i++) {
-            float s = audio_float_buf[i] * 32000.0f;
-            if (s > 32767.0f) s = 32767.0f;
-            if (s < -32768.0f) s = -32768.0f;
-            audio_s16_buf[i] = (int16_t)s;
+            /* Convert float [-1,1] to int16, using full range for loud audio */
+            for (int i = 0; i < n; i++) {
+                float s = audio_float_buf[i] * 32000.0f;
+                if (s > 32767.0f) s = 32767.0f;
+                if (s < -32768.0f) s = -32768.0f;
+                audio_s16_buf[i] = (int16_t)s;
+            }
+
+            /* Write to I2S audio output */
+            audio_out_simple_write(audio_s16_buf, n, 200);
+
+            /* Push to web radio for browser streaming */
+            web_radio_simple_push_audio(audio_s16_buf, n);
+
+            /* Yield to let IDLE task feed the watchdog */
+            taskYIELD();
         }
 
-        /* Write to I2S audio output */
-        audio_out_simple_write(audio_s16_buf, n, 200);
-
-        /* Push to web radio for browser streaming */
-        web_radio_simple_push_audio(audio_s16_buf, n);
+        /* Return ring buffer item after all chunks processed */
+        vRingbufferReturnItem(iq_ringbuf, iq);
 
         /* Update signal strength for web UI */
         float sig = fm_demod_simple_get_signal_strength(demod);

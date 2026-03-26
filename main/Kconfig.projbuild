@@ -2,13 +2,13 @@ menu "FM Radio Configuration"
 
     config WIFI_SSID
         string "WiFi SSID"
-        default "myssid"
+        default "MALARnet"
         help
             SSID of the WiFi network to connect to.
 
     config WIFI_PASSWORD
         string "WiFi Password"
-        default "mypassword"
+        default "Peter@1954"
         help
             Password for the WiFi network.
 
