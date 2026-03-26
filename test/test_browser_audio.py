@@ -115,20 +115,23 @@ def on_message(ws, message):
     s16 = np.frombuffer(raw, dtype=np.int16, count=n_samples)
     f32 = s16.astype(np.float32) * (1.0 / 32768.0)
 
-    # Track total samples received (before downmix) for fill rate calc
+    # Track total samples received for fill rate calc
     with lock:
         pcm_samples += n_samples
 
-    # Detect stereo: interleaved L/R → downmix to mono for playback
-    if stereo and n_samples >= 2 and n_samples % 2 == 0:
-        channels_detected = 2
-        f32 = (f32[0::2] + f32[1::2]) * 0.5
+    # Detect stereo: interleaved [L,R,L,R,...] with even sample count
+    if n_samples >= 4 and n_samples % 2 == 0:
+        # Check if L and R differ (stereo) or are identical (mono)
+        L = f32[0::2]
+        R = f32[1::2]
+        if not np.allclose(L[:8], R[:8], atol=0.001):
+            channels_detected = 2
 
-    # Queue for playback (lock-free deque append is thread-safe)
-    audio_queue.append(f32)
+    # Queue raw interleaved samples for playback (paplay handles stereo)
+    audio_queue.append(s16.copy())
 
-    # Record for WAV
-    wav_chunks.append(f32.copy())
+    # Record raw int16 for WAV (preserve stereo interleaving)
+    wav_chunks.append(s16.copy())
 
 
 def on_error(ws, error):
@@ -225,23 +228,23 @@ def audio_playback_paplay():
         audio_playback_aplay()
         return
 
+    # Detect channel count from first audio chunk
+    ch = 2 if channels_detected == 2 else 1
     proc = subprocess.Popen(
-        [player, '--raw', '--format=s16le', f'--rate={AUDIO_RATE}', '--channels=1'],
+        [player, '--raw', '--format=s16le', f'--rate={AUDIO_RATE}', f'--channels={ch}'],
         stdin=subprocess.PIPE,
     )
-    print(f"[AUDIO] paplay playback started @ {AUDIO_RATE} Hz (mono int16)")
+    print(f"[AUDIO] paplay playback started @ {AUDIO_RATE} Hz ({ch}ch int16)")
 
     try:
         while running:
             try:
-                chunk_f32 = audio_queue.popleft()
+                chunk_s16 = audio_queue.popleft()
             except IndexError:
                 time.sleep(0.005)
                 continue
-            # Convert float32 → int16 for aplay
-            int16 = (np.clip(chunk_f32, -1.0, 1.0) * 32767).astype(np.int16)
             try:
-                proc.stdin.write(int16.tobytes())
+                proc.stdin.write(chunk_s16.tobytes())
             except BrokenPipeError:
                 break
     except Exception:
@@ -263,22 +266,22 @@ def audio_playback_aplay():
         print("[AUDIO] aplay not found, playback disabled")
         return
 
+    ch = 2 if channels_detected == 2 else 1
     proc = subprocess.Popen(
-        [aplay, '-f', 'S16_LE', '-r', str(AUDIO_RATE), '-c', '1', '-t', 'raw', '-q'],
+        [aplay, '-f', 'S16_LE', '-r', str(AUDIO_RATE), '-c', str(ch), '-t', 'raw', '-q'],
         stdin=subprocess.PIPE,
     )
-    print(f"[AUDIO] aplay playback started @ {AUDIO_RATE} Hz (mono int16)")
+    print(f"[AUDIO] aplay playback started @ {AUDIO_RATE} Hz ({ch}ch int16)")
 
     try:
         while running:
             try:
-                chunk_f32 = audio_queue.popleft()
+                chunk_s16 = audio_queue.popleft()
             except IndexError:
                 time.sleep(0.005)
                 continue
-            int16 = (np.clip(chunk_f32, -1.0, 1.0) * 32767).astype(np.int16)
             try:
-                proc.stdin.write(int16.tobytes())
+                proc.stdin.write(chunk_s16.tobytes())
             except BrokenPipeError:
                 break
     except Exception:
@@ -422,31 +425,29 @@ def save_wav(filename, duration_limit=None):
         print("[WAV] No audio recorded")
         return None
 
+    # wav_chunks contain raw int16 data (mono or interleaved stereo)
     audio = np.concatenate(wav_chunks)
+    n_ch = channels_detected
+
+    # Calculate duration based on channel count
+    frames = len(audio) // n_ch
     if duration_limit:
-        max_samples = int(duration_limit * AUDIO_RATE)
-        audio = audio[:max_samples]
+        max_frames = int(duration_limit * AUDIO_RATE)
+        audio = audio[:max_frames * n_ch]
+        frames = len(audio) // n_ch
 
-    dur = len(audio) / AUDIO_RATE
-    rms = np.sqrt(np.mean(audio ** 2))
-    peak = np.max(np.abs(audio)) if len(audio) > 0 else 0
+    dur = frames / AUDIO_RATE
+    audio_f = audio.astype(np.float64)
+    rms = np.sqrt(np.mean(audio_f ** 2)) / 32768.0
+    peak = np.max(np.abs(audio)) / 32768.0
 
-    print(f"\n[WAV] {len(audio)} samples ({dur:.1f}s) RMS={rms:.4f} Peak={peak:.4f}")
+    print(f"\n[WAV] {frames} frames ({dur:.1f}s) {n_ch}ch RMS={rms:.4f} Peak={peak:.4f}")
 
-    # Normalize if peak is very low (boost weak signals for audibility)
-    if 0 < peak < 0.1:
-        gain = 0.8 / peak
-        print(f"[WAV] Boosting by {gain:.1f}x (weak signal normalization)")
-        audio_norm = audio * gain
-    else:
-        audio_norm = audio
-
-    int16 = (np.clip(audio_norm, -1.0, 1.0) * 32767).astype(np.int16)
     with wave.open(filename, 'w') as wf:
-        wf.setnchannels(1)
+        wf.setnchannels(n_ch)
         wf.setsampwidth(2)
         wf.setframerate(AUDIO_RATE)
-        wf.writeframes(int16.tobytes())
+        wf.writeframes(audio.tobytes())
 
     print(f"[WAV] Saved → {filename}")
 
