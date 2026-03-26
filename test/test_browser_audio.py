@@ -214,9 +214,48 @@ class ReconnectingWS:
 
 # ─────────────────────── Audio Playback ───────────────────────
 
+def audio_playback_paplay():
+    """Play audio via paplay (PulseAudio/PipeWire) — handles mono→stereo automatically.
+    Pipes raw int16 PCM from audio_queue directly to paplay stdin."""
+    global underruns
+
+    player = shutil.which('paplay')
+    if not player:
+        print("[AUDIO] paplay not found, trying aplay...")
+        audio_playback_aplay()
+        return
+
+    proc = subprocess.Popen(
+        [player, '--raw', '--format=s16le', f'--rate={AUDIO_RATE}', '--channels=1'],
+        stdin=subprocess.PIPE,
+    )
+    print(f"[AUDIO] paplay playback started @ {AUDIO_RATE} Hz (mono int16)")
+
+    try:
+        while running:
+            try:
+                chunk_f32 = audio_queue.popleft()
+            except IndexError:
+                time.sleep(0.005)
+                continue
+            # Convert float32 → int16 for aplay
+            int16 = (np.clip(chunk_f32, -1.0, 1.0) * 32767).astype(np.int16)
+            try:
+                proc.stdin.write(int16.tobytes())
+            except BrokenPipeError:
+                break
+    except Exception:
+        pass
+    finally:
+        try:
+            proc.stdin.close()
+            proc.wait(timeout=2)
+        except Exception:
+            proc.kill()
+
+
 def audio_playback_aplay():
-    """Play audio via aplay subprocess — no extra dependencies needed.
-    Pipes raw int16 PCM from audio_queue directly to aplay stdin."""
+    """Play audio via aplay subprocess — fallback if paplay not available."""
     global underruns
 
     aplay = shutil.which('aplay')
@@ -237,7 +276,6 @@ def audio_playback_aplay():
             except IndexError:
                 time.sleep(0.005)
                 continue
-            # Convert float32 → int16 for aplay
             int16 = (np.clip(chunk_f32, -1.0, 1.0) * 32767).astype(np.int16)
             try:
                 proc.stdin.write(int16.tobytes())
@@ -290,18 +328,21 @@ def audio_playback_sounddevice():
         stream.stop()
         stream.close()
     except Exception as e:
-        print(f"[AUDIO] sounddevice error: {e}, falling back to aplay")
-        audio_playback_aplay()
+        print(f"[AUDIO] sounddevice error: {e}, falling back to paplay")
+        audio_playback_paplay()
 
 
 def audio_playback_thread():
-    """Start audio playback — prefers aplay (zero deps), falls back to sounddevice."""
-    if shutil.which('aplay'):
+    """Start audio playback — prefers paplay (PulseAudio/PipeWire, handles mono),
+    falls back to aplay, then sounddevice."""
+    if shutil.which('paplay'):
+        audio_playback_paplay()
+    elif shutil.which('aplay'):
         audio_playback_aplay()
     elif sd is not None:
         audio_playback_sounddevice()
     else:
-        print("[AUDIO] No playback available (install aplay or sounddevice)")
+        print("[AUDIO] No playback available (install paplay, aplay, or sounddevice)")
 
 
 # ─────────────────────── Stats Printer ───────────────────────
@@ -611,7 +652,7 @@ def main():
         wav_file=args.wav,
     )
 
-    print(f"\nPlay:    aplay {args.wav}")
+    print(f"\nPlay:    paplay {args.wav}")
     print(f"Analyze: python3 -c \"import scipy.io.wavfile as w; "
           f"import matplotlib.pyplot as plt; r,d = w.read('{args.wav}'); "
           f"plt.specgram(d, Fs=r); plt.show()\"")
