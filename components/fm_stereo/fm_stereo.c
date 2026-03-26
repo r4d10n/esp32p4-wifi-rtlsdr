@@ -411,12 +411,7 @@ int fm_stereo_process(fm_stereo_t *st, const int16_t *mpx_in, int n_samples,
     if (do_rds) {
         rds_decim = st->config.sample_rate / 2375;
         if (rds_decim < 1) rds_decim = 1;
-        static bool rds_decim_logged = false;
-        if (!rds_decim_logged) {
-            ESP_LOGI("fm_stereo", "RDS decim: rate=%lu / 2375 = %d",
-                     (unsigned long)st->config.sample_rate, rds_decim);
-            rds_decim_logged = true;
-        }
+        /* rds_decim = sample_rate / 2375 = 107 for 256kSPS */
     }
 
     /* Per-sample processing: PLL update, Goertzel, L+R/L-R, RDS extraction.
