@@ -1,0 +1,245 @@
+ESP32-P4 Standalone FM Radio — Signal Path (RTL-SDR USB → WebSocket Audio)
+══════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        CORE 0 — USB Host                                │
+│                                                                         │
+│  ┌──────────────┐    USB 2.0 HS (480 Mbps)    ┌──────────────────────┐ │
+│  │  RTL-SDR V4  │◄══════════════════════════►│  USB Host Controller  │ │
+│  │  R828D Tuner  │   Bulk IN: 6×16KB xfers   │  rtlsdr_read_async()  │ │
+│  │  RTL2832U     │   VID:0x0BDA PID:0x2838   │                      │ │
+│  └──────────────┘                             └──────────┬───────────┘ │
+│                                                           │             │
+│       RF In ──► R828D Tuner ──► RTL2832U ADC (8-bit)     │             │
+│       24-1766    IF=1.7MHz       1024 kSPS                │             │
+│       MHz        R=4 gain        uint8 IQ interleaved     │             │
+│                  stages          [I₀,Q₀,I₁,Q₁,...]       │             │
+│                                                           │             │
+│                                              ┌────────────▼──────────┐ │
+│                                              │  iq_data_cb()          │ │
+│                                              │  USB bulk callback     │ │
+│                                              │  16384 bytes/transfer  │ │
+│                                              └────────────┬──────────┘ │
+│                                                           │             │
+│                                              xRingbufferSend()         │
+│                                              (non-blocking, drop       │
+│                                               if full)                 │
+│                                                           │             │
+│  ┌──────────────────────────────────────┐                │             │
+│  │  HTTPS Server (port 8080)            │                │             │
+│  │  esp_https_server + mbedTLS          │                │             │
+│  │  web_radio.c                         │                │             │
+│  │                                      │                │             │
+│  │  REST API:                           │                │             │
+│  │    GET  /api/status → JSON           │                │             │
+│  │    POST /api/freq, /api/gain, ...    │                │             │
+│  │    GET  /api/rds → JSON              │                │             │
+│  │                                      │                │             │
+│  │  WebSocket /ws:                      │                │             │
+│  │    TEXT: signal_strength @ 10Hz      │                │             │
+│  │    BINARY: PCM int16 audio ◄─────────┼── (from Core 1)│            │
+│  │    CMD: audio_on / audio_off         │                │             │
+│  └──────────────────────────────────────┘                │             │
+└──────────────────────────────────────────────────────────┼─────────────┘
+                                                           │
+                                    ┌──────────────────────┘
+                                    │  Ring Buffer (128 KB, PSRAM)
+                                    │  xRingbufferReceive()
+                                    │  (blocks 100ms timeout)
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    CORE 1 — FM Pipeline Task (fm_pipeline_task)          │
+│                                                                         │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ STAGE 1: uint8 → int16 Conversion                                │   │
+│  │ pie_u8_to_s16_bias(iq_data, iq_s16, count)                       │   │
+│  │                                                                   │   │
+│  │ [0..255] → [-32768..+32512]                                      │   │
+│  │ Formula: (uint8 - 128) << 8                                      │   │
+│  │ Input:  uint8 IQ @ 1024 kSPS                                    │   │
+│  │ Output: int16 IQ @ 1024 kSPS                                    │   │
+│  └───────────────────────────────────┬──────────────────────────────┘   │
+│                                       │                                 │
+│                                       ▼                                 │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ ADC OVERLOAD CHECK                                                │   │
+│  │ Count samples at rail (≤1 or ≥254). Warn if >5% clipping.       │   │
+│  └───────────────────────────────────┬──────────────────────────────┘   │
+│                                       │                                 │
+│                                       ▼                                 │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ STAGE 2: NCO Frequency Shift (Digital Down-Converter)             │   │
+│  │ pie_nco_mix_s16(iq_s16, nco, iq_mixed, pairs)                    │   │
+│  │                                                                   │   │
+│  │ Complex multiply: out = in × (cos + j·sin)                       │   │
+│  │ 32-bit phase accumulator → 1024-entry sin/cos LUT (Q15)         │   │
+│  │ Offset = 0 Hz (on-frequency, identity transform)                 │   │
+│  │                                                                   │   │
+│  │ Input:  int16 IQ @ 1024 kSPS                                    │   │
+│  │ Output: int16 IQ @ 1024 kSPS (frequency-shifted to baseband)    │   │
+│  └───────────────────────────────────┬──────────────────────────────┘   │
+│                                       │                                 │
+│                                       ▼                                 │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ STAGE 3: CIC Decimation (3rd order, R=4 for WBFM)                │   │
+│  │ pie_cic_decimate_s16(iq_mixed, pairs, iq_decim, &out, R, state)  │   │
+│  │                                                                   │   │
+│  │ 3 Integrator stages → Decimate by R → 3 Comb stages             │   │
+│  │ int64 accumulators, gain = R³ = 64, normalization >>6            │   │
+│  │ PIE assembly: pie_cic_decimate_arp4.S (hardware zero-overhead)   │   │
+│  │                                                                   │   │
+│  │ WBFM: 1024 kSPS ÷ 4  = 256 kSPS                                │   │
+│  │ NBFM: 1024 kSPS ÷ 32 = 32 kSPS                                 │   │
+│  │                                                                   │   │
+│  │ Input:  int16 IQ @ 1024 kSPS                                    │   │
+│  │ Output: int16 IQ @ 256 kSPS                                     │   │
+│  └───────────────────────────────────┬──────────────────────────────┘   │
+│                                       │                                 │
+│                                       ▼                                 │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ STAGE 3b: Noise Blanker (optional)                                │   │
+│  │ noise_blanker_process(demod, iq, pairs)                           │   │
+│  │                                                                   │   │
+│  │ mag = |I| + |Q|  (fast magnitude)                                │   │
+│  │ avg = exponential running average (alpha ≈ 0.001)                │   │
+│  │ if mag > avg × threshold → replace with previous good sample     │   │
+│  │ threshold = nb_threshold + 2  (3x to 12x average)               │   │
+│  │                                                                   │   │
+│  │ Input/Output: int16 IQ @ 256 kSPS (in-place)                    │   │
+│  └───────────────────────────────────┬──────────────────────────────┘   │
+│                                       │                                 │
+│                                       ▼                                 │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ STAGE 4: FM Discriminator                                         │   │
+│  │ fm_disc_process(state, iq_decim, audio, pairs)                    │   │
+│  │ (pie_fm_discriminator.c — Method A: Polynomial corrected atan2)   │   │
+│  │                                                                   │   │
+│  │ For each IQ pair k:                                               │   │
+│  │   cross = I[k]·Q[k-1] - Q[k]·I[k-1]  (conjugate multiply)      │   │
+│  │   dot   = I[k]·I[k-1] + Q[k]·Q[k-1]                            │   │
+│  │   ratio = cross / abs_dot  (int64 to prevent overflow!)          │   │
+│  │   angle = ratio × (1 - 0.28125 × ratio²) + quadrant correction  │   │
+│  │   output = angle × fm_scale >> 15                                │   │
+│  │                                                                   │   │
+│  │ fm_scale = 28000 / max_angle  (maps ±75kHz to 85% of Q15)       │   │
+│  │ THD: < 0.3%                                                      │   │
+│  │                                                                   │   │
+│  │ Input:  int16 IQ pairs @ 256 kSPS                                │   │
+│  │ Output: int16 MPX mono audio @ 256 kSPS                         │   │
+│  └───────────────────────────────────┬──────────────────────────────┘   │
+│                                       │                                 │
+│                                       ▼                                 │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ STAGE 5: De-emphasis IIR                                          │   │
+│  │ y[n] = α·x[n] + (1-α)·y[n-1]                                    │   │
+│  │                                                                   │   │
+│  │ τ = 75μs (US) → α = 1622/32767 → fc ≈ 2.1 kHz                  │   │
+│  │ Removes FM pre-emphasis boost, restoring flat audio spectrum     │   │
+│  │                                                                   │   │
+│  │ Input/Output: int16 @ 256 kSPS                                  │   │
+│  └───────────────────────────────────┬──────────────────────────────┘   │
+│                                       │                                 │
+│                                       ▼                                 │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ STAGE 6: FIR Audio Low-Pass Filter (PIE SIMD)                     │   │
+│  │ pie_fir_process(fir, input, output, count)                        │   │
+│  │                                                                   │   │
+│  │ 63 taps, Nuttall window, cutoff 15 kHz @ 256 kSPS               │   │
+│  │ Stopband: -93 dB (Nuttall)                                       │   │
+│  │ PIE assembly: pie_fir_s16_arp4.S                                 │   │
+│  │   esp.vmulas.s16.xacc — 8 MACs per cycle                        │   │
+│  │   5.7× faster than scalar (194→34 cycles/sample)                │   │
+│  │                                                                   │   │
+│  │ Input/Output: int16 @ 256 kSPS                                  │   │
+│  └───────────────────────────────────┬──────────────────────────────┘   │
+│                                       │                                 │
+│                                       ▼                                 │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ STAGE 7: Fractional Resampler                                     │   │
+│  │ Phase accumulator: 256 kSPS → 48 kHz                             │   │
+│  │                                                                   │   │
+│  │ resamp_inc = (256000/48000) << FRAC_BITS                         │   │
+│  │ Emit output sample when phase accumulator overflows              │   │
+│  │                                                                   │   │
+│  │ Input:  int16 @ 256 kSPS                                        │   │
+│  │ Output: int16 @ 48 kHz                                          │   │
+│  └───────────────────────────────────┬──────────────────────────────┘   │
+│                                       │                                 │
+│                                       ▼                                 │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ STAGE 8: Volume Control                                           │   │
+│  │ fm_demod_apply_volume(audio, count, volume)                       │   │
+│  │                                                                   │   │
+│  │ audio[i] = (audio[i] × vol_q15) >> 15                           │   │
+│  │ vol_q15 = volume × 327  (0-100 → 0-32700)                       │   │
+│  │                                                                   │   │
+│  │ Input/Output: int16 PCM @ 48 kHz                                │   │
+│  └───────────────────────────────────┬──────────────────────────────┘   │
+│                                       │                                 │
+│                                       ▼                                 │
+│                            ┌──────────┴──────────┐                     │
+│                            │                     │                     │
+│                            ▼                     ▼                     │
+│  ┌──────────────────────────────┐  ┌──────────────────────────────┐   │
+│  │ I2S Audio Output              │  │ WebSocket Audio Push          │   │
+│  │ audio_out_write()             │  │ web_radio_push_audio()        │   │
+│  │                               │  │                               │   │
+│  │ ESP32-P4 I2S0 → ES8311       │  │ Accumulate into 9600-sample  │   │
+│  │ → NS4150B Amp → Speaker      │  │ buffer (100ms stereo/200ms   │   │
+│  │                               │  │ mono). Flush as single TLS   │   │
+│  │ DMA: 6 desc × 240 frames     │  │ WebSocket binary frame.      │   │
+│  │ = 5ms latency                 │  │ ~5-10 frames/sec to avoid    │   │
+│  └──────────────────────────────┘  │ mbedTLS overload.             │   │
+│                                     │                               │   │
+│                                     │ Sends to all clients with     │   │
+│                                     │ audio_on flag set.            │   │
+│                                     └──────────────┬────────────────┘   │
+└─────────────────────────────────────────────────────┼───────────────────┘
+                                                      │
+                                                      ▼
+                               ┌──────────────────────────────────────┐
+                               │  WebSocket Client (Browser / Python)  │
+                               │                                       │
+                               │  Browser: AudioWorklet PCMPlayer      │
+                               │    - Int16 ring buffer (48000 samples)│
+                               │    - s16 / 32768.0 → float32         │
+                               │    - AudioContext @ 48 kHz            │
+                               │                                       │
+                               │  Python: test_browser_audio.py        │
+                               │    - websocket-client (WSS)           │
+                               │    - Auto-reconnect on TLS drop       │
+                               │    - aplay subprocess (S16_LE raw)    │
+                               │    - WAV recording + spectral analysis│
+                               └──────────────────────────────────────┘
+
+══════════════════════════════════════════════════════════════════════════
+ SAMPLE RATE PROGRESSION
+══════════════════════════════════════════════════════════════════════════
+
+ Stage              Format      Rate        Samples/sec  Bytes/sec
+ ─────────────────  ──────────  ──────────  ───────────  ─────────
+ RTL-SDR USB        uint8 IQ    1024 kSPS   2,048,000    2,048,000
+ After bias remove  int16 IQ    1024 kSPS   2,048,000    4,096,000
+ After CIC (WBFM)   int16 IQ     256 kSPS     512,000    1,024,000
+ After discriminator int16 mono  256 kSPS     256,000      512,000
+ After resampler    int16 mono    48 kHz       48,000       96,000
+ WebSocket frame    int16 PCM     48 kHz       48,000       96,000
+ Browser playback   float32       48 kHz       48,000      192,000
+
+══════════════════════════════════════════════════════════════════════════
+ KEY BUGS FOUND AND FIXED
+══════════════════════════════════════════════════════════════════════════
+
+ 1. Noise blanker threshold (avg>>8)*20 = 1860 blanked ALL samples
+    at mag=24000 → output was constant IQ → discriminator = silence
+    FIX: avg * (threshold+2) — proper magnitude-relative comparison
+
+ 2. FM discriminator (cross << 14) overflowed int32 for IQ > ±5000
+    → garbage atan2 → single-polarity output
+    FIX: ((int64_t)cross << 15) / abs_dot — 64-bit division
+
+ 3. WebSocket sent ~200 tiny PCM frames/sec → mbedTLS overload → drops
+    FIX: Buffer 9600 samples (100-200ms) before flush → ~5-10 frames/sec
+
+ 4. Discriminator scale 16384/max_angle wasted 6dB of dynamic range
+    FIX: 28000/max_angle → 85% Q15 utilization
