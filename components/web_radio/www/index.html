@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ESP32-P4 FM Radio</title>
 <style>
-/* Dark theme radio UI */
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
     font-family: 'Segoe UI', system-ui, sans-serif;
@@ -16,7 +15,6 @@ body {
 .container { max-width: 480px; width: 100%; }
 h1 { text-align: center; color: #e94560; margin-bottom: 20px; font-size: 1.4em; }
 
-/* Frequency display */
 .freq-display {
     background: #16213e; border: 2px solid #e94560; border-radius: 12px;
     padding: 20px; text-align: center; margin-bottom: 20px;
@@ -27,7 +25,6 @@ h1 { text-align: center; color: #e94560; margin-bottom: 20px; font-size: 1.4em; 
 }
 .freq-unit { color: #888; font-size: 0.8em; margin-left: 8px; }
 
-/* Tuning buttons */
 .tune-row { display: flex; gap: 8px; justify-content: center; margin-top: 12px; }
 .tune-btn {
     background: #0f3460; border: 1px solid #e94560; color: #e0e0e0;
@@ -36,7 +33,6 @@ h1 { text-align: center; color: #e94560; margin-bottom: 20px; font-size: 1.4em; 
 .tune-btn:hover { background: #e94560; color: white; }
 .tune-btn:active { transform: scale(0.95); }
 
-/* Controls */
 .control-group {
     background: #16213e; border-radius: 10px; padding: 16px; margin-bottom: 12px;
 }
@@ -51,7 +47,6 @@ input[type="range"]::-webkit-slider-thumb {
     background: #e94560; border-radius: 50%; cursor: pointer;
 }
 
-/* Mode toggle */
 .mode-row { display: flex; gap: 8px; margin-bottom: 12px; }
 .mode-btn {
     flex: 1; padding: 12px; text-align: center; border-radius: 8px;
@@ -60,25 +55,39 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .mode-btn.active { border-color: #e94560; background: #1a1a4e; color: #e94560; }
 
-/* Signal meter */
 .meter {
     height: 8px; background: #0f3460; border-radius: 4px; overflow: hidden; margin-top: 4px;
 }
 .meter-fill { height: 100%; background: linear-gradient(90deg, #00ff88, #e94560); transition: width 0.3s; }
 
-/* Mute button */
-.mute-btn {
+.action-btn {
     width: 100%; padding: 14px; border-radius: 10px; border: 2px solid #e94560;
     background: transparent; color: #e94560; font-size: 1.1em; cursor: pointer;
-    font-weight: bold; transition: all 0.2s;
+    font-weight: bold; transition: all 0.2s; margin-bottom: 8px;
 }
-.mute-btn.muted { background: #e94560; color: white; }
+.action-btn.active { background: #e94560; color: white; }
+.action-btn.playing { border-color: #00ff88; color: #00ff88; }
+.action-btn.playing.active { background: #00ff88; color: #1a1a2e; }
 
-/* Gain selector */
 select {
     width: 100%; padding: 10px; background: #0f3460; color: #e0e0e0;
     border: 1px solid #333; border-radius: 6px; font-size: 0.95em;
 }
+
+/* RDS display */
+.rds-box {
+    background: #0a0a1a; border: 1px solid #333; border-radius: 8px;
+    padding: 12px; margin-top: 10px; text-align: center;
+}
+.rds-ps { color: #00ff88; font-family: 'Courier New', monospace; font-size: 1.4em; letter-spacing: 3px; }
+.rds-rt { color: #aaa; font-size: 0.85em; margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rds-meta { color: #666; font-size: 0.75em; margin-top: 4px; }
+.stereo-badge { display: inline-block; background: #e94560; color: white; padding: 2px 8px; border-radius: 10px; font-size: 0.7em; font-weight: bold; margin-left: 8px; }
+.stereo-badge.mono { background: #444; }
+
+/* Audio level meter */
+.audio-meter { height: 4px; background: #0f3460; border-radius: 2px; margin-top: 8px; }
+.audio-meter-fill { height: 100%; background: #00ff88; border-radius: 2px; width: 0%; transition: width 0.1s; }
 </style>
 </head>
 <body>
@@ -100,10 +109,11 @@ select {
             <button class="tune-btn" onclick="scanStop()">Stop</button>
             <button class="tune-btn" onclick="scanUp()">Scan &#9654;</button>
         </div>
-        <div id="rdsInfo" style="margin-top:10px;text-align:center;font-size:0.9em;color:#888;">
-            <span id="rdsPS" style="color:#00ff88;font-family:'Courier New',monospace;font-size:1.2em;"></span>
-            <span id="rdsStereo" style="margin-left:8px;color:#e94560;font-size:0.8em;"></span>
-            <div id="rdsRT" style="margin-top:4px;color:#aaa;font-size:0.85em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>
+        <div class="rds-box" id="rdsBox">
+            <span class="rds-ps" id="rdsPS"></span>
+            <span class="stereo-badge mono" id="stereoBadge">MONO</span>
+            <div class="rds-rt" id="rdsRT"></div>
+            <div class="rds-meta" id="rdsMeta"></div>
         </div>
     </div>
 
@@ -118,8 +128,8 @@ select {
     </div>
 
     <div class="control-group">
-        <div class="control-label">Volume<span id="volVal">70</span></div>
-        <input type="range" id="volume" min="0" max="100" value="70" oninput="setVolume(this.value)">
+        <div class="control-label">Volume<span id="volVal">90</span></div>
+        <input type="range" id="volume" min="0" max="100" value="90" oninput="setVolume(this.value)">
     </div>
 
     <div class="control-group">
@@ -171,9 +181,15 @@ select {
         <input type="range" id="nbThresh" min="1" max="10" value="5" oninput="setNB()">
     </div>
 
-    <button class="mute-btn" id="muteBtn" onclick="toggleMute()">MUTE</button>
+    <button class="action-btn" id="muteBtn" onclick="toggleMute()">MUTE</button>
 
-    <div class="control-group" style="margin-top:20px">
+    <button class="action-btn playing" id="audioBtn" onclick="toggleAudio()">&#9654; Browser Audio</button>
+    <div class="audio-meter" id="audioMeterBox" style="display:none">
+        <div class="audio-meter-fill" id="audioMeter"></div>
+    </div>
+    <div id="audioStatus" style="text-align:center;font-size:0.75em;color:#666;margin-bottom:12px;"></div>
+
+    <div class="control-group" style="margin-top:12px">
         <div class="control-label">Firmware Update</div>
         <input type="file" id="otaFile" accept=".bin" style="display:none" onchange="uploadOTA()">
         <button class="tune-btn" onclick="document.getElementById('otaFile').click()" style="width:100%;padding:12px">
@@ -187,8 +203,56 @@ select {
 </div>
 
 <script>
-let state = {freq: 100000000, gain: 0, volume: 70, mode: 0, filter_bw: 15000, muted: false, squelch: 0, noise_blanker: {enabled: true, threshold: 5}};
+let state = {freq: 100000000, gain: 0, volume: 90, mode: 0, filter_bw: 15000, muted: false, squelch: 0, noise_blanker: {enabled: true, threshold: 5}};
 let ws = null;
+let audioPlaying = false, aCtx = null, wkNode = null;
+
+/* ── AudioWorklet processor (runs in audio thread) ── */
+const PROC_CODE = `
+class PCMPlayer extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.ring = new Float32Array(48000); // 1s ring buffer
+    this.wPtr = 0;
+    this.rPtr = 0;
+    this.count = 0;
+    this.port.onmessage = (e) => {
+      if (e.data.type === 'pcm') {
+        const s16 = e.data.samples;
+        const n = s16.length;
+        for (let i = 0; i < n; i++) {
+          this.ring[this.wPtr] = s16[i] / 32768.0;
+          this.wPtr = (this.wPtr + 1) % this.ring.length;
+          if (this.count < this.ring.length) this.count++;
+        }
+      }
+    };
+  }
+  process(inputs, outputs) {
+    const out = outputs[0][0];
+    if (!out) return true;
+    let pk = 0;
+    for (let i = 0; i < out.length; i++) {
+      if (this.count > 0) {
+        const v = this.ring[this.rPtr];
+        this.rPtr = (this.rPtr + 1) % this.ring.length;
+        this.count--;
+        out[i] = v;
+        const a = Math.abs(v); if (a > pk) pk = a;
+      } else {
+        out[i] = 0;
+      }
+    }
+    // Report level every 20 frames (~26ms at 128 samples)
+    if (this._cnt === undefined) this._cnt = 0;
+    if (++this._cnt % 20 === 0) {
+      this.port.postMessage({pk: pk, buf: this.count});
+    }
+    return true;
+  }
+}
+registerProcessor('pcm-player', PCMPlayer);
+`;
 
 function updateUI() {
     document.getElementById('freqDisplay').textContent = (state.freq / 1e6).toFixed(3);
@@ -198,7 +262,7 @@ function updateUI() {
     document.getElementById('filterbw').value = state.filter_bw;
     document.getElementById('btnWBFM').className = 'mode-btn' + (state.mode === 0 ? ' active' : '');
     document.getElementById('btnNBFM').className = 'mode-btn' + (state.mode === 1 ? ' active' : '');
-    document.getElementById('muteBtn').className = 'mute-btn' + (state.muted ? ' muted' : '');
+    document.getElementById('muteBtn').className = 'action-btn' + (state.muted ? ' active' : '');
     document.getElementById('muteBtn').textContent = state.muted ? 'UNMUTE' : 'MUTE';
     if (state.squelch !== undefined) {
         document.getElementById('squelch').value = state.squelch;
@@ -274,44 +338,120 @@ async function scanUp()   { await api('scan', {direction: 'up'}); }
 async function scanDown()  { await api('scan', {direction: 'down'}); }
 async function scanStop()  { await api('scan', {action: 'stop'}); }
 
+/* ── WebSocket (signal + audio) ── */
+
 function connectWS() {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(proto + '//' + location.host + '/ws');
+    ws = new WebSocket('wss://' + location.host + '/ws');
+    ws.binaryType = 'arraybuffer';
     ws.onmessage = (e) => {
-        try {
-            const d = JSON.parse(e.data);
-            if (d.signal_strength !== undefined) {
-                const pct = Math.min(100, Math.max(0, d.signal_strength * 100 / 32767));
-                document.getElementById('sigMeter').style.width = pct + '%';
-                document.getElementById('sigVal').textContent = pct.toFixed(0) + '%';
+        if (typeof e.data === 'string') {
+            try {
+                const d = JSON.parse(e.data);
+                if (d.signal_strength !== undefined) {
+                    const pct = Math.min(100, Math.max(0, d.signal_strength * 100 / 32767));
+                    document.getElementById('sigMeter').style.width = pct + '%';
+                    document.getElementById('sigVal').textContent = pct.toFixed(0) + '%';
+                }
+                if (d.stereo !== undefined) {
+                    const badge = document.getElementById('stereoBadge');
+                    badge.textContent = d.stereo ? 'STEREO' : 'MONO';
+                    badge.className = 'stereo-badge' + (d.stereo ? '' : ' mono');
+                }
+            } catch(ex) {}
+        } else {
+            /* Binary frame = PCM int16 audio */
+            if (wkNode) {
+                const s16 = new Int16Array(e.data);
+                wkNode.port.postMessage({type: 'pcm', samples: s16});
             }
-            if (d.stereo !== undefined) {
-                document.getElementById('rdsStereo').textContent = d.stereo ? 'STEREO' : '';
-            }
-        } catch(e) {}
+        }
     };
-    ws.onclose = () => setTimeout(connectWS, 2000);
-    ws.onerror = () => ws.close();
+    ws.onclose = () => setTimeout(connectWS, 5000);
+    ws.onerror = () => { try { ws.close(); } catch(e) {} };
 }
+
+/* ── Browser Audio (AudioWorklet) ── */
+
+async function startAudio() {
+    aCtx = new AudioContext({sampleRate: 48000});
+    await aCtx.resume();
+    const blob = new Blob([PROC_CODE], {type: 'application/javascript'});
+    const url = URL.createObjectURL(blob);
+    try {
+        await aCtx.audioWorklet.addModule(url);
+    } finally {
+        URL.revokeObjectURL(url);
+    }
+    wkNode = new AudioWorkletNode(aCtx, 'pcm-player');
+    wkNode.port.onmessage = (e) => {
+        const pct = Math.min(100, e.data.pk / 0.8 * 100);
+        document.getElementById('audioMeter').style.width = pct + '%';
+        document.getElementById('audioStatus').textContent =
+            'buf: ' + e.data.buf + ' | peak: ' + (e.data.pk * 100).toFixed(0) + '%';
+    };
+    wkNode.connect(aCtx.destination);
+    /* Tell ESP to stream audio */
+    if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({cmd: 'audio_on'}));
+    }
+    document.getElementById('audioMeterBox').style.display = 'block';
+}
+
+function stopAudio() {
+    if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({cmd: 'audio_off'}));
+    }
+    if (wkNode) { wkNode.disconnect(); wkNode = null; }
+    if (aCtx) { aCtx.close(); aCtx = null; }
+    document.getElementById('audioMeterBox').style.display = 'none';
+    document.getElementById('audioStatus').textContent = '';
+}
+
+function toggleAudio() {
+    const btn = document.getElementById('audioBtn');
+    if (!audioPlaying) {
+        startAudio().then(() => {
+            btn.innerHTML = '&#9724; Stop Audio';
+            btn.classList.add('active');
+            audioPlaying = true;
+        }).catch((err) => {
+            document.getElementById('audioStatus').textContent = 'AudioWorklet error: ' + err;
+        });
+    } else {
+        stopAudio();
+        btn.innerHTML = '&#9654; Browser Audio';
+        btn.classList.remove('active');
+        audioPlaying = false;
+    }
+}
+
+/* ── RDS polling ── */
 
 async function pollRDS() {
     const r = await api('rds');
     if (r) {
         document.getElementById('rdsPS').textContent = r.ps_name || '';
         document.getElementById('rdsRT').textContent = r.radio_text || '';
+        const meta = [];
+        if (r.pi_code && r.pi_code !== '0x0000') meta.push('PI:' + r.pi_code);
+        if (r.pty > 0) meta.push('PTY:' + r.pty);
+        if (r.tp) meta.push('TP');
+        document.getElementById('rdsMeta').textContent = meta.join(' | ');
         if (r.stereo !== undefined) {
-            document.getElementById('rdsStereo').textContent = r.stereo ? 'STEREO' : '';
+            const badge = document.getElementById('stereoBadge');
+            badge.textContent = r.stereo ? 'STEREO' : 'MONO';
+            badge.className = 'stereo-badge' + (r.stereo ? '' : ' mono');
         }
     }
 }
 
+/* ── OTA ── */
+
 async function uploadOTA() {
     const file = document.getElementById('otaFile').files[0];
     if (!file) return;
-
     document.getElementById('otaProgress').style.display = 'block';
     document.getElementById('otaStatus').textContent = 'Uploading ' + (file.size/1024).toFixed(0) + ' KB...';
-
     try {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', '/api/ota');
@@ -326,21 +466,19 @@ async function uploadOTA() {
             document.getElementById('otaStatus').textContent = 'Complete! Rebooting...';
             setTimeout(() => location.reload(), 5000);
         };
-        xhr.onerror = () => {
-            document.getElementById('otaStatus').textContent = 'Upload failed!';
-        };
+        xhr.onerror = () => { document.getElementById('otaStatus').textContent = 'Upload failed!'; };
         xhr.send(file);
     } catch(e) {
         document.getElementById('otaStatus').textContent = 'Error: ' + e.message;
     }
 }
 
-// Init
+/* ── Init ── */
 (async () => {
     const s = await api('status');
     if (s) { Object.assign(state, s); updateUI(); }
     connectWS();
-    setInterval(pollRDS, 2000);
+    setInterval(pollRDS, 5000);
 })();
 </script>
 </body>

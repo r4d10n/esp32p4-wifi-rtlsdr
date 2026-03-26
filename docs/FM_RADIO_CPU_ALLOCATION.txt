@@ -1,0 +1,71 @@
+ESP32-P4 Dual-Core CPU Allocation — Task & Module Breakdown
+RISC-V HP Core 0 + Core 1 @ 400 MHz
+
+══════════════════════════════════════════════════════════════
+ CORE 0 — USB Host, Network, Control, System (~22% busy)
+══════════════════════════════════════════════════════════════
+
+ Task             Prio  Stack  Module                    CPU%
+ ──────────────── ──── ─────  ─────────────────────── ──────
+ usb_host          10   4KB   usb_host_lib              ~1%
+ usb_client         8   4KB   rtlsdr.c                  ~0.5%
+ sdr_stream         9   8KB   rtlsdr_read_async()       ~15%
+ scan               3   4KB   scan_task() (intermittent) ~0.1%
+ esp_timer         22   ISR   ws_timer_callback()       ~0.1%
+ WiFi            varies  —    esp_hosted + lwIP          ~3%
+ httpd              5   8KB   web_radio.c handlers       ~1%
+ main               1   8KB   status loop + OLED + CI-V  ~0.5%
+ IDLE               0   —     FreeRTOS                   ~79%
+
+══════════════════════════════════════════════════════════════
+ CORE 1 — DSP Pipeline (~11-14% busy)
+══════════════════════════════════════════════════════════════
+
+ Stage                  Rate     Cyc/samp  SIMD?  CPU%
+ ───────────────────── ──────── ──────── ─────  ─────
+ u8→s16 bias            1024k      ~4     HW loop  1.0%
+ NCO mix                1024k      ~5     cmul.s16  1.3%
+ CIC decimate (R=4)     1024k     ~18     HW loop  4.6%
+ Noise blanker           256k     ~10     scalar   0.6%
+ FM discriminator        256k      ~6     poly     0.4%
+ De-emphasis IIR         256k      ~8     scalar   0.5%
+ FIR 63-tap              256k     ~34     xacc     2.2%
+ Polyphase resamp        48k      ~40     mixed    0.5%
+ Squelch gate            48k       ~1     scalar   0.0%
+ Volume                  48k       ~1     vmul     0.0%
+ I2S DMA write           48k       —      DMA      0.2%
+ USB audio write         48k       —      ringbuf  0.1%
+ ─── Stereo (additional when pilot detected) ───
+ Goertzel pilot          256k     ~10     scalar   0.3%
+ PLL 2nd-order           256k     ~15     scalar   0.4%
+ L-R demod + FIR         256k     ~23     xacc     1.5%
+ RDS decode              5.3k     ~17     scalar   0.3%
+ ───────────────────────────────────────────────────
+ MONO TOTAL                                        ~11%
+ STEREO+RDS TOTAL                                  ~14%
+
+══════════════════════════════════════════════════════════════
+ SYSTEM TASKS (floating)
+══════════════════════════════════════════════════════════════
+
+ esp_timer, ipc0/1, Tmr Svc                       <0.5%
+ WiFi management                                    ~1%
+ TinyUSB device task                                ~0.5%
+
+══════════════════════════════════════════════════════════════
+ SUMMARY
+══════════════════════════════════════════════════════════════
+
+             Core 0     Core 1     Notes
+ ──────────  ────────   ────────   ──────────────────────
+ USB Host     16.5%                RTL-SDR 2 MB/s bulk
+ WiFi+HTTP     4.1%                Network + web server
+ Control       0.6%                OLED, CI-V, NVS
+ DSP Pipeline             11-14%  All demod + audio
+ System        1%          1%     FreeRTOS overhead
+ ──────────  ────────   ────────
+ TOTAL BUSY   ~22%       ~12-15%
+ IDLE         ~78%       ~85-88%
+
+ Combined: ~17-19% of 800 MHz (dual core)
+ Headroom: >80% for additional features or higher sample rates

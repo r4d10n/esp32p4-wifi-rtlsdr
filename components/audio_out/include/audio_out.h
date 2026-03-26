@@ -4,7 +4,7 @@
  * Drives the onboard ES8311 codec via I2S + I2C.
  * Supports 48 kHz 16-bit mono output to speaker and headphone jack.
  *
- * Hardware: ES8311 codec (I2C 0x18) + NS4150B speaker amp (GPIO53)
+ * Hardware: ES8311 codec (I2C 7-bit addr 0x18) + NS4150B speaker amp (GPIO53)
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -28,7 +28,7 @@ extern "C" {
 #define AUDIO_I2C_SDA_GPIO     7
 #define AUDIO_I2C_SCL_GPIO     8
 #define AUDIO_PA_CTRL_GPIO     53
-#define AUDIO_ES8311_I2C_ADDR  0x18
+#define AUDIO_ES8311_I2C_ADDR  0x30  /* 8-bit addr: esp_codec_dev right-shifts by 1 → 0x18 */
 
 /* Audio output configuration */
 typedef struct {
@@ -39,7 +39,7 @@ typedef struct {
 
 #define AUDIO_OUT_CONFIG_DEFAULT() { \
     .sample_rate = 48000, \
-    .volume = 70, \
+    .volume = 90, \
     .speaker_enable = true, \
 }
 
@@ -63,6 +63,16 @@ esp_err_t audio_out_deinit(void);
  * @return ESP_OK on success, ESP_ERR_TIMEOUT if DMA full
  */
 esp_err_t audio_out_write(const int16_t *samples, int count, int timeout_ms);
+
+/**
+ * Write interleaved stereo PCM audio samples to I2S DMA.
+ *
+ * @param samples   int16 interleaved L/R stereo PCM data
+ * @param frames    Number of stereo frames (each frame = L + R sample)
+ * @param timeout_ms Maximum time to wait for DMA space (0 = non-blocking)
+ * @return ESP_OK on success, ESP_ERR_TIMEOUT if DMA full
+ */
+esp_err_t audio_out_write_stereo(const int16_t *samples, int frames, int timeout_ms);
 
 /**
  * Set output volume (0-100).

@@ -56,6 +56,9 @@ void web_radio_update_status(const web_radio_params_t *params, int16_t signal_st
 void web_radio_update_rds(const char *ps_name, const char *radio_text,
                           uint16_t pi_code, uint8_t pty, bool stereo);
 
+/* Push demodulated PCM audio to WebSocket clients (called from DSP pipeline) */
+void web_radio_push_audio(const int16_t *samples, int count);
+
 #ifdef __cplusplus
 }
 #endif

@@ -369,7 +369,8 @@ static void fm_pipeline_task(void *arg)
                     if (stereo_pairs > 0 && !radio.muted) {
                         /* Volume: apply to interleaved L/R (2 samples per pair) */
                         fm_demod_apply_volume(pipe->stereo_buf, stereo_pairs * 2, radio.volume);
-                        audio_out_write(pipe->stereo_buf, stereo_pairs * 2, 50);
+                        audio_out_write_stereo(pipe->stereo_buf, stereo_pairs, 50);
+                        web_radio_push_audio(pipe->stereo_buf, stereo_pairs * 2);
 #ifdef CONFIG_FM_USB_AUDIO_ENABLE
                         /* USB audio is mono; send left channel sample count */
                         usb_audio_write(pipe->stereo_buf, stereo_pairs * 2);
@@ -387,8 +388,9 @@ static void fm_pipeline_task(void *arg)
                     /* Step 5: Apply volume */
                     fm_demod_apply_volume(pipe->audio_buf, audio_count, radio.volume);
 
-                    /* Step 6: Write to I2S */
+                    /* Step 6: Write to I2S + stream to browser */
                     audio_out_write(pipe->audio_buf, audio_count, 50);
+                    web_radio_push_audio(pipe->audio_buf, audio_count);
 #ifdef CONFIG_FM_USB_AUDIO_ENABLE
                     usb_audio_write(pipe->audio_buf, audio_count);
 #endif
@@ -635,7 +637,10 @@ void app_main(void)
     /* Audio Output Init */
     audio_out_config_t audio_cfg = AUDIO_OUT_CONFIG_DEFAULT();
     audio_cfg.volume = radio.volume;
-    ESP_ERROR_CHECK(audio_out_init(&audio_cfg));
+    ret = audio_out_init(&audio_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Audio init failed: %s (continuing without audio)", esp_err_to_name(ret));
+    }
 
 #ifdef CONFIG_FM_USB_AUDIO_ENABLE
     /* USB Audio Device (UAC 2.0 + CDC) on Controller 1 */

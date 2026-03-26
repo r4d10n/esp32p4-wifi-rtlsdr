@@ -11,12 +11,20 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_check.h"
+#include "esp_https_server.h"
 #include "esp_http_server.h"
 #include "esp_timer.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include <unistd.h>
 #include "cJSON.h"
 #include "web_radio.h"
+
+/* Embedded TLS certificates */
+extern const uint8_t servercert_start[] asm("_binary_servercert_pem_start");
+extern const uint8_t servercert_end[]   asm("_binary_servercert_pem_end");
+extern const uint8_t prvtkey_start[]    asm("_binary_prvtkey_pem_start");
+extern const uint8_t prvtkey_end[]      asm("_binary_prvtkey_pem_end");
 
 static const char *TAG = "web_radio";
 
@@ -33,6 +41,7 @@ extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
 /* ── Server State ── */
 
 static httpd_handle_t       s_httpd      = NULL;
+static bool                 s_ws_audio[MAX_WS_CLIENTS];  /* per-client audio streaming flag */
 static web_radio_params_t   s_params     = {
     .frequency    = 100000000,
     .gain         = 0,
@@ -69,6 +78,7 @@ static void ws_add_fd(int fd)
 {
     taskENTER_CRITICAL(&s_ws_mux);
     if (s_ws_count < MAX_WS_CLIENTS) {
+        s_ws_audio[s_ws_count] = false;
         s_ws_fds[s_ws_count++] = fd;
     }
     taskEXIT_CRITICAL(&s_ws_mux);
@@ -79,11 +89,21 @@ static void ws_remove_fd(int fd)
     taskENTER_CRITICAL(&s_ws_mux);
     for (int i = 0; i < s_ws_count; i++) {
         if (s_ws_fds[i] == fd) {
-            s_ws_fds[i] = s_ws_fds[--s_ws_count];
+            int last = --s_ws_count;
+            s_ws_fds[i] = s_ws_fds[last];
+            s_ws_audio[i] = s_ws_audio[last];
             break;
         }
     }
     taskEXIT_CRITICAL(&s_ws_mux);
+}
+
+/* ── Socket close callback (required for TLS socket cleanup) ── */
+
+static void on_close_socket(httpd_handle_t hd, int fd)
+{
+    ws_remove_fd(fd);
+    close(fd);
 }
 
 /* ── WebSocket signal-strength timer ── */
@@ -142,6 +162,18 @@ static void send_json(httpd_req_t *req, const char *json)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_sendstr(req, json);
+}
+
+/* ── CORS preflight handler for all POST endpoints ── */
+
+static esp_err_t handler_cors_preflight(httpd_req_t *req)
+{
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
+    httpd_resp_set_hdr(req, "Access-Control-Max-Age", "86400");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
 }
 
 /* ── REST: GET /api/status ── */
@@ -344,15 +376,44 @@ static esp_err_t handler_ws(httpd_req_t *req)
         return ESP_OK;
     }
 
-    /* Receive and discard any incoming frames */
+    /* Receive incoming frames — parse JSON commands */
     httpd_ws_frame_t frame = { .type = HTTPD_WS_TYPE_TEXT };
-    uint8_t buf[64] = {0};
+    uint8_t buf[128] = {0};
     frame.payload = buf;
     esp_err_t err = httpd_ws_recv_frame(req, &frame, sizeof(buf) - 1);
     if (err != ESP_OK) {
         int fd = httpd_req_to_sockfd(req);
         ESP_LOGD(TAG, "ws recv error fd=%d, removing", fd);
         ws_remove_fd(fd);
+        return ESP_OK;
+    }
+
+    /* Parse audio streaming commands */
+    if (frame.type == HTTPD_WS_TYPE_TEXT && frame.len > 0) {
+        buf[frame.len] = '\0';
+        cJSON *root = cJSON_Parse((char *)buf);
+        if (root) {
+            cJSON *cmd = cJSON_GetObjectItem(root, "cmd");
+            if (cJSON_IsString(cmd)) {
+                int fd = httpd_req_to_sockfd(req);
+                if (strcmp(cmd->valuestring, "audio_on") == 0) {
+                    taskENTER_CRITICAL(&s_ws_mux);
+                    for (int i = 0; i < s_ws_count; i++) {
+                        if (s_ws_fds[i] == fd) { s_ws_audio[i] = true; break; }
+                    }
+                    taskEXIT_CRITICAL(&s_ws_mux);
+                    ESP_LOGI(TAG, "Audio streaming enabled for fd=%d", fd);
+                } else if (strcmp(cmd->valuestring, "audio_off") == 0) {
+                    taskENTER_CRITICAL(&s_ws_mux);
+                    for (int i = 0; i < s_ws_count; i++) {
+                        if (s_ws_fds[i] == fd) { s_ws_audio[i] = false; break; }
+                    }
+                    taskEXIT_CRITICAL(&s_ws_mux);
+                    ESP_LOGI(TAG, "Audio streaming disabled for fd=%d", fd);
+                }
+            }
+            cJSON_Delete(root);
+        }
     }
     return ESP_OK;
 }
@@ -519,6 +580,8 @@ static const httpd_uri_t s_uris[] = {
     { .uri = "/ws",               .method = HTTP_GET,  .handler = handler_ws,
       .is_websocket = true                                                      },
     { .uri = "/api/ota",          .method = HTTP_POST, .handler = handler_ota  },
+    /* CORS preflight for all POST endpoints */
+    { .uri = "/api/*",        .method = HTTP_OPTIONS, .handler = handler_cors_preflight },
 };
 
 /* ── Public API ── */
@@ -533,12 +596,19 @@ esp_err_t web_radio_start(const web_radio_config_t *config)
     memset(s_ws_fds, -1, sizeof(s_ws_fds));
     s_ws_count = 0;
 
-    httpd_config_t hcfg = HTTPD_DEFAULT_CONFIG();
-    hcfg.server_port       = config->http_port;
-    hcfg.max_open_sockets  = MAX_WS_CLIENTS + 2;
-    hcfg.lru_purge_enable  = true;
+    httpd_ssl_config_t hcfg = HTTPD_SSL_CONFIG_DEFAULT();
+    hcfg.httpd.max_open_sockets  = 6;     /* Page + API + WS + headroom */
+    hcfg.httpd.max_uri_handlers  = 20;
+    hcfg.httpd.lru_purge_enable  = true;
+    hcfg.httpd.stack_size        = 12288;  /* TLS needs more stack */
+    hcfg.httpd.close_fn          = on_close_socket;
+    hcfg.port_secure             = config->http_port;
+    hcfg.servercert              = servercert_start;
+    hcfg.servercert_len          = servercert_end - servercert_start;
+    hcfg.prvtkey_pem             = prvtkey_start;
+    hcfg.prvtkey_len             = prvtkey_end - prvtkey_start;
 
-    ESP_RETURN_ON_ERROR(httpd_start(&s_httpd, &hcfg), TAG, "httpd_start");
+    ESP_RETURN_ON_ERROR(httpd_ssl_start(&s_httpd, &hcfg), TAG, "httpd_ssl_start");
 
     for (int i = 0; i < (int)(sizeof(s_uris) / sizeof(s_uris[0])); i++) {
         ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_httpd, &s_uris[i]),
@@ -568,7 +638,7 @@ esp_err_t web_radio_stop(void)
         s_ws_timer = NULL;
     }
     if (s_httpd) {
-        httpd_stop(s_httpd);
+        httpd_ssl_stop(s_httpd);
         s_httpd = NULL;
     }
     ESP_LOGI(TAG, "stopped");
@@ -597,4 +667,35 @@ void web_radio_update_rds(const char *ps_name, const char *radio_text,
     s_rds.pi_code = pi_code;
     s_rds.pty = pty;
     s_rds.stereo = stereo;
+}
+
+void web_radio_push_audio(const int16_t *samples, int count)
+{
+    if (!s_httpd || count <= 0) return;
+
+    taskENTER_CRITICAL(&s_ws_mux);
+    int n = s_ws_count;
+    int fds[MAX_WS_CLIENTS];
+    bool audio[MAX_WS_CLIENTS];
+    for (int i = 0; i < n; i++) {
+        fds[i] = s_ws_fds[i];
+        audio[i] = s_ws_audio[i];
+    }
+    taskEXIT_CRITICAL(&s_ws_mux);
+
+    for (int i = 0; i < n; i++) {
+        if (!audio[i]) continue;
+
+        httpd_ws_frame_t frame = {
+            .type    = HTTPD_WS_TYPE_BINARY,
+            .payload = (uint8_t *)samples,
+            .len     = (size_t)(count * sizeof(int16_t)),
+            .final   = true,
+        };
+        esp_err_t err = httpd_ws_send_frame_async(s_httpd, fds[i], &frame);
+        if (err != ESP_OK) {
+            ESP_LOGD(TAG, "audio ws send failed fd=%d, removing", fds[i]);
+            ws_remove_fd(fds[i]);
+        }
+    }
 }
