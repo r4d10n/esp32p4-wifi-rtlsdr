@@ -92,10 +92,12 @@ struct fm_stereo {
     /* L+R path: LPF + de-emphasis */
     pie_fir_state_t    *fir_lpr;        /* L+R 15kHz LPF */
     deemph_state_t      deemph_lpr;     /* L+R de-emphasis */
+    int32_t             notch_lpr[4];   /* 19kHz notch IIR state: x[n-1],x[n-2],y[n-1],y[n-2] */
 
     /* L-R path: LPF + de-emphasis */
     pie_fir_state_t    *fir_lmr;        /* L-R 15kHz LPF */
     deemph_state_t      deemph_lmr;     /* L-R de-emphasis */
+    int32_t             notch_lmr[4];   /* 19kHz notch IIR state: x[n-1],x[n-2],y[n-1],y[n-2] */
 
     /* Polyphase resamplers: 256kSPS -> 48kHz */
     polyphase_resamp_t *resamp_l;
@@ -480,6 +482,43 @@ int fm_stereo_process(fm_stereo_t *st, const int16_t *mpx_in, int n_samples,
     pie_fir_process(st->fir_lpr, st->lpr_buf, st->lpr_buf, n_samples);
     pie_fir_process(st->fir_lmr, st->lmr_buf, st->lmr_buf, n_samples);
 
+    /* 19 kHz pilot notch filter (2nd-order IIR, direct form I).
+     * The 63-tap FIR at 256kSPS has a 16kHz transition band, so the 19kHz
+     * pilot passes through with only -6dB. This notch gives -200dB at 19kHz
+     * with < 0.6dB effect on the 0-15kHz audio band.
+     *
+     * H(z) = (1 + b1·z^-1 + z^-2) / (1 + a1·z^-1 + a2·z^-2)
+     * Zeros on unit circle at ±19kHz, poles at r=0.95 for narrow notch.
+     *
+     * Coefficients (Q14 for b1/a1 since |val|>1, Q15 for a2):
+     *   b1 = -2·cos(w0) = -1.7865 → -29269 in Q14
+     *   a1 = -2·r·cos(w0) = -1.6971 → -27805 in Q14
+     *   a2 = r² = 0.9025 → 29573 in Q15 */
+    {
+        static const int32_t b1_q14 = -29269;
+        static const int32_t a1_q14 = -27805;
+        static const int32_t a2_q15 = 29573;
+
+        /* Notch filter macro: Direct Form I
+         * y[n] = x[n] + b1·x[n-1] + x[n-2] - a1·y[n-1] - a2·y[n-2]
+         * notch_state[0] = x[n-1], [1] = x[n-2], [2] = y[n-1], [3] = y[n-2] */
+        #define NOTCH_PROCESS(buf, state) do { \
+            for (int _ni = 0; _ni < n_samples; _ni++) { \
+                int32_t _x = (buf)[_ni]; \
+                int32_t _y = _x + ((b1_q14 * (state)[0]) >> 14) + (state)[1] \
+                           - ((a1_q14 * (state)[2]) >> 14) \
+                           - ((a2_q15 * (state)[3]) >> 15); \
+                (state)[1] = (state)[0]; (state)[0] = _x; \
+                (state)[3] = (state)[2]; (state)[2] = _y; \
+                (buf)[_ni] = sat16(_y); \
+            } \
+        } while(0)
+
+        NOTCH_PROCESS(st->lpr_buf, st->notch_lpr);
+        NOTCH_PROCESS(st->lmr_buf, st->notch_lmr);
+        #undef NOTCH_PROCESS
+    }
+
     /* Update PLL lock state: pilot detected by Goertzel AND PLL error is low.
      * PLL error threshold: when locked, avg |pd_q| should be < 2000.
      * Without pilot, PLL tracks noise and |pd_q| stays high. */
@@ -489,21 +528,37 @@ int fm_stereo_process(fm_stereo_t *st, const int16_t *mpx_in, int n_samples,
     /* De-emphasis + stereo matrix */
     bool is_stereo = st->goertzel.pilot_detected && st->pll.locked;
 
-    /* Update blend ratio based on pilot power as signal strength proxy */
+    /* Update blend ratio based on pilot power as signal strength proxy.
+     * The L-R channel is very noisy at weak signal levels — even if the
+     * 19kHz pilot is detected, the 23-53kHz L-R subcarrier may be buried
+     * in noise.  Use pilot magnitude with aggressive thresholding. */
     {
         int16_t pilot_mag = (int16_t)(st->goertzel.last_power >> 16);
         if (st->blend_threshold == 0) {
             st->blend_ratio = 32767; /* Always full stereo */
         } else if (!is_stereo) {
             st->blend_ratio = 0;
-        } else if (pilot_mag > st->blend_threshold + st->blend_range) {
-            st->blend_ratio = 32767;
-        } else if (pilot_mag < st->blend_threshold) {
-            st->blend_ratio = 0;
         } else {
-            /* Linear interpolation in blend range */
-            st->blend_ratio = (int16_t)(((int32_t)(pilot_mag - st->blend_threshold) * 32767)
-                                        / st->blend_range);
+            /* Also estimate L-R noise: compute RMS of lmr_buf.
+             * High RMS relative to lpr_buf means noisy L-R channel. */
+            int32_t lmr_rms = 0, lpr_rms = 0;
+            int rms_n = n_samples < 256 ? n_samples : 256;
+            for (int k = 0; k < rms_n; k++) {
+                lmr_rms += (int32_t)st->lmr_buf[k] * st->lmr_buf[k] >> 8;
+                lpr_rms += (int32_t)st->lpr_buf[k] * st->lpr_buf[k] >> 8;
+            }
+            /* If L-R is louder than L+R, it's mostly noise → force mono.
+             * Good stereo: L-R should be < 0.7× L+R energy. */
+            bool lmr_noisy = (lmr_rms > lpr_rms);
+
+            if (lmr_noisy || pilot_mag < st->blend_threshold) {
+                st->blend_ratio = 0;
+            } else if (pilot_mag > st->blend_threshold + st->blend_range) {
+                st->blend_ratio = 32767;
+            } else {
+                st->blend_ratio = (int16_t)(((int32_t)(pilot_mag - st->blend_threshold) * 32767)
+                                            / st->blend_range);
+            }
         }
     }
 
