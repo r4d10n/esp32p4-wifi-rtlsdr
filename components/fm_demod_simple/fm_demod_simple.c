@@ -72,12 +72,14 @@ struct fm_demod_simple {
     uint32_t cic_rate;          /* Rate after CIC decimation */
 
     /* CIC decimator state (3rd order, complex).
-     * MUST use double — float integrators lose precision after ~1s
-     * (24-bit mantissa overflows when accumulator reaches ~500K). */
-    double cic_integrator_i[3];
-    double cic_integrator_q[3];
-    double cic_comb_delay_i[3];
-    double cic_comb_delay_q[3];
+     * Use int64 — float loses precision (24-bit mantissa), double is
+     * software-emulated (ESP32-P4 FPU is single-precision only).
+     * Input is scaled: float [-1,1] → int32 [-8388608, 8388608] (Q23).
+     * CIC gain R^N=64 fits in int64 even after hours. */
+    int64_t cic_integrator_i[3];
+    int64_t cic_integrator_q[3];
+    int64_t cic_comb_delay_i[3];
+    int64_t cic_comb_delay_q[3];
     int   cic_count;
 
     /* FM discriminator state */
@@ -178,9 +180,13 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
         d->signal_acc += fi * fi + fq * fq;
         d->signal_count++;
 
-        /* Step 2: CIC decimator (3rd order) — integrator stage */
-        d->cic_integrator_i[0] += fi;
-        d->cic_integrator_q[0] += fq;
+        /* Step 2: CIC decimator (3rd order) using int64.
+         * Scale float [-1,1] → int32 Q23 for integer accumulation. */
+        int32_t si = (int32_t)(fi * 8388608.0f);  /* Q23 */
+        int32_t sq = (int32_t)(fq * 8388608.0f);
+
+        d->cic_integrator_i[0] += si;
+        d->cic_integrator_q[0] += sq;
         d->cic_integrator_i[1] += d->cic_integrator_i[0];
         d->cic_integrator_q[1] += d->cic_integrator_q[0];
         d->cic_integrator_i[2] += d->cic_integrator_i[1];
@@ -190,11 +196,11 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
         if (d->cic_count < CIC_DECIMATION) continue;
         d->cic_count = 0;
 
-        /* CIC comb stage (double precision to match integrators) */
-        double ci = d->cic_integrator_i[2];
-        double cq = d->cic_integrator_q[2];
+        /* CIC comb stage (int64) */
+        int64_t ci = d->cic_integrator_i[2];
+        int64_t cq = d->cic_integrator_q[2];
 
-        double di, dq;
+        int64_t di, dq;
         di = ci - d->cic_comb_delay_i[0];
         d->cic_comb_delay_i[0] = ci;
         ci = di;
@@ -216,9 +222,9 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
         d->cic_comb_delay_q[2] = cq;
         cq = dq;
 
-        /* Normalize CIC output (gain = R^N = 4^3 = 64), convert to float */
-        float ci_f = (float)(ci / 64.0);
-        float cq_f = (float)(cq / 64.0);
+        /* Normalize: CIC gain = R^N = 64, Q23 → float [-1,1] */
+        float ci_f = (float)ci / (64.0f * 8388608.0f);
+        float cq_f = (float)cq / (64.0f * 8388608.0f);
 
         /* Step 3: FM discriminator using atan2f(cross, dot) */
         float dot   = ci_f * d->prev_i + cq_f * d->prev_q;
