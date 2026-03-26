@@ -71,11 +71,13 @@ struct fm_demod_simple {
     uint32_t audio_rate;        /* Output audio rate */
     uint32_t cic_rate;          /* Rate after CIC decimation */
 
-    /* CIC decimator state (3rd order, complex) */
-    float cic_integrator_i[3];
-    float cic_integrator_q[3];
-    float cic_comb_delay_i[3];
-    float cic_comb_delay_q[3];
+    /* CIC decimator state (3rd order, complex).
+     * MUST use double — float integrators lose precision after ~1s
+     * (24-bit mantissa overflows when accumulator reaches ~500K). */
+    double cic_integrator_i[3];
+    double cic_integrator_q[3];
+    double cic_comb_delay_i[3];
+    double cic_comb_delay_q[3];
     int   cic_count;
 
     /* FM discriminator state */
@@ -188,11 +190,11 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
         if (d->cic_count < CIC_DECIMATION) continue;
         d->cic_count = 0;
 
-        /* CIC comb stage */
-        float ci = d->cic_integrator_i[2];
-        float cq = d->cic_integrator_q[2];
+        /* CIC comb stage (double precision to match integrators) */
+        double ci = d->cic_integrator_i[2];
+        double cq = d->cic_integrator_q[2];
 
-        float di, dq;
+        double di, dq;
         di = ci - d->cic_comb_delay_i[0];
         d->cic_comb_delay_i[0] = ci;
         ci = di;
@@ -214,15 +216,15 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
         d->cic_comb_delay_q[2] = cq;
         cq = dq;
 
-        /* Normalize CIC output (gain = R^N = 4^3 = 64) */
-        ci /= 64.0f;
-        cq /= 64.0f;
+        /* Normalize CIC output (gain = R^N = 4^3 = 64), convert to float */
+        float ci_f = (float)(ci / 64.0);
+        float cq_f = (float)(cq / 64.0);
 
         /* Step 3: FM discriminator using atan2f(cross, dot) */
-        float dot   = ci * d->prev_i + cq * d->prev_q;
-        float cross = cq * d->prev_i - ci * d->prev_q;
-        d->prev_i = ci;
-        d->prev_q = cq;
+        float dot   = ci_f * d->prev_i + cq_f * d->prev_q;
+        float cross = cq_f * d->prev_i - ci_f * d->prev_q;
+        d->prev_i = ci_f;
+        d->prev_q = cq_f;
 
         float fm_out = atan2f(cross, dot);
 
