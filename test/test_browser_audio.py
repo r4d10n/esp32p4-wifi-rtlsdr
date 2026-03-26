@@ -113,14 +113,14 @@ def on_message(ws, message):
     s16 = np.frombuffer(raw, dtype=np.int16, count=n_samples)
     f32 = s16.astype(np.float32) * (1.0 / 32768.0)
 
-    # Detect stereo: interleaved L/R → downmix to mono
+    # Track total samples received (before downmix) for fill rate calc
+    with lock:
+        pcm_samples += n_samples
+
+    # Detect stereo: interleaved L/R → downmix to mono for playback
     if stereo and n_samples >= 2 and n_samples % 2 == 0:
         channels_detected = 2
         f32 = (f32[0::2] + f32[1::2]) * 0.5
-        n_samples = len(f32)
-
-    with lock:
-        pcm_samples += n_samples
 
     # Queue for playback (lock-free deque append is thread-safe)
     audio_queue.append(f32)
