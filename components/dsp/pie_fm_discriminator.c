@@ -20,12 +20,14 @@ void fm_disc_init(fm_disc_state_t *state, fm_disc_mode_t mode,
     state->prev_i = 0;
     state->prev_q = 0;
 
-    /* Scale so max FM deviation maps to ~16384 (half Q15 range).
-     * Polynomial atan2 output is in Q15 radians-ish units.
+    /* Scale so max FM deviation maps to ~28000 (~85% of Q15 range).
+     * This provides 1.5 dB headroom for over-modulation while maximizing
+     * dynamic range.  Previous value of 16384 (50%) wasted 6 dB.
+     * The stereo matrix applies >>1 (-6dB) so this compensates.
      * max_angle = 2*pi*deviation/sample_rate (radians per sample at max deviation) */
     float max_angle = 2.0f * (float)M_PI * deviation / sample_rate;
     if (max_angle < 1e-6f) max_angle = 1e-6f;
-    state->fm_scale = (int16_t)(16384.0f / max_angle);
+    state->fm_scale = (int16_t)(28000.0f / max_angle);
     if (state->fm_scale < 1) state->fm_scale = 1;
 }
 

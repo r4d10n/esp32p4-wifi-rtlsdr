@@ -339,38 +339,6 @@ static void fm_pipeline_task(void *arg)
         /* Step 1: uint8 IQ → int16 with bias removal */
         pie_u8_to_s16_bias(iq_data, pipe->iq_s16, iq_pairs * 2);
 
-        /* IQ data diagnostic: log raw IQ stats periodically */
-        {
-            static int iq_diag_count = 0;
-            if (++iq_diag_count >= 500) {  /* Every ~500 blocks ≈ 5s */
-                /* Histogram of raw uint8 values */
-                int low = 0, mid = 0, high = 0;
-                int min_v = 255, max_v = 0;
-                const uint8_t *raw = (const uint8_t *)iq_data;
-                int total = iq_pairs * 2;
-                for (int k = 0; k < total; k++) {
-                    if (raw[k] < min_v) min_v = raw[k];
-                    if (raw[k] > max_v) max_v = raw[k];
-                    if (raw[k] < 64) low++;
-                    else if (raw[k] > 192) high++;
-                    else mid++;
-                }
-                /* Also check int16 after conversion */
-                int16_t s16_min = 32767, s16_max = -32768;
-                int64_t s16_sum = 0;
-                for (int k = 0; k < iq_pairs * 2 && k < 512; k++) {
-                    if (pipe->iq_s16[k] < s16_min) s16_min = pipe->iq_s16[k];
-                    if (pipe->iq_s16[k] > s16_max) s16_max = pipe->iq_s16[k];
-                    s16_sum += pipe->iq_s16[k];
-                }
-                ESP_LOGW(TAG, "IQ DIAG: u8[%d..%d] lo=%d mid=%d hi=%d | s16[%d..%d] avg=%d | pairs=%d sz=%d",
-                         min_v, max_v, low, mid, high,
-                         (int)s16_min, (int)s16_max, (int)(s16_sum / 512),
-                         iq_pairs, (int)item_size);
-                iq_diag_count = 0;
-            }
-        }
-
         /* IQ overload detection: count samples at ADC rail (0 or 255 → -32768 or +32512).
          * More than 5% clipping = overload → need lower gain. */
         {
@@ -401,26 +369,6 @@ static void fm_pipeline_task(void *arg)
                               pipe->iq_decim, &decim_pairs,
                               pipe->decim_ratio, pipe->cic_state);
 
-        /* Diagnostic: log CIC output stats */
-        {
-            static int cic_diag_cnt = 0;
-            if (++cic_diag_cnt >= 500 && decim_pairs > 0) {
-                int16_t cic_min = 32767, cic_max = -32768;
-                int64_t cic_sum = 0;
-                int n = decim_pairs * 2;
-                for (int k = 0; k < n && k < 256; k++) {
-                    if (pipe->iq_decim[k] < cic_min) cic_min = pipe->iq_decim[k];
-                    if (pipe->iq_decim[k] > cic_max) cic_max = pipe->iq_decim[k];
-                    cic_sum += pipe->iq_decim[k];
-                }
-                ESP_LOGW(TAG, "CIC OUT: [%d..%d] avg=%d pairs=%d | NCO in: [%d..%d]",
-                         (int)cic_min, (int)cic_max, (int)(cic_sum / 256),
-                         decim_pairs,
-                         (int)pipe->iq_mixed[0], (int)pipe->iq_mixed[1]);
-                cic_diag_cnt = 0;
-            }
-        }
-
         /* Step 4: FM demodulation → audio */
         if (decim_pairs > 0) {
 #ifdef CONFIG_FM_STEREO_ENABLE
@@ -428,20 +376,6 @@ static void fm_pipeline_task(void *arg)
                 /* Stereo path: discriminator only → stereo decoder handles the rest */
                 int mpx_count = fm_demod_discriminate(pipe->demod, pipe->iq_decim, decim_pairs,
                                                        pipe->mpx_buf, DSP_BUF_ENTRIES / 2);
-                /* Diagnostic: log discriminator (MPX) output */
-                {
-                    static int mpx_diag_cnt = 0;
-                    if (++mpx_diag_cnt >= 500 && mpx_count > 0) {
-                        int16_t mpx_min = 32767, mpx_max = -32768;
-                        for (int k = 0; k < mpx_count && k < 256; k++) {
-                            if (pipe->mpx_buf[k] < mpx_min) mpx_min = pipe->mpx_buf[k];
-                            if (pipe->mpx_buf[k] > mpx_max) mpx_max = pipe->mpx_buf[k];
-                        }
-                        ESP_LOGW(TAG, "MPX OUT: [%d..%d] count=%d",
-                                 (int)mpx_min, (int)mpx_max, mpx_count);
-                        mpx_diag_cnt = 0;
-                    }
-                }
                 if (mpx_count > 0) {
                     int stereo_pairs = fm_stereo_process(pipe->stereo, pipe->mpx_buf, mpx_count,
                                                           pipe->stereo_buf, DSP_BUF_ENTRIES / 2);
