@@ -325,10 +325,13 @@ fm_stereo_t *fm_stereo_create(const fm_stereo_config_t *config)
         return NULL;
     }
 
-    /* RDS decoder: 57kHz subcarrier mixed down, decimated to ~5kHz
-     * Decimation ratio: sample_rate / 5333 ≈ 48 for 256kSPS */
+    /* RDS decoder: 57kHz subcarrier mixed down, decimated to symbol rate.
+     * RDS uses biphase (Manchester) at 2375 symbols/sec.
+     * Decimate directly to symbol rate: each output sample = one symbol.
+     * 256000 / 2375 ≈ 107.8 → round to 108 → actual rate = 2370 sps.
+     * This eliminates the need for symbol clock recovery entirely. */
     {
-        uint32_t rds_rate = 5333;
+        uint32_t rds_rate = 2375;
         st->rds = rds_decoder_create(rds_rate);
         if (st->rds) {
             st->rds_buf = heap_caps_aligned_alloc(16, st->scratch_size * sizeof(int16_t), MALLOC_CAP_DEFAULT);
@@ -406,8 +409,14 @@ int fm_stereo_process(fm_stereo_t *st, const int16_t *mpx_in, int n_samples,
     int rds_count = 0;
     bool do_rds = (st->rds && st->rds_buf);
     if (do_rds) {
-        rds_decim = st->config.sample_rate / 5333;
+        rds_decim = st->config.sample_rate / 2375;
         if (rds_decim < 1) rds_decim = 1;
+        static bool rds_decim_logged = false;
+        if (!rds_decim_logged) {
+            ESP_LOGI("fm_stereo", "RDS decim: rate=%lu / 2375 = %d",
+                     (unsigned long)st->config.sample_rate, rds_decim);
+            rds_decim_logged = true;
+        }
     }
 
     /* Per-sample processing: PLL update, Goertzel, L+R/L-R, RDS extraction.
@@ -467,11 +476,12 @@ int fm_stereo_process(fm_stereo_t *st, const int16_t *mpx_in, int n_samples,
         rds_decoder_process(st->rds, st->rds_buf, rds_count);
     }
 
-    /* Apply 15 kHz LPF to both L+R and L-R paths */
-    int16_t lpr_filtered[n_samples];
-    int16_t lmr_filtered[n_samples];
-    pie_fir_process(st->fir_lpr, st->lpr_buf, lpr_filtered, n_samples);
-    pie_fir_process(st->fir_lmr, st->lmr_buf, lmr_filtered, n_samples);
+    /* Apply 15 kHz LPF to both L+R and L-R paths.
+     * FIR output goes back into lpr_buf/lmr_buf (in-place safe: FIR uses
+     * internal delay line, and pie_fir_process supports in-place operation).
+     * This avoids VLAs on the stack (up to 16KB for n_samples=4096). */
+    pie_fir_process(st->fir_lpr, st->lpr_buf, st->lpr_buf, n_samples);
+    pie_fir_process(st->fir_lmr, st->lmr_buf, st->lmr_buf, n_samples);
 
     /* Update PLL lock state: pilot detected by Goertzel AND PLL error is low.
      * PLL error threshold: when locked, avg |pd_q| should be < 2000.
@@ -501,8 +511,8 @@ int fm_stereo_process(fm_stereo_t *st, const int16_t *mpx_in, int n_samples,
     }
 
     for (int i = 0; i < n_samples; i++) {
-        int16_t lpr_de = deemph_process(&st->deemph_lpr, lpr_filtered[i]);
-        int16_t lmr_de = deemph_process(&st->deemph_lmr, lmr_filtered[i]);
+        int16_t lpr_de = deemph_process(&st->deemph_lpr, st->lpr_buf[i]);
+        int16_t lmr_de = deemph_process(&st->deemph_lmr, st->lmr_buf[i]);
 
         /* Stereo matrix: L = (L+R) + (L-R), R = (L+R) - (L-R) */
         int16_t L = sat16(((int32_t)lpr_de + lmr_de) >> 1);

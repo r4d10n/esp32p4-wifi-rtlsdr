@@ -17,8 +17,11 @@
 
 static const char *TAG = "rds";
 
-/* RDS constants */
-#define RDS_BITRATE     1187.5f
+/* RDS constants.
+ * RDS uses biphase (Manchester) encoding at 2375 symbols/sec = 2 × 1187.5 bps.
+ * Each data bit produces two half-bit symbols: '1' → [+,-], '0' → [-,+].
+ * The clock recovery must run at the SYMBOL rate (2375), not the data rate. */
+#define RDS_SYMBOL_RATE 2375.0f /* biphase symbols/sec */
 #define RDS_BLOCK_LEN   26      /* 16 data + 10 check bits */
 #define RDS_GROUP_LEN   4       /* 4 blocks per group */
 
@@ -33,12 +36,15 @@ static const char *TAG = "rds";
 #define RDS_CRC_POLY    0x5B9
 
 struct rds_decoder {
-    /* Biphase / Manchester decoder */
+    /* Biphase (Manchester) symbol clock recovery */
     int16_t     prev_sample;        /* Previous sample for zero-crossing */
-    int32_t     clock_phase;        /* Clock recovery phase */
-    int32_t     clock_inc;          /* Phase increment per sample */
-    int16_t     sample_acc;         /* Sample accumulator for bit decision */
-    int         sample_count;
+    int32_t     clock_phase;        /* Clock recovery phase (wraps at 65536 = 1 symbol) */
+    int32_t     clock_inc;          /* Phase increment per input sample */
+    int32_t     sym_acc;            /* Integrate-and-dump accumulator for current symbol */
+
+    /* Manchester decode: pair symbols into data bits */
+    int         sym_count;          /* Symbol counter within bit (0=first half, 1=second half) */
+    int32_t     first_half;         /* First half-symbol value */
 
     /* Bit stream */
     uint32_t    shift_reg;          /* 26-bit shift register */
@@ -57,7 +63,7 @@ struct rds_decoder {
     rds_data_t  data;
 
     /* Differential decode */
-    int         prev_raw_bit;
+    int         prev_diff_bit;
 
     /* Config */
     uint32_t    sample_rate;
@@ -160,10 +166,11 @@ static void rds_process_bit(rds_decoder_t *rds, int bit)
         /* Try to sync: check if current 26 bits match any offset */
         if (rds_check_block(rds->shift_reg, RDS_OFFSET_A)) {
             rds->synced = true;
-            rds->block_idx = 0;
+            rds->block_idx = 1;  /* Next expected block is B */
             rds->group_data[0] = rds->shift_reg >> 10;
             rds->bit_count = 0;
             rds->good_blocks = 1;
+            rds->bad_blocks = 0;
             ESP_LOGD(TAG, "RDS sync acquired");
         }
         return;
@@ -191,6 +198,11 @@ static void rds_process_bit(rds_decoder_t *rds, int bit)
         } else {
             rds->bad_blocks++;
             rds->data.block_errors++;
+            ESP_LOGD(TAG, "Block %c fail: 0x%07lX syn=0x%03X exp=0x%03X",
+                     "ABCD"[rds->block_idx],
+                     (unsigned long)rds->shift_reg,
+                     rds_syndrome(rds->shift_reg),
+                     offsets[rds->block_idx]);
         }
     }
 
@@ -216,10 +228,12 @@ rds_decoder_t *rds_decoder_create(uint32_t sample_rate)
     if (!rds) return NULL;
 
     rds->sample_rate = sample_rate;
-    rds->clock_inc = (int32_t)((RDS_BITRATE * 65536.0f) / sample_rate);
+    /* When input is already at symbol rate (~2375 sps), each sample IS one
+     * symbol.  No clock recovery needed — just sign-detect and Manchester pair. */
+    rds->clock_inc = (int32_t)((RDS_SYMBOL_RATE * 65536.0f) / sample_rate);
 
-    ESP_LOGI(TAG, "RDS decoder created: input %"PRIu32" SPS, bitrate %.1f bps",
-             sample_rate, RDS_BITRATE);
+    ESP_LOGI(TAG, "RDS decoder created: input %"PRIu32" SPS (%.1f samp/sym)",
+             sample_rate, (float)sample_rate / RDS_SYMBOL_RATE);
     return rds;
 }
 
@@ -239,10 +253,8 @@ void rds_decoder_process(rds_decoder_t *rds, const int16_t *samples, int count)
 {
     if (!rds || !samples) return;
 
-    /* Periodic debug: track signal level and bit rate */
-    static int dbg_samples = 0;
-    static int dbg_bits = 0;
-    static int dbg_crossings = 0;
+    /* Debug counters */
+    static int dbg_samples = 0, dbg_bits = 0, dbg_crossings = 0;
     static int16_t dbg_peak = 0;
 
     for (int i = 0; i < count; i++) {
@@ -251,74 +263,49 @@ void rds_decoder_process(rds_decoder_t *rds, const int16_t *samples, int count)
         int16_t abs_s = s > 0 ? s : -s;
         if (abs_s > dbg_peak) dbg_peak = abs_s;
 
-        /* RDS uses differential BPSK, not Manchester.
-         * The baseband signal is bipolar NRZ at 1187.5 bps.
-         * We use a simple clock recovery + integrate-and-dump. */
-
-        /* Detect zero crossings for clock recovery */
+        /* Zero-crossing detection (for debug stats only) */
         bool crossing = (s > 0 && rds->prev_sample <= 0) ||
                         (s <= 0 && rds->prev_sample > 0);
         rds->prev_sample = s;
         if (crossing) dbg_crossings++;
 
-        /* Advance clock */
-        rds->clock_phase += rds->clock_inc;
+        /* Input is at biphase symbol rate (~2375 sps from accumulate-and-dump).
+         * Each input sample IS one biphase symbol — no clock recovery needed.
+         * Just sign-detect and Manchester-pair consecutive symbols. */
+        int sym_positive = (s > 0) ? 1 : 0;
 
-        /* Adjust clock on zero crossing */
-        if (crossing) {
-            if (rds->clock_phase > 32768) {
-                rds->clock_phase -= rds->clock_inc / 4;
-            } else {
-                rds->clock_phase += rds->clock_inc / 4;
-            }
-        }
+        /* Manchester/biphase decode: pair consecutive symbols.
+         * TX: diff_bit 1 → symbols [+1, -1] (positive first)
+         * TX: diff_bit 0 → symbols [-1, +1] (negative first)
+         * We use the first half-symbol to determine the diff bit. */
+        if (rds->sym_count == 0) {
+            /* First half-symbol of pair */
+            rds->first_half = sym_positive;
+            rds->sym_count = 1;
+        } else {
+            /* Second half-symbol: decode the pair.
+             * diff_bit = 1 if first half was positive */
+            int diff_bit = rds->first_half;
 
-        /* Accumulate samples for bit decision */
-        rds->sample_acc += s;
-        rds->sample_count++;
+            /* Differential decode: data '1' = no phase change, '0' = toggled */
+            int data_bit = (diff_bit == rds->prev_diff_bit) ? 1 : 0;
+            rds->prev_diff_bit = diff_bit;
 
-        /* Sample at mid-bit (clock wraps at 65536 = one bit period) */
-        if (rds->clock_phase >= 65536) {
-            rds->clock_phase -= 65536;
-
-            /* RDS uses differential encoding: a '1' data bit means no phase
-             * change from previous symbol, '0' means phase inverted.
-             * After 57kHz coherent demod, we get bipolar NRZ.
-             * Differential decode: XOR current with previous.
-             *   same → 0 (no change = data '1'... but polarity depends on
-             *   PLL lock phase which can be 0 or π)
-             *
-             * Try BOTH polarities: process both the diff bit and its inverse.
-             * The sync detector will find the correct one via CRC match.
-             * This avoids needing to know the absolute PLL phase. */
-            int raw_bit = (rds->sample_acc > 0) ? 1 : 0;
-            int diff_bit = raw_bit ^ rds->prev_raw_bit;  /* XOR = phase changed */
-            rds->prev_raw_bit = raw_bit;
-
-            rds_process_bit(rds, diff_bit);
+            rds_process_bit(rds, data_bit);
             dbg_bits++;
 
-            rds->sample_acc = 0;
-            rds->sample_count = 0;
+            rds->sym_count = 0;
         }
     }
 
-    /* Debug log every ~5 seconds (5333 * 5 = ~26665 samples) */
-    static int32_t dbg_acc_pos = 0, dbg_acc_neg = 0;
-    static int dbg_bit_run = 0, dbg_max_run = 0;
-    static int dbg_last_bit = -1;
-    /* Track bit transition stats */
-    if (dbg_bits > 0) {
-        /* Use a simple counter for tracking (bits counted in main loop) */
-    }
+    /* Debug log every ~5 seconds */
     if (dbg_samples >= 26665) {
-        /* Also dump last 32 bits for visual inspection */
-        uint32_t last_bits = rds->shift_reg;
         ESP_LOGI(TAG, "RDS: %d samp %d bits %d cross peak=%d sync=%d "
-                 "good=%d bad=%d err=%"PRIu32" bits=0x%08lX",
+                 "good=%d bad=%d err=%"PRIu32" bits=0x%08lX grp=%"PRIu32,
                  dbg_samples, dbg_bits, dbg_crossings, (int)dbg_peak,
                  rds->synced, rds->good_blocks, rds->bad_blocks,
-                 rds->data.block_errors, (unsigned long)last_bits);
+                 rds->data.block_errors, (unsigned long)rds->shift_reg,
+                 rds->data.groups_received);
         dbg_samples = 0;
         dbg_bits = 0;
         dbg_crossings = 0;
