@@ -1,47 +1,64 @@
 /*
- * ESP32-P4 RTL-SDR WiFi Bridge — Main Application
+ * ESP32-P4 Standalone Mono FM Radio
  *
- * USB Host → RTL-SDR → Ring Buffer → RTL-TCP Server → WiFi/Ethernet → Client
+ * USB Host -> RTL-SDR -> Float WBFM Demod -> I2S Audio Out
+ * Web interface for tuning and control.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include <string.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/ringbuf.h"
 #include "esp_log.h"
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_hosted.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
+#include "esp_heap_caps.h"
 #include "nvs_flash.h"
 #include "usb/usb_host.h"
 #include "mdns.h"
-#include "esp_eth.h"
-#include "esp_eth_driver.h"
-#include "driver/gpio.h"
 #include "rtlsdr.h"
-#include "rtltcp.h"
-#include "rtludp.h"
-#include "websdr.h"
+#include "fm_demod_simple.h"
+#include "audio_out_simple.h"
+#include "web_radio_simple.h"
 
 static const char *TAG = "main";
 
-/* WiFi credentials — set via menuconfig or sdkconfig.defaults */
+/* WiFi credentials */
 #define WIFI_SSID       CONFIG_WIFI_SSID
 #define WIFI_PASS       CONFIG_WIFI_PASSWORD
 
-/* RTL-SDR default configuration */
-#define DEFAULT_FREQ        100000000   /* 100 MHz */
-#define DEFAULT_SAMPLE_RATE 1024000     /* 1.024 MSPS */
+/* DSP parameters */
+#define SDR_SAMPLE_RATE     1024000
+#define SDR_CENTER_FREQ     100000000   /* 100.0 MHz */
+#define SDR_GAIN            496         /* 49.6 dB */
+#define AUDIO_RATE          48000
 
-static rtlsdr_dev_t    *sdr_dev = NULL;
-static rtltcp_server_t *tcp_srv = NULL;
-static rtludp_server_t *udp_srv = NULL;
-static websdr_server_t *websdr_srv = NULL;
+/* IQ ring buffer: USB callback (Core 0) -> FM pipeline (Core 1) */
+static RingbufHandle_t iq_ringbuf = NULL;
+#define IQ_RINGBUF_SIZE     (128 * 1024)
 
-/* ──────────────────────── WiFi Event Handler ──────────────────────── */
+/* Audio output buffer */
+#define AUDIO_BUF_SIZE      2048
+static float    audio_float_buf[AUDIO_BUF_SIZE];
+static int16_t  audio_s16_buf[AUDIO_BUF_SIZE];
+
+/* Shared state */
+static rtlsdr_dev_t         *sdr_dev = NULL;
+static fm_demod_simple_t    *demod   = NULL;
+
+/* Radio parameters (protected by simplicity: single writer) */
+static volatile uint32_t    radio_freq   = SDR_CENTER_FREQ;
+static volatile int         radio_gain   = SDR_GAIN;
+static volatile uint8_t     radio_volume = 90;
+static volatile bool        radio_muted  = false;
+
+/* ── WiFi Event Handler ── */
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                 int32_t event_id, void *event_data)
@@ -64,7 +81,6 @@ static esp_err_t wifi_init_sta(void)
 
     esp_netif_create_default_wifi_sta();
 
-    /* Initialize ESP-Hosted transport (SDIO to ESP32-C6) before WiFi */
     ESP_LOGI(TAG, "Initializing ESP-Hosted...");
     ESP_RETURN_ON_ERROR(esp_hosted_init(), TAG, "esp_hosted_init failed");
     ESP_LOGI(TAG, "Connecting to C6 slave over SDIO...");
@@ -96,145 +112,7 @@ static esp_err_t wifi_init_sta(void)
     return ESP_OK;
 }
 
-/* ──────────────────────── Ethernet Init ──────────────────────── */
-
-#ifdef CONFIG_RTLSDR_ETHERNET_ENABLE
-static void eth_event_handler(void *arg, esp_event_base_t event_base,
-                               int32_t event_id, void *event_data)
-{
-    uint8_t mac[6];
-    esp_eth_handle_t eth_handle = *(esp_eth_handle_t *)event_data;
-
-    switch (event_id) {
-    case ETHERNET_EVENT_CONNECTED:
-        esp_eth_ioctl(eth_handle, ETH_CMD_G_MAC_ADDR, mac);
-        ESP_LOGI(TAG, "Ethernet Link Up (MAC: %02x:%02x:%02x:%02x:%02x:%02x)",
-                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-        break;
-    case ETHERNET_EVENT_DISCONNECTED:
-        ESP_LOGW(TAG, "Ethernet Link Down");
-        break;
-    case ETHERNET_EVENT_START:
-        ESP_LOGI(TAG, "Ethernet Started");
-        break;
-    case ETHERNET_EVENT_STOP:
-        ESP_LOGI(TAG, "Ethernet Stopped");
-        break;
-    default:
-        break;
-    }
-}
-
-static void eth_got_ip_handler(void *arg, esp_event_base_t event_base,
-                                int32_t event_id, void *event_data)
-{
-    ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-    ESP_LOGI(TAG, "Ethernet Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
-}
-
-static esp_err_t ethernet_init(void)
-{
-    ESP_LOGI(TAG, "Initializing Ethernet (IP101 PHY, RMII)...");
-
-    /* EMAC config */
-    eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
-    eth_esp32_emac_config_t esp32_emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
-    esp32_emac_config.smi_gpio.mdc_num = CONFIG_RTLSDR_ETH_MDC_GPIO;
-    esp32_emac_config.smi_gpio.mdio_num = CONFIG_RTLSDR_ETH_MDIO_GPIO;
-
-    esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&esp32_emac_config, &mac_config);
-    ESP_RETURN_ON_FALSE(mac, ESP_FAIL, TAG, "MAC create failed");
-
-    /* PHY config (IP101) */
-    eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
-    phy_config.phy_addr = CONFIG_RTLSDR_ETH_PHY_ADDR;
-    phy_config.reset_gpio_num = CONFIG_RTLSDR_ETH_PHY_RST_GPIO;
-
-    esp_eth_phy_t *phy = esp_eth_phy_new_ip101(&phy_config);
-    ESP_RETURN_ON_FALSE(phy, ESP_FAIL, TAG, "PHY create failed");
-
-    /* Ethernet driver */
-    esp_eth_config_t eth_config = ETH_DEFAULT_CONFIG(mac, phy);
-    esp_eth_handle_t eth_handle = NULL;
-    ESP_RETURN_ON_ERROR(esp_eth_driver_install(&eth_config, &eth_handle),
-                        TAG, "ETH driver install failed");
-
-    /* Attach to TCP/IP stack */
-    esp_netif_config_t netif_config = ESP_NETIF_DEFAULT_ETH();
-    esp_netif_t *eth_netif = esp_netif_new(&netif_config);
-
-    esp_eth_netif_glue_handle_t eth_glue = esp_eth_new_netif_glue(eth_handle);
-    ESP_RETURN_ON_ERROR(esp_netif_attach(eth_netif, eth_glue),
-                        TAG, "Netif attach failed");
-
-    /* Register event handlers */
-    esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL);
-    esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &eth_got_ip_handler, NULL);
-
-    /* Start Ethernet */
-    ESP_RETURN_ON_ERROR(esp_eth_start(eth_handle), TAG, "ETH start failed");
-
-    ESP_LOGI(TAG, "Ethernet initialized (MDC=%d MDIO=%d PHY_ADDR=%d)",
-             CONFIG_RTLSDR_ETH_MDC_GPIO, CONFIG_RTLSDR_ETH_MDIO_GPIO,
-             CONFIG_RTLSDR_ETH_PHY_ADDR);
-    return ESP_OK;
-}
-#endif /* CONFIG_RTLSDR_ETHERNET_ENABLE */
-
-/* ──────────────────────── Multicast Setup ──────────────────────── */
-
-#ifdef CONFIG_RTLSDR_MULTICAST_ENABLE
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-
-static int multicast_fd = -1;
-static struct sockaddr_in multicast_addr;
-
-static esp_err_t multicast_init(void)
-{
-    ESP_LOGI(TAG, "Initializing Multicast UDP to %s:%d",
-             CONFIG_RTLSDR_MULTICAST_GROUP, CONFIG_RTLSDR_MULTICAST_PORT);
-
-    multicast_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    ESP_RETURN_ON_FALSE(multicast_fd >= 0, ESP_FAIL, TAG, "Multicast socket failed");
-
-    /* Set TTL for multicast */
-    int ttl = 4;
-    setsockopt(multicast_fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
-
-    /* Enable loopback so local listeners can receive too */
-    int loop = 1;
-    setsockopt(multicast_fd, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop));
-
-    /* Destination */
-    memset(&multicast_addr, 0, sizeof(multicast_addr));
-    multicast_addr.sin_family = AF_INET;
-    multicast_addr.sin_port = htons(CONFIG_RTLSDR_MULTICAST_PORT);
-    inet_aton(CONFIG_RTLSDR_MULTICAST_GROUP, &multicast_addr.sin_addr);
-
-    ESP_LOGI(TAG, "Multicast ready: %s:%d (TTL=%d)",
-             CONFIG_RTLSDR_MULTICAST_GROUP, CONFIG_RTLSDR_MULTICAST_PORT, ttl);
-    return ESP_OK;
-}
-
-/* Called from IQ callback to send multicast */
-static void multicast_push_samples(const uint8_t *data, uint32_t len)
-{
-    if (multicast_fd < 0) return;
-
-    /* Send raw IQ in 1024-byte chunks */
-    uint32_t offset = 0;
-    while (offset < len) {
-        uint32_t chunk = (len - offset > 1024) ? 1024 : (len - offset);
-        sendto(multicast_fd, data + offset, chunk, MSG_DONTWAIT,
-               (struct sockaddr *)&multicast_addr, sizeof(multicast_addr));
-        offset += chunk;
-    }
-}
-#endif /* CONFIG_RTLSDR_MULTICAST_ENABLE */
-
-/* ──────────────────────── mDNS Service ──────────────────────── */
+/* ── mDNS ── */
 
 static void mdns_init_service(void)
 {
@@ -243,15 +121,13 @@ static void mdns_init_service(void)
         ESP_LOGW(TAG, "mDNS init failed: %s", esp_err_to_name(ret));
         return;
     }
-
-    mdns_hostname_set("esp32p4-rtlsdr");
-    mdns_instance_name_set("ESP32-P4 RTL-SDR");
-
-    mdns_service_add(NULL, "_rtl_tcp", "_tcp", RTLTCP_DEFAULT_PORT, NULL, 0);
-    ESP_LOGI(TAG, "mDNS: esp32p4-rtlsdr._rtl_tcp._tcp:%d", RTLTCP_DEFAULT_PORT);
+    mdns_hostname_set("esp32p4-fm-radio");
+    mdns_instance_name_set("ESP32-P4 FM Radio");
+    mdns_service_add(NULL, "_https", "_tcp", 8080, NULL, 0);
+    ESP_LOGI(TAG, "mDNS: esp32p4-fm-radio._https._tcp:8080");
 }
 
-/* ──────────────────────── USB Host Task ──────────────────────── */
+/* ── USB Host Task ── */
 
 static void usb_host_task(void *arg)
 {
@@ -260,38 +136,112 @@ static void usb_host_task(void *arg)
     }
 }
 
-/* ──────────────────────── IQ Callback (USB → Ring Buffer) ──────────────────────── */
+/* ── IQ Callback (USB -> Ring Buffer) ── */
 
 static void iq_data_cb(uint8_t *buf, uint32_t len, void *ctx)
 {
     (void)ctx;
-    /* Push to TCP server if running */
-    if (tcp_srv) {
-        rtltcp_push_samples(tcp_srv, buf, len);
-    }
-    /* Push to UDP server if running */
-    if (udp_srv) {
-        rtludp_push_samples(udp_srv, buf, len);
-    }
-    /* Push to WebSDR server if running */
-    if (websdr_srv) {
-        websdr_push_samples(websdr_srv, buf, len);
-    }
-#ifdef CONFIG_RTLSDR_MULTICAST_ENABLE
-    multicast_push_samples(buf, len);
-#endif
+    /* Best-effort push to ring buffer; drop if full */
+    xRingbufferSend(iq_ringbuf, buf, len, 0);
 }
 
-/* ──────────────────────── SDR Streaming Task ──────────────────────── */
+/* ── Web Radio Change Callback ── */
+
+static void on_radio_change(const web_radio_simple_params_t *params, void *ctx)
+{
+    (void)ctx;
+
+    if (params->frequency != radio_freq) {
+        radio_freq = params->frequency;
+        if (sdr_dev) {
+            rtlsdr_set_center_freq(sdr_dev, params->frequency);
+            ESP_LOGI(TAG, "Tuned to %lu Hz", (unsigned long)params->frequency);
+        }
+    }
+
+    if (params->gain != radio_gain) {
+        radio_gain = params->gain;
+        if (sdr_dev) {
+            if (params->gain == 0) {
+                rtlsdr_set_tuner_gain_mode(sdr_dev, 0);  /* Auto */
+            } else {
+                rtlsdr_set_tuner_gain_mode(sdr_dev, 1);  /* Manual */
+                rtlsdr_set_tuner_gain(sdr_dev, params->gain);
+            }
+            ESP_LOGI(TAG, "Gain set to %d", params->gain);
+        }
+    }
+
+    if (params->volume != radio_volume) {
+        radio_volume = params->volume;
+        audio_out_simple_set_volume(params->volume);
+    }
+
+    if (params->muted != radio_muted) {
+        radio_muted = params->muted;
+        audio_out_simple_set_mute(params->muted);
+    }
+}
+
+/* ── FM Pipeline Task (Core 1) ── */
+
+static void fm_pipeline_task(void *arg)
+{
+    ESP_LOGI(TAG, "FM pipeline started on core %d", xPortGetCoreID());
+
+    while (1) {
+        size_t item_size = 0;
+        uint8_t *iq = (uint8_t *)xRingbufferReceive(iq_ringbuf, &item_size, pdMS_TO_TICKS(100));
+        if (!iq || item_size == 0) continue;
+
+        /* Process IQ through demodulator */
+        int n = fm_demod_simple_process(demod, iq, (int)item_size,
+                                        audio_float_buf, AUDIO_BUF_SIZE);
+
+        /* Return ring buffer item */
+        vRingbufferReturnItem(iq_ringbuf, iq);
+
+        if (n <= 0) continue;
+
+        /* Convert float [-1,1] to int16, using full range for loud audio */
+        for (int i = 0; i < n; i++) {
+            float s = audio_float_buf[i] * 32000.0f;
+            if (s > 32767.0f) s = 32767.0f;
+            if (s < -32768.0f) s = -32768.0f;
+            audio_s16_buf[i] = (int16_t)s;
+        }
+
+        /* Write to I2S audio output */
+        audio_out_simple_write(audio_s16_buf, n, 200);
+
+        /* Push to web radio for browser streaming */
+        web_radio_simple_push_audio(audio_s16_buf, n);
+
+        /* Update signal strength for web UI */
+        float sig = fm_demod_simple_get_signal_strength(demod);
+        int16_t sig_int = (int16_t)(sig * 32767.0f);
+        if (sig_int > 32767) sig_int = 32767;
+
+        web_radio_simple_params_t status = {
+            .frequency = radio_freq,
+            .gain      = radio_gain,
+            .volume    = radio_volume,
+            .muted     = radio_muted,
+        };
+        web_radio_simple_update_status(&status, sig_int);
+    }
+}
+
+/* ── SDR Streaming Task (Core 0) ── */
 
 static void sdr_stream_task(void *arg)
 {
     ESP_LOGI(TAG, "Starting IQ streaming (rate=%lu, freq=%lu)",
-             (unsigned long)rtlsdr_get_sample_rate(sdr_dev),
+             (unsigned long)SDR_SAMPLE_RATE,
              (unsigned long)rtlsdr_get_center_freq(sdr_dev));
 
     /* This blocks until rtlsdr_stop_async() is called */
-    esp_err_t ret = rtlsdr_read_async(sdr_dev, iq_data_cb, tcp_srv, 0, 0); /* use defaults: 12 x 64KB */
+    esp_err_t ret = rtlsdr_read_async(sdr_dev, iq_data_cb, NULL, 0, 0);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Async read ended with error: %s", esp_err_to_name(ret));
     }
@@ -300,17 +250,11 @@ static void sdr_stream_task(void *arg)
     vTaskDelete(NULL);
 }
 
-/* ──────────────────────── Main ──────────────────────── */
+/* ── Main ── */
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "ESP32-P4 RTL-SDR WiFi Bridge starting...");
-
-    /* Run FFT benchmark at startup (set to 1 to enable) */
-#if 0
-    extern void bench_fft_all(void);
-    bench_fft_all();
-#endif
+    ESP_LOGI(TAG, "ESP32-P4 Mono FM Radio starting...");
 
     /* Initialize NVS (required by WiFi) */
     esp_err_t ret = nvs_flash_init();
@@ -323,25 +267,40 @@ void app_main(void)
     /* Initialize WiFi */
     ESP_ERROR_CHECK(wifi_init_sta());
 
-#ifdef CONFIG_RTLSDR_ETHERNET_ENABLE
-    /* Initialize Ethernet (runs alongside WiFi) */
-    ret = ethernet_init();
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Ethernet init failed: %s (WiFi still active)", esp_err_to_name(ret));
-    }
-#endif
-
-    /* Wait for IP address (WiFi or Ethernet) */
+    /* Wait for network */
     ESP_LOGI(TAG, "Waiting for network connection...");
     vTaskDelay(pdMS_TO_TICKS(5000));
 
-#ifdef CONFIG_RTLSDR_MULTICAST_ENABLE
-    /* Initialize Multicast (best on Ethernet) */
-    multicast_init();
-#endif
-
     /* Start mDNS */
     mdns_init_service();
+
+    /* Initialize IQ ring buffer in PSRAM */
+    iq_ringbuf = xRingbufferCreateNoSplit(IQ_RINGBUF_SIZE, IQ_RINGBUF_SIZE);
+    if (!iq_ringbuf) {
+        /* Fall back to internal RAM */
+        ESP_LOGW(TAG, "PSRAM ringbuf failed, using internal RAM");
+        iq_ringbuf = xRingbufferCreate(IQ_RINGBUF_SIZE, RINGBUF_TYPE_NOSPLIT);
+    }
+    ESP_ERROR_CHECK(iq_ringbuf ? ESP_OK : ESP_ERR_NO_MEM);
+
+    /* Initialize FM demodulator */
+    demod = fm_demod_simple_create(SDR_SAMPLE_RATE, AUDIO_RATE);
+    ESP_ERROR_CHECK(demod ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_LOGI(TAG, "FM demodulator created: %d -> %d Hz", SDR_SAMPLE_RATE, AUDIO_RATE);
+
+    /* Initialize audio output */
+    audio_out_simple_config_t audio_cfg = AUDIO_OUT_SIMPLE_CONFIG_DEFAULT();
+    audio_cfg.sample_rate = AUDIO_RATE;
+    audio_cfg.volume = radio_volume;
+    audio_cfg.speaker_enable = true;
+    ESP_ERROR_CHECK(audio_out_simple_init(&audio_cfg));
+
+    /* Initialize web radio */
+    web_radio_simple_config_t web_cfg = WEB_RADIO_SIMPLE_CONFIG_DEFAULT();
+    web_cfg.http_port = 8080;
+    web_cfg.change_cb = on_radio_change;
+    web_cfg.cb_ctx = NULL;
+    ESP_ERROR_CHECK(web_radio_simple_start(&web_cfg));
 
     /* Install USB Host Library */
     usb_host_config_t host_config = {
@@ -363,42 +322,34 @@ void app_main(void)
 
     /* Configure SDR */
     rtlsdr_config_t sdr_config = RTLSDR_CONFIG_DEFAULT();
-    sdr_config.center_freq = DEFAULT_FREQ;
-    sdr_config.sample_rate = DEFAULT_SAMPLE_RATE;
+    sdr_config.center_freq = SDR_CENTER_FREQ;
+    sdr_config.sample_rate = SDR_SAMPLE_RATE;
+    sdr_config.gain = SDR_GAIN;
+    sdr_config.agc_mode = false;
     ESP_ERROR_CHECK(rtlsdr_configure(sdr_dev, &sdr_config));
 
-    /* Start RTL-TCP server */
-    rtltcp_config_t tcp_config = RTLTCP_CONFIG_DEFAULT();
-    tcp_config.dev = sdr_dev;
-    ESP_ERROR_CHECK(rtltcp_server_start(&tcp_srv, &tcp_config));
+    /* Set manual gain */
+    rtlsdr_set_tuner_gain_mode(sdr_dev, 1);
+    rtlsdr_set_tuner_gain(sdr_dev, SDR_GAIN);
 
-    /* Start RTL-UDP server */
-    rtludp_config_t udp_config = RTLUDP_CONFIG_DEFAULT();
-    udp_config.dev = sdr_dev;
-    ESP_ERROR_CHECK(rtludp_server_start(&udp_srv, &udp_config));
+    /* Start FM pipeline task on Core 1 */
+    xTaskCreatePinnedToCore(fm_pipeline_task, "fm_pipe", 16384, NULL, 8, NULL, 1);
 
-    /* Start WebSDR server */
-    websdr_config_t websdr_config = WEBSDR_CONFIG_DEFAULT();
-    websdr_config.dev = sdr_dev;
-    ESP_ERROR_CHECK(websdr_server_start(&websdr_srv, &websdr_config));
-
-    /* Start SDR streaming task on Core 0 (with USB) */
+    /* Start SDR streaming task on Core 0 */
     xTaskCreatePinnedToCore(sdr_stream_task, "sdr_stream", 8192, NULL, 8, NULL, 0);
 
-    ESP_LOGI(TAG, "=== RTL-TCP server ready on port %d ===", RTLTCP_DEFAULT_PORT);
-    ESP_LOGI(TAG, "=== RTL-UDP server ready on port %d ===", RTLUDP_DEFAULT_PORT);
-    ESP_LOGI(TAG, "=== WebSDR server ready on port %d ===", WEBSDR_DEFAULT_PORT);
-    ESP_LOGI(TAG, "Connect TCP: SDR++ / GQRX → rtl_tcp at port %d", RTLTCP_DEFAULT_PORT);
-    ESP_LOGI(TAG, "Connect UDP: send any packet to port %d to subscribe", RTLUDP_DEFAULT_PORT);
+    ESP_LOGI(TAG, "=== FM Radio ready ===");
+    ESP_LOGI(TAG, "=== Web UI: https://esp32p4-fm-radio.local:8080 ===");
+    ESP_LOGI(TAG, "=== Frequency: %.3f MHz, Gain: %.1f dB ===",
+             (float)SDR_CENTER_FREQ / 1e6f, (float)SDR_GAIN / 10.0f);
 
-    /* Main task just monitors status */
+    /* Main task monitors status */
     while (1) {
-        bool tcp_conn = rtltcp_is_client_connected(tcp_srv);
-        bool udp_conn = rtludp_is_client_active(udp_srv);
-        ESP_LOGI(TAG, "Status: tcp=%s udp=%s freq=%luHz rate=%luHz",
-                 tcp_conn ? "YES" : "no", udp_conn ? "YES" : "no",
-                 (unsigned long)rtlsdr_get_center_freq(sdr_dev),
-                 (unsigned long)rtlsdr_get_sample_rate(sdr_dev));
+        float sig = fm_demod_simple_get_signal_strength(demod);
+        ESP_LOGI(TAG, "Status: freq=%.3f MHz signal=%.1f%% vol=%d",
+                 (float)radio_freq / 1e6f,
+                 sig * 100.0f,
+                 radio_volume);
         vTaskDelay(pdMS_TO_TICKS(10000));
     }
 }

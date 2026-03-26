@@ -1,132 +1,15 @@
-menu "RTL-SDR WiFi Bridge Configuration"
+menu "FM Radio Configuration"
 
     config WIFI_SSID
         string "WiFi SSID"
         default "myssid"
         help
             SSID of the WiFi network to connect to.
-            Set your credentials via: idf.py menuconfig
 
     config WIFI_PASSWORD
         string "WiFi Password"
         default "mypassword"
         help
             Password for the WiFi network.
-
-    config RTLSDR_DEFAULT_FREQ
-        int "Default center frequency (Hz)"
-        default 100000000
-        help
-            Default RTL-SDR center frequency in Hz (100 MHz).
-
-    config RTLSDR_DEFAULT_SAMPLE_RATE
-        int "Default sample rate (Hz)"
-        default 1024000
-        help
-            Default sample rate in Hz. WiFi can sustain up to ~1 MSPS reliably.
-            Use Ethernet for higher rates.
-
-    config RTLTCP_PORT
-        int "RTL-TCP server port"
-        default 1234
-        help
-            TCP port for the rtl_tcp server.
-
-    config RTLTCP_RING_BUF_SIZE_KB
-        int "Ring buffer size (KB)"
-        default 2048
-        help
-            Size of the IQ sample ring buffer in KB.
-            Stored in PSRAM. Larger = more resilience to WiFi jitter.
-
-    choice RTLSDR_TRANSPORT
-        prompt "IQ Transport Protocol"
-        default RTLSDR_TRANSPORT_TCP
-        help
-            Select the transport protocol for IQ sample streaming.
-            TCP: Standard rtl_tcp protocol, compatible with SDR++/GQRX.
-            UDP: Lower overhead, higher throughput, needs udp2tcp bridge for rtl_tcp clients.
-            BOTH: Run TCP and UDP simultaneously on different ports.
-
-        config RTLSDR_TRANSPORT_TCP
-            bool "TCP only (rtl_tcp compatible)"
-        config RTLSDR_TRANSPORT_UDP
-            bool "UDP only (higher throughput)"
-        config RTLSDR_TRANSPORT_BOTH
-            bool "Both TCP and UDP"
-    endchoice
-
-    config RTLUDP_PORT
-        int "UDP streaming port"
-        default 1235
-        depends on RTLSDR_TRANSPORT_UDP || RTLSDR_TRANSPORT_BOTH
-        help
-            UDP port for IQ sample streaming. Commands received on this port too.
-
-    config RTLUDP_PAYLOAD_SIZE
-        int "UDP payload size (bytes)"
-        default 1024
-        depends on RTLSDR_TRANSPORT_UDP || RTLSDR_TRANSPORT_BOTH
-        help
-            Size of IQ data payload per UDP packet (excluding 8-byte header).
-            Must be <= 1464 to fit in one Ethernet frame.
-
-    config HOSTED_SDIO_40MHZ
-        bool "Use 40 MHz SDIO clock (faster WiFi, PCB dependent)"
-        default n
-        help
-            Increase SDIO clock from 25 MHz to 40 MHz for higher WiFi throughput.
-            May not work on all PCB layouts. Test with your board.
-
-    config RTLSDR_ETHERNET_ENABLE
-        bool "Enable Ethernet (100 Mbps, e.g. Olimex ESP32-P4 board)"
-        default n
-        help
-            Enable the on-board Ethernet port (IP101 PHY, RMII).
-            Provides ~11 MB/s TCP throughput for 2.4+ MSPS streaming.
-            Runs alongside WiFi — both interfaces active simultaneously.
-
-    config RTLSDR_ETH_PHY_ADDR
-        int "Ethernet PHY address"
-        default 1
-        depends on RTLSDR_ETHERNET_ENABLE
-        help
-            I2C address of the Ethernet PHY chip. Default 1 for IP101.
-
-    config RTLSDR_ETH_MDC_GPIO
-        int "Ethernet MDC GPIO"
-        default 31
-        depends on RTLSDR_ETHERNET_ENABLE
-
-    config RTLSDR_ETH_MDIO_GPIO
-        int "Ethernet MDIO GPIO"
-        default 27
-        depends on RTLSDR_ETHERNET_ENABLE
-
-    config RTLSDR_ETH_PHY_RST_GPIO
-        int "Ethernet PHY Reset GPIO (-1 to disable)"
-        default -1
-        depends on RTLSDR_ETHERNET_ENABLE
-
-    config RTLSDR_MULTICAST_ENABLE
-        bool "Enable UDP Multicast (one-to-many on Ethernet)"
-        default n
-        depends on RTLSDR_TRANSPORT_UDP || RTLSDR_TRANSPORT_BOTH
-        help
-            Send IQ data to a multicast group instead of unicast.
-            Only useful on Ethernet — WiFi multicast is very slow.
-            Multiple clients can receive the same IQ stream.
-
-    config RTLSDR_MULTICAST_GROUP
-        string "Multicast group address"
-        default "239.1.2.3"
-        depends on RTLSDR_MULTICAST_ENABLE
-        help
-            IPv4 multicast group for IQ data. Use 239.x.x.x range.
-
-    config RTLSDR_MULTICAST_PORT
-        int "Multicast port"
-        default 1236
-        depends on RTLSDR_MULTICAST_ENABLE
 
 endmenu
