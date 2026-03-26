@@ -36,11 +36,13 @@ except ImportError:
     print("ERROR: pip install websocket-client")
     sys.exit(1)
 
+import shutil
+import subprocess
+
 try:
     import sounddevice as sd
 except ImportError:
     sd = None
-    print("WARNING: pip install sounddevice  (audio playback disabled)")
 
 
 # ─────────────────────── Configuration ───────────────────────
@@ -212,17 +214,52 @@ class ReconnectingWS:
 
 # ─────────────────────── Audio Playback ───────────────────────
 
-def audio_playback_thread():
-    """Play audio via sounddevice, pulling from the chunk queue."""
-    global play_buf, underruns
+def audio_playback_aplay():
+    """Play audio via aplay subprocess — no extra dependencies needed.
+    Pipes raw int16 PCM from audio_queue directly to aplay stdin."""
+    global underruns
 
-    if sd is None:
+    aplay = shutil.which('aplay')
+    if not aplay:
+        print("[AUDIO] aplay not found, playback disabled")
         return
+
+    proc = subprocess.Popen(
+        [aplay, '-f', 'S16_LE', '-r', str(AUDIO_RATE), '-c', '1', '-t', 'raw', '-q'],
+        stdin=subprocess.PIPE,
+    )
+    print(f"[AUDIO] aplay playback started @ {AUDIO_RATE} Hz (mono int16)")
+
+    try:
+        while running:
+            try:
+                chunk_f32 = audio_queue.popleft()
+            except IndexError:
+                time.sleep(0.005)
+                continue
+            # Convert float32 → int16 for aplay
+            int16 = (np.clip(chunk_f32, -1.0, 1.0) * 32767).astype(np.int16)
+            try:
+                proc.stdin.write(int16.tobytes())
+            except BrokenPipeError:
+                break
+    except Exception:
+        pass
+    finally:
+        try:
+            proc.stdin.close()
+            proc.wait(timeout=2)
+        except Exception:
+            proc.kill()
+
+
+def audio_playback_sounddevice():
+    """Play audio via sounddevice (optional, uses PortAudio callback)."""
+    global play_buf, underruns
 
     def callback(outdata, frames, time_info, status):
         global play_buf, underruns
 
-        # Drain chunks into contiguous buffer
         while len(play_buf) < frames:
             try:
                 chunk = audio_queue.popleft()
@@ -247,13 +284,24 @@ def audio_playback_thread():
             callback=callback,
         )
         stream.start()
-        print(f"[AUDIO] Playback started @ {AUDIO_RATE} Hz")
+        print(f"[AUDIO] sounddevice playback started @ {AUDIO_RATE} Hz")
         while running:
             time.sleep(0.1)
         stream.stop()
         stream.close()
     except Exception as e:
-        print(f"[AUDIO] Playback error: {e}")
+        print(f"[AUDIO] sounddevice error: {e}, falling back to aplay")
+        audio_playback_aplay()
+
+
+def audio_playback_thread():
+    """Start audio playback — prefers aplay (zero deps), falls back to sounddevice."""
+    if shutil.which('aplay'):
+        audio_playback_aplay()
+    elif sd is not None:
+        audio_playback_sounddevice()
+    else:
+        print("[AUDIO] No playback available (install aplay or sounddevice)")
 
 
 # ─────────────────────── Stats Printer ───────────────────────
