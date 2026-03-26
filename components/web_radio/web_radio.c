@@ -39,9 +39,10 @@ extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
 #define POST_BODY_MAX       256
 
 /* Audio send buffer — accumulate PCM and flush in ~100ms chunks.
- * At 48kHz mono, 100ms = 4800 samples = 9600 bytes per TLS frame.
- * This reduces WS frame rate from ~200/s to ~10/s, preventing TLS overload. */
-#define AUDIO_BUF_SAMPLES   4800    /* 100 ms @ 48 kHz */
+ * Stereo sends interleaved L/R (2 samples per pair), so 100ms stereo
+ * = 9600 samples = 19200 bytes.  Size for stereo; mono gets 200ms
+ * chunks which is fine (still only ~5 TLS frames/sec). */
+#define AUDIO_BUF_SAMPLES   9600    /* 100 ms stereo or 200 ms mono @ 48 kHz */
 static int16_t              s_audio_buf[AUDIO_BUF_SAMPLES];
 static int                  s_audio_buf_pos = 0;
 

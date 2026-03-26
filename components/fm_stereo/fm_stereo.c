@@ -112,6 +112,7 @@ struct fm_stereo {
     rds_decoder_t      *rds;
     int16_t            *rds_buf;        /* 57kHz mixed RDS baseband */
     int                 rds_decim_phase; /* Decimation phase counter */
+    int32_t             rds_acc;        /* Accumulate-and-dump for anti-alias */
 
     /* Stereo blend */
     int16_t     blend_ratio;        /* 0=mono, 32767=full stereo (Q15) */
@@ -435,17 +436,28 @@ int fm_stereo_process(fm_stereo_t *st, const int16_t *mpx_in, int n_samples,
         st->lmr_buf[i] = sat16(mixed);
 
         /* RDS: mix MPX with 57kHz reference (3x pilot phase) using
-         * the CURRENT per-sample phase, then decimate to ~5kHz */
+         * the CURRENT per-sample phase, then accumulate-and-dump to ~5kHz.
+         * The accumulate-and-dump acts as a sinc LPF (box filter) that
+         * anti-aliases before decimation — without this, the full MPX
+         * spectrum folds back as noise and buries the RDS BPSK signal. */
         if (do_rds) {
             uint32_t phase_57k = st->pll.phase_acc * 3;
             uint8_t idx_57 = phase_57k >> 24;
             int16_t ref_57k = st->pll.sin_lut[idx_57];
             int32_t rds_mixed = ((int32_t)mpx * ref_57k) >> 15;
 
+            /* Accumulate samples over the decimation period.
+             * Do NOT divide by rds_decim — the integrate step provides
+             * both anti-alias filtering AND signal gain (48x for R=48).
+             * RDS BPSK only needs sign detection, so amplitude doesn't
+             * matter as long as SNR improves. Saturate to int16. */
+            st->rds_acc += rds_mixed;
             st->rds_decim_phase++;
             if (st->rds_decim_phase >= rds_decim) {
+                /* Dump: output accumulated sum (not average) for max SNR */
+                st->rds_buf[rds_count++] = sat16(st->rds_acc >> 3); /* /8 to avoid overflow while keeping gain */
+                st->rds_acc = 0;
                 st->rds_decim_phase = 0;
-                st->rds_buf[rds_count++] = sat16(rds_mixed);
             }
         }
     }
