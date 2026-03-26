@@ -237,7 +237,9 @@ static void noise_blanker_process(fm_demod_t *d, int16_t *iq, int n_pairs)
     if (!d->nb_enabled) return;
 
     int32_t avg = d->nb_avg_mag;
-    int32_t thresh_mult = (int32_t)d->nb_threshold * 4;  /* 1→4x, 5→20x, 10→40x */
+    /* Threshold multiplier: nb_threshold 1→3x, 5→7x, 10→12x of running average.
+     * Normal FM samples vary ±50% around the mean; impulse noise is 5-10x+. */
+    int32_t thresh_mult = (int32_t)d->nb_threshold + 2;
     int16_t prev_i = iq[0], prev_q = iq[1];
 
     for (int k = 0; k < n_pairs; k++) {
@@ -250,8 +252,11 @@ static void noise_blanker_process(fm_demod_t *d, int16_t *iq, int n_pairs)
         /* Update running average (exponential, alpha ~= 0.001 → shift by 10) */
         avg = avg - (avg >> 10) + (mag >> 10);
 
-        /* Check if spike exceeds threshold */
-        if (mag > (avg >> 8) * thresh_mult) {
+        /* Check if spike exceeds threshold.
+         * Compare mag against avg * thresh_mult directly.
+         * Old code used (avg >> 8) * thresh_mult which was ~100x too low,
+         * causing ALL samples to be blanked. */
+        if (mag > avg * thresh_mult) {
             /* Blank: replace with previous good sample */
             iq[k * 2]     = prev_i;
             iq[k * 2 + 1] = prev_q;

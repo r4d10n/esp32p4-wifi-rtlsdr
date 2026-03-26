@@ -66,7 +66,10 @@ static void fm_disc_process_poly(fm_disc_state_t *state, const int16_t *iq_in,
         prev_i = ci;
         prev_q = cq;
 
-        /* Polynomial atan2 approximation */
+        /* Polynomial atan2 approximation.
+         * cross and dot are products of int16 values, so they can be up to ±2^30.
+         * Use 64-bit arithmetic for the ratio computation to prevent overflow.
+         * The ratio r must be in Q15 range [-32768, 32767]. */
         int32_t abs_cross = cross < 0 ? -cross : cross;
         int32_t abs_dot   = dot < 0 ? -dot : dot;
 
@@ -74,14 +77,14 @@ static void fm_disc_process_poly(fm_disc_state_t *state, const int16_t *iq_in,
         if (abs_dot >= abs_cross) {
             /* |angle| <= pi/4: use cross/dot ratio */
             if (abs_dot == 0) { audio_out[k] = 0; continue; }
-            int32_t r = (cross << 14) / (abs_dot >> 1);  /* Q15 ratio */
+            int32_t r = (int32_t)(((int64_t)cross << 15) / abs_dot);  /* Q15 ratio */
             int32_t r2 = (r * r) >> 15;
             /* atan(r) ~ r * (1 - 0.28125 * r^2) = r - r * r^2 * 9216/32768 */
             angle = r - ((r * ((r2 * 9216) >> 15)) >> 15);
         } else {
             /* |angle| > pi/4: use dot/cross ratio and pi/2 - atan */
             if (abs_cross == 0) { audio_out[k] = 0; continue; }
-            int32_t r = (dot << 14) / (abs_cross >> 1);  /* Q15 */
+            int32_t r = (int32_t)(((int64_t)dot << 15) / abs_cross);  /* Q15 */
             int32_t r2 = (r * r) >> 15;
             int32_t atan_r = r - ((r * ((r2 * 9216) >> 15)) >> 15);
             angle = (cross > 0 ? 25736 : -25736) - atan_r;  /* pi/4 in Q15 ~ 25736 */
@@ -134,14 +137,9 @@ static void fm_disc_process_linear(fm_disc_state_t *state, const int16_t *iq_in,
 
         if (denom == 0) { audio_out[k] = 0; continue; }
 
-        /* base in Q15: cross * 32768 / denom, range [-16384, 16384] */
-        int32_t base;
-        if (denom >= 32768) {
-            base = (cross << 15) / denom;
-        } else {
-            /* For small denominators, scale differently to avoid overflow */
-            base = ((cross >> 1) << 15) / ((denom >> 1) + 1);
-        }
+        /* base in Q15: cross * 32768 / denom, range [-16384, 16384].
+         * Use 64-bit to prevent overflow (cross can be ±2^30). */
+        int32_t base = (int32_t)(((int64_t)cross << 15) / denom);
 
         /* Correction: corrected = base * (1.5 - base^2 * 2 / 32768)
          * In Q15: base * (49152 - (base * base >> 14)) >> 15
