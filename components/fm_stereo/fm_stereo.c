@@ -215,11 +215,9 @@ static inline void pll_update(stereo_pll_t *pll, int16_t mpx_sample)
     /* NCO output from LUT */
     uint8_t idx = pll->phase_acc >> 24;
     int16_t nco_sin = pll->sin_lut[idx];
-    int16_t nco_cos = pll->cos_lut[idx];
 
-    /* Phase detector: multiply input by NCO quadrature outputs */
+    /* Phase detector: multiply input by NCO sin (quadrature error signal) */
     int32_t pd_q = ((int32_t)mpx_sample * nco_sin) >> 15;
-    int32_t pd_i = ((int32_t)mpx_sample * nco_cos) >> 15;
 
     /* PI loop filter */
     pll->integrator += PLL_KI * pd_q;
@@ -229,10 +227,13 @@ static inline void pll_update(stereo_pll_t *pll, int16_t mpx_sample)
     pll->freq_word = (int32_t)PLL_NOMINAL_FREQ + correction;
     pll->phase_acc += (uint32_t)pll->freq_word;
 
-    /* Lock detector: exponential average of |pd_i| */
-    int32_t abs_pd_i = pd_i > 0 ? pd_i : -pd_i;
-    pll->lock_i = pll->lock_i - (pll->lock_i >> 8) + abs_pd_i;
-    pll->locked = (pll->lock_i >> 8) > PLL_LOCK_THRESH;
+    /* Lock detector: track PLL error convergence.
+     * Use |pd_q| (quadrature error) — when locked, pd_q → 0.
+     * Exponential average: small value = good lock. */
+    int32_t abs_pd_q = pd_q > 0 ? pd_q : -pd_q;
+    pll->lock_i = pll->lock_i - (pll->lock_i >> 8) + abs_pd_q;
+    /* locked = low error AND pilot detected (set externally via Goertzel) */
+    (void)0; /* lock state set in fm_stereo_process after Goertzel check */
 }
 
 /* ── De-emphasis Single-Sample ── */
@@ -399,7 +400,18 @@ int fm_stereo_process(fm_stereo_t *st, const int16_t *mpx_in, int n_samples,
         n_samples = st->scratch_size;
     }
 
-    /* Per-sample processing: PLL update, Goertzel, L+R/L-R extraction */
+    /* RDS decimation setup */
+    int rds_decim = 0;
+    int rds_count = 0;
+    bool do_rds = (st->rds && st->rds_buf);
+    if (do_rds) {
+        rds_decim = st->config.sample_rate / 5333;
+        if (rds_decim < 1) rds_decim = 1;
+    }
+
+    /* Per-sample processing: PLL update, Goertzel, L+R/L-R, RDS extraction.
+     * All mixing (38kHz for L-R, 57kHz for RDS) must use the per-sample
+     * PLL phase accumulator — NOT a post-loop stale value. */
     for (int i = 0; i < n_samples; i++) {
         int16_t mpx = mpx_in[i];
 
@@ -421,35 +433,26 @@ int fm_stereo_process(fm_stereo_t *st, const int16_t *mpx_in, int n_samples,
         /* Demodulate L-R: mix and scale by 2 (DSB-SC produces half amplitude) */
         int32_t mixed = ((int32_t)mpx * ref_38k) >> 14;  /* >> 15 for Q15 multiply, << 1 for 2x gain */
         st->lmr_buf[i] = sat16(mixed);
-    }
 
-    /* RDS: mix MPX with 57kHz reference (3x pilot), decimate to ~5kHz, feed decoder */
-    if (st->rds && st->rds_buf) {
-        /* Decimation ratio: sample_rate / 5333 ≈ 48 for 256kSPS */
-        int rds_decim = st->config.sample_rate / 5333;
-        if (rds_decim < 1) rds_decim = 1;
-        int rds_count = 0;
-
-        for (int i = 0; i < n_samples; i++) {
-            /* 57kHz = 3x 19kHz pilot phase */
+        /* RDS: mix MPX with 57kHz reference (3x pilot phase) using
+         * the CURRENT per-sample phase, then decimate to ~5kHz */
+        if (do_rds) {
             uint32_t phase_57k = st->pll.phase_acc * 3;
             uint8_t idx_57 = phase_57k >> 24;
             int16_t ref_57k = st->pll.sin_lut[idx_57];
+            int32_t rds_mixed = ((int32_t)mpx * ref_57k) >> 15;
 
-            /* Mix MPX with 57kHz reference */
-            int32_t rds_mixed = ((int32_t)mpx_in[i] * ref_57k) >> 15;
-
-            /* Decimate */
             st->rds_decim_phase++;
             if (st->rds_decim_phase >= rds_decim) {
                 st->rds_decim_phase = 0;
                 st->rds_buf[rds_count++] = sat16(rds_mixed);
             }
         }
+    }
 
-        if (rds_count > 0) {
-            rds_decoder_process(st->rds, st->rds_buf, rds_count);
-        }
+    /* Feed accumulated RDS samples to decoder */
+    if (do_rds && rds_count > 0) {
+        rds_decoder_process(st->rds, st->rds_buf, rds_count);
     }
 
     /* Apply 15 kHz LPF to both L+R and L-R paths */
@@ -457,6 +460,12 @@ int fm_stereo_process(fm_stereo_t *st, const int16_t *mpx_in, int n_samples,
     int16_t lmr_filtered[n_samples];
     pie_fir_process(st->fir_lpr, st->lpr_buf, lpr_filtered, n_samples);
     pie_fir_process(st->fir_lmr, st->lmr_buf, lmr_filtered, n_samples);
+
+    /* Update PLL lock state: pilot detected by Goertzel AND PLL error is low.
+     * PLL error threshold: when locked, avg |pd_q| should be < 2000.
+     * Without pilot, PLL tracks noise and |pd_q| stays high. */
+    st->pll.locked = st->goertzel.pilot_detected &&
+                     ((st->pll.lock_i >> 8) < 3000);
 
     /* De-emphasis + stereo matrix */
     bool is_stereo = st->goertzel.pilot_detected && st->pll.locked;

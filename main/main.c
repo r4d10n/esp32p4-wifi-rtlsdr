@@ -339,6 +339,27 @@ static void fm_pipeline_task(void *arg)
         /* Step 1: uint8 IQ → int16 with bias removal */
         pie_u8_to_s16_bias(iq_data, pipe->iq_s16, iq_pairs * 2);
 
+        /* IQ overload detection: count samples at ADC rail (0 or 255 → -32768 or +32512).
+         * More than 5% clipping = overload → need lower gain. */
+        {
+            int clip_count = 0;
+            const uint8_t *raw = (const uint8_t *)iq_data;
+            int total = iq_pairs * 2;
+            for (int k = 0; k < total; k++) {
+                if (raw[k] <= 1 || raw[k] >= 254) clip_count++;
+            }
+            static int overload_log_skip = 0;
+            if (clip_count > total / 20) {  /* >5% clipping */
+                if (++overload_log_skip >= 100) {  /* Log every ~100 blocks (~2s) */
+                    ESP_LOGW(TAG, "ADC OVERLOAD: %d/%d samples clipped (%.0f%%) — reduce gain!",
+                             clip_count, total, clip_count * 100.0f / total);
+                    overload_log_skip = 0;
+                }
+            } else {
+                overload_log_skip = 0;
+            }
+        }
+
         /* Step 2: NCO mix (frequency shift) — PIE SIMD accelerated */
         pie_nco_mix_s16(pipe->iq_s16, pipe->nco, pipe->iq_mixed, iq_pairs);
 
@@ -789,11 +810,26 @@ void app_main(void)
         else if (evt == UI_HW_EVT_LONG_PRESS) { radio.muted = !radio.muted; audio_out_set_mute(radio.muted); }
 #endif
 
-        ESP_LOGI(TAG, "Status: freq=%.3fMHz mode=%s%s vol=%d gain=%d sig=%d",
-                 radio.frequency / 1e6,
-                 radio.mode == FM_MODE_WBFM ? "WBFM" : "NBFM",
-                 is_stereo ? " [STEREO]" : "",
-                 radio.volume, radio.gain, sig);
+        {
+            const char *rds_info = "";
+            char rds_buf[64] = {0};
+#ifdef CONFIG_FM_STEREO_ENABLE
+            if (pipeline.stereo) {
+                rds_data_t rds_dbg;
+                fm_stereo_get_rds(pipeline.stereo, &rds_dbg);
+                if (rds_dbg.pi_code || rds_dbg.ps_name[0]) {
+                    snprintf(rds_buf, sizeof(rds_buf), " RDS:[%s] PI=0x%04X",
+                             rds_dbg.ps_name, rds_dbg.pi_code);
+                    rds_info = rds_buf;
+                }
+            }
+#endif
+            ESP_LOGI(TAG, "Status: freq=%.3fMHz mode=%s%s vol=%d gain=%d sig=%d%s",
+                     radio.frequency / 1e6,
+                     radio.mode == FM_MODE_WBFM ? "WBFM" : "NBFM",
+                     is_stereo ? " [STEREO]" : "",
+                     radio.volume, radio.gain, sig, rds_info);
+        }
         ESP_LOGI(TAG, "Heap: free=%lu min=%lu PSRAM=%lu",
                  (unsigned long)esp_get_free_heap_size(),
                  (unsigned long)esp_get_minimum_free_heap_size(),
