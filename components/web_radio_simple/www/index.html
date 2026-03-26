@@ -145,7 +145,8 @@ const PROC_CODE = `
 class PCMPlayer extends AudioWorkletProcessor {
   constructor() {
     super();
-    this.ring = new Float32Array(48000);
+    this.ringL = new Float32Array(48000);
+    this.ringR = new Float32Array(48000);
     this.wPtr = 0;
     this.rPtr = 0;
     this.count = 0;
@@ -153,27 +154,36 @@ class PCMPlayer extends AudioWorkletProcessor {
       if (e.data.type === 'pcm') {
         const s16 = e.data.samples;
         const n = s16.length;
-        for (let i = 0; i < n; i++) {
-          this.ring[this.wPtr] = s16[i] / 32768.0;
-          this.wPtr = (this.wPtr + 1) % this.ring.length;
-          if (this.count < this.ring.length) this.count++;
+        const sz = this.ringL.length;
+        // De-interleave stereo [L,R,L,R,...] into separate L/R rings
+        for (let i = 0; i < n; i += 2) {
+          this.ringL[this.wPtr] = s16[i] / 32768.0;
+          this.ringR[this.wPtr] = (i+1 < n) ? s16[i+1] / 32768.0 : s16[i] / 32768.0;
+          this.wPtr = (this.wPtr + 1) % sz;
+          if (this.count < sz) this.count++;
         }
       }
     };
   }
   process(inputs, outputs) {
-    const out = outputs[0][0];
-    if (!out) return true;
+    const outL = outputs[0][0];
+    const outR = outputs[0][1];
+    if (!outL) return true;
     let pk = 0;
-    for (let i = 0; i < out.length; i++) {
+    const sz = this.ringL.length;
+    for (let i = 0; i < outL.length; i++) {
       if (this.count > 0) {
-        const v = this.ring[this.rPtr];
-        this.rPtr = (this.rPtr + 1) % this.ring.length;
+        const vL = this.ringL[this.rPtr];
+        const vR = this.ringR[this.rPtr];
+        this.rPtr = (this.rPtr + 1) % sz;
         this.count--;
-        out[i] = v;
-        const a = Math.abs(v); if (a > pk) pk = a;
+        outL[i] = vL;
+        if (outR) outR[i] = vR;
+        const a = Math.max(Math.abs(vL), Math.abs(vR));
+        if (a > pk) pk = a;
       } else {
-        out[i] = 0;
+        outL[i] = 0;
+        if (outR) outR[i] = 0;
       }
     }
     if (this._cnt === undefined) this._cnt = 0;
@@ -262,7 +272,7 @@ async function startAudio() {
     } finally {
         URL.revokeObjectURL(url);
     }
-    wkNode = new AudioWorkletNode(aCtx, 'pcm-player');
+    wkNode = new AudioWorkletNode(aCtx, 'pcm-player', {outputChannelCount: [2]});
     wkNode.port.onmessage = (e) => {
         const pct = Math.min(100, e.data.pk / 0.8 * 100);
         document.getElementById('audioMeter').style.width = pct + '%';
