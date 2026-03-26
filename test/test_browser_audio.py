@@ -9,9 +9,12 @@ The ESP32-P4 sends already-demodulated int16 PCM @ 48 kHz (mono or interleaved
 stereo) as binary WebSocket frames.  This script is the Python equivalent of the
 AudioWorklet PCM player in index.html.
 
+Handles TLS WebSocket reconnection — the ESP32-P4's lightweight TLS stack may
+drop connections under sustained binary frame throughput.
+
 Usage:
     pip install websocket-client numpy sounddevice
-    python test_browser_audio.py --host 192.168.1.232 --freq 100.0
+    python test_browser_audio.py --host 192.168.1.233 --freq 100.0
 
 SPDX-License-Identifier: GPL-2.0-or-later
 """
@@ -19,7 +22,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
 import argparse
 import json
 import ssl
-import struct
 import sys
 import threading
 import time
@@ -44,7 +46,6 @@ except ImportError:
 # ─────────────────────── Configuration ───────────────────────
 
 AUDIO_RATE = 48000
-RING_SIZE  = AUDIO_RATE * 2   # 2 seconds ring buffer
 
 
 # ─────────────────────── Global State ───────────────────────
@@ -58,55 +59,24 @@ binary_msgs     = 0
 binary_bytes    = 0
 pcm_samples     = 0
 underruns       = 0
-overruns        = 0
+ws_reconnects   = 0
 
 # Signal strength from JSON pushes
 signal_strength = 0
 stereo          = False
 
-# Ring buffer for audio playback (same design as the AudioWorklet)
-ring            = np.zeros(RING_SIZE, dtype=np.float32)
-ring_w          = 0      # write pointer
-ring_r          = 0      # read pointer
-ring_count      = 0      # samples available
-ring_lock       = threading.Lock()
+# Audio chunk queue — much faster than per-sample ring buffer
+# Each element is a float32 numpy array of decoded PCM samples
+audio_queue     = deque(maxlen=500)   # ~500 chunks = several seconds
+
+# Playback buffer (fed from audio_queue in callback)
+play_buf        = np.zeros(0, dtype=np.float32)
 
 # WAV recording
 wav_chunks      = []
 
 # Stereo detection
 channels_detected = 1
-
-
-# ─────────────────────── Ring Buffer Ops ───────────────────────
-
-def ring_write(samples):
-    """Write float32 samples into the ring buffer (same as AudioWorklet)."""
-    global ring_w, ring_count, overruns
-    n = len(samples)
-    with ring_lock:
-        for i in range(n):
-            ring[ring_w] = samples[i]
-            ring_w = (ring_w + 1) % RING_SIZE
-            if ring_count < RING_SIZE:
-                ring_count += 1
-            else:
-                overruns += 1
-
-
-def ring_read(frames):
-    """Read frames from ring buffer, return float32 array."""
-    global ring_r, ring_count, underruns
-    out = np.zeros(frames, dtype=np.float32)
-    with ring_lock:
-        for i in range(frames):
-            if ring_count > 0:
-                out[i] = ring[ring_r]
-                ring_r = (ring_r + 1) % RING_SIZE
-                ring_count -= 1
-            else:
-                underruns += 1
-    return out
 
 
 # ─────────────────────── WebSocket Handlers ───────────────────────
@@ -138,60 +108,141 @@ def on_message(ws, message):
         binary_msgs += 1
         binary_bytes += n_bytes
 
-    # Decode int16 PCM
+    # Decode int16 PCM → float32 (vectorized, no Python loops)
     n_samples = n_bytes // 2
     s16 = np.frombuffer(raw, dtype=np.int16, count=n_samples)
-    f32 = s16.astype(np.float32) / 32768.0
+    f32 = s16.astype(np.float32) * (1.0 / 32768.0)
 
-    # Detect stereo: if sample count is always even and channels alternate,
-    # we get interleaved L/R.  For playback simplicity, mix to mono.
-    # (The ESP sends mono for NBFM, interleaved stereo for WBFM stereo)
-    if stereo and n_samples % 2 == 0:
+    # Detect stereo: interleaved L/R → downmix to mono
+    if stereo and n_samples >= 2 and n_samples % 2 == 0:
         channels_detected = 2
-        # Downmix to mono: (L + R) / 2
-        left  = f32[0::2]
-        right = f32[1::2]
-        f32 = (left + right) * 0.5
+        f32 = (f32[0::2] + f32[1::2]) * 0.5
         n_samples = len(f32)
 
     with lock:
         pcm_samples += n_samples
 
-    # Feed ring buffer for playback
-    ring_write(f32)
+    # Queue for playback (lock-free deque append is thread-safe)
+    audio_queue.append(f32)
 
     # Record for WAV
     wav_chunks.append(f32.copy())
 
 
 def on_error(ws, error):
+    err_str = str(error)
+    # Suppress noisy SSL errors during reconnect
+    if 'RECORD_LAYER' in err_str or 'EOF' in err_str:
+        return
     print(f"\n[WS ERROR] {error}")
 
 
 def on_close(ws, code, msg):
-    print(f"\n[WS CLOSED] code={code} msg={msg}")
+    pass  # Reconnect logic handles this
 
 
 def on_open(ws):
-    print("[WS] Connected")
+    # Re-subscribe to audio on every (re)connect
+    try:
+        ws.send(json.dumps({"cmd": "audio_on"}))
+    except Exception:
+        pass
+
+
+# ─────────────────────── WebSocket with Auto-Reconnect ───────────────────────
+
+class ReconnectingWS:
+    """WebSocket wrapper that auto-reconnects on TLS/connection failures."""
+
+    def __init__(self, url, sslopt):
+        self.url = url
+        self.sslopt = sslopt
+        self.ws = None
+        self._thread = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+
+    def _run_loop(self):
+        global ws_reconnects
+        backoff = 0.5
+        while running:
+            try:
+                self.ws = websocket.WebSocketApp(
+                    self.url,
+                    on_open=on_open,
+                    on_message=on_message,
+                    on_error=on_error,
+                    on_close=on_close,
+                )
+                self.ws.run_forever(sslopt=self.sslopt, ping_interval=5,
+                                     ping_timeout=3)
+            except Exception:
+                pass
+
+            if not running:
+                break
+
+            with lock:
+                ws_reconnects += 1
+            # Brief backoff, then reconnect
+            time.sleep(min(backoff, 3.0))
+            backoff = min(backoff * 1.5, 3.0)
+
+    @property
+    def connected(self):
+        return (self.ws and self.ws.sock and
+                hasattr(self.ws.sock, 'connected') and self.ws.sock.connected)
+
+    def send(self, data):
+        if self.connected:
+            try:
+                self.ws.send(data)
+            except Exception:
+                pass
+
+    def close(self):
+        if self.ws:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
 
 
 # ─────────────────────── Audio Playback ───────────────────────
 
 def audio_playback_thread():
-    """Play audio via sounddevice using the ring buffer."""
+    """Play audio via sounddevice, pulling from the chunk queue."""
+    global play_buf, underruns
+
     if sd is None:
         return
 
     def callback(outdata, frames, time_info, status):
-        data = ring_read(frames)
-        outdata[:, 0] = data
+        global play_buf, underruns
+
+        # Drain chunks into contiguous buffer
+        while len(play_buf) < frames:
+            try:
+                chunk = audio_queue.popleft()
+                play_buf = np.concatenate([play_buf, chunk])
+            except IndexError:
+                break
+
+        n = min(len(play_buf), frames)
+        if n > 0:
+            outdata[:n, 0] = play_buf[:n]
+            play_buf = play_buf[n:]
+        if n < frames:
+            outdata[n:, 0] = 0.0
+            underruns += (frames - n)
 
     try:
         stream = sd.OutputStream(
             samplerate=AUDIO_RATE,
             channels=1,
-            blocksize=1024,
+            blocksize=2048,
             dtype='float32',
             callback=callback,
         )
@@ -221,25 +272,22 @@ def stats_thread():
             cur_binary = binary_msgs
             cur_bytes = binary_bytes
             cur_underruns = underruns
-            cur_overruns = overruns
-
-        with ring_lock:
-            buf_fill = ring_count
+            cur_reconnects = ws_reconnects
 
         d_samples = cur_samples - prev_samples
         rate = d_samples / dt if dt > 0 else 0
         fill_pct = rate / AUDIO_RATE * 100
-        buf_ms = buf_fill * 1000 / AUDIO_RATE
+        q_chunks = len(audio_queue)
 
         sig_pct = signal_strength * 100 / 32767 if signal_strength > 0 else 0
-
-        stereo_str = "STEREO" if stereo else "MONO"
+        stereo_str = "ST" if stereo else "MO"
         ch_str = f"{channels_detected}ch"
 
-        print(f"[STATS] PCM:{rate:.0f}sps ({fill_pct:.0f}% of 48k) | "
-              f"buf:{buf_ms:.0f}ms | WS:{cur_binary}frames {cur_bytes/1024:.0f}KB | "
+        print(f"[STATS] {rate:.0f}sps ({fill_pct:.0f}%) | "
+              f"q:{q_chunks} | ws:{cur_binary}f {cur_bytes/1024:.0f}KB "
+              f"reconn:{cur_reconnects} | "
               f"sig:{sig_pct:.0f}% {stereo_str} {ch_str} | "
-              f"under:{cur_underruns} over:{cur_overruns}")
+              f"under:{cur_underruns}")
 
         prev_samples = cur_samples
         prev_time = now
@@ -247,34 +295,31 @@ def stats_thread():
 
 # ─────────────────────── API Helper ───────────────────────
 
-def api_post(host, port, path, body):
-    """POST JSON to the REST API (HTTPS, self-signed cert)."""
-    import urllib.request
-    url = f"https://{host}:{port}/api/{path}"
-    data = json.dumps(body).encode()
+def _ssl_ctx():
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+def api_post(host, port, path, body):
+    import urllib.request
+    url = f"https://{host}:{port}/api/{path}"
+    data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, method='POST',
                                  headers={'Content-Type': 'application/json'})
     try:
-        with urllib.request.urlopen(req, context=ctx, timeout=5) as r:
+        with urllib.request.urlopen(req, context=_ssl_ctx(), timeout=5) as r:
             return json.loads(r.read())
     except Exception as e:
         print(f"[API] {path} failed: {e}")
         return None
 
-
 def api_get(host, port, path):
-    """GET from the REST API."""
     import urllib.request
     url = f"https://{host}:{port}/api/{path}"
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
     req = urllib.request.Request(url)
     try:
-        with urllib.request.urlopen(req, context=ctx, timeout=5) as r:
+        with urllib.request.urlopen(req, context=_ssl_ctx(), timeout=5) as r:
             return json.loads(r.read())
     except Exception as e:
         print(f"[API] {path} failed: {e}")
@@ -286,7 +331,7 @@ def api_get(host, port, path):
 def save_wav(filename, duration_limit=None):
     if not wav_chunks:
         print("[WAV] No audio recorded")
-        return
+        return None
 
     audio = np.concatenate(wav_chunks)
     if duration_limit:
@@ -295,12 +340,19 @@ def save_wav(filename, duration_limit=None):
 
     dur = len(audio) / AUDIO_RATE
     rms = np.sqrt(np.mean(audio ** 2))
-    peak = np.max(np.abs(audio))
+    peak = np.max(np.abs(audio)) if len(audio) > 0 else 0
 
     print(f"\n[WAV] {len(audio)} samples ({dur:.1f}s) RMS={rms:.4f} Peak={peak:.4f}")
 
-    # Write int16 WAV
-    int16 = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
+    # Normalize if peak is very low (boost weak signals for audibility)
+    if 0 < peak < 0.1:
+        gain = 0.8 / peak
+        print(f"[WAV] Boosting by {gain:.1f}x (weak signal normalization)")
+        audio_norm = audio * gain
+    else:
+        audio_norm = audio
+
+    int16 = (np.clip(audio_norm, -1.0, 1.0) * 32767).astype(np.int16)
     with wave.open(filename, 'w') as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
@@ -329,7 +381,7 @@ def run_tests(host, port, freq_mhz, gain, duration, play, wav_file):
     print("=" * 64)
 
     # ── Step 1: Check device status ──
-    print(f"\n[1] Fetching device status from https://{host}:{port}/api/status ...")
+    print(f"\n[1] Fetching status from https://{host}:{port} ...")
     status = api_get(host, port, 'status')
     if status:
         cur_freq = status.get('freq', 0) / 1e6
@@ -341,85 +393,71 @@ def run_tests(host, port, freq_mhz, gain, duration, play, wav_file):
     else:
         print("    WARNING: Could not reach API (will try WS anyway)")
 
-    # ── Step 2: Set frequency and gain ──
+    # ── Step 2: Tune to target ──
     target_freq = int(freq_mhz * 1e6)
     print(f"\n[2] Tuning to {freq_mhz:.3f} MHz, gain={gain} ...")
     api_post(host, port, 'freq', {'value': target_freq})
     if gain >= 0:
         api_post(host, port, 'gain', {'value': gain})
-    # Ensure WBFM mode for stereo/RDS
-    api_post(host, port, 'mode', {'value': 0})
-    time.sleep(0.3)
+    api_post(host, port, 'mode', {'value': 0})  # WBFM
+    time.sleep(0.5)
 
-    # ── Step 3: Connect WebSocket ──
+    # ── Step 3: Connect WebSocket with auto-reconnect ──
     print(f"\n[3] Connecting WebSocket wss://{host}:{port}/ws ...")
     sslopt = {"cert_reqs": ssl.CERT_NONE}
-    ws = websocket.WebSocketApp(
-        f"wss://{host}:{port}/ws",
-        on_open=on_open,
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close,
-    )
-    ws_thread = threading.Thread(target=ws.run_forever,
-                                  kwargs={"sslopt": sslopt},
-                                  daemon=True)
-    ws_thread.start()
+    rws = ReconnectingWS(f"wss://{host}:{port}/ws", sslopt)
+    rws.start()
 
-    # Wait for connection
+    # Wait for first connection
     t0 = time.time()
-    while time.time() - t0 < 5:
-        if ws.sock and ws.sock.connected:
+    while time.time() - t0 < 8:
+        if rws.connected:
             break
-        time.sleep(0.1)
+        time.sleep(0.2)
     else:
         print("    FAIL: WebSocket connection timeout")
         running = False
         return False
 
-    # ── Step 4: Check signal strength pushes ──
-    print("\n[4] Waiting for signal strength data ...")
+    print("    Connected (auto-reconnect enabled)")
+
+    # ── Step 4: Wait for signal strength ──
+    print("\n[4] Waiting for signal strength ...")
     t0 = time.time()
     while text_msgs == 0 and time.time() - t0 < 3:
         time.sleep(0.1)
     if text_msgs > 0:
         sig_pct = signal_strength * 100 / 32767
-        print(f"    OK: {text_msgs} status messages, signal={sig_pct:.0f}%")
+        print(f"    OK: signal={sig_pct:.0f}%")
     else:
-        print("    WARNING: No signal strength received (timer may not be running)")
+        print("    WARNING: No signal strength received yet")
 
-    # ── Step 5: Subscribe to audio ──
-    print("\n[5] Sending audio_on command ...")
-    ws.send(json.dumps({"cmd": "audio_on"}))
-    time.sleep(0.5)
-
-    # Wait for first binary frame
+    # ── Step 5: Wait for audio frames ──
+    print("\n[5] Waiting for audio frames ...")
     t0 = time.time()
     while binary_msgs == 0 and time.time() - t0 < 5:
         time.sleep(0.1)
 
     if binary_msgs == 0:
         print("    FAIL: No audio frames received after 5s")
-        print("    Possible causes:")
-        print("      - audio_on command not handled by firmware")
-        print("      - fm_pipeline_task not calling web_radio_push_audio()")
-        print("      - WebSocket client not in s_ws_audio[] table")
+        print("    - web_radio_push_audio() may not be wired")
+        print("    - Squelch may be closing the audio gate")
         running = False
-        ws.send(json.dumps({"cmd": "audio_off"}))
-        ws.close()
+        rws.close()
         return False
 
-    print(f"    OK: First audio frame received ({binary_bytes} bytes)")
+    with lock:
+        first_bytes = binary_bytes
+    print(f"    OK: Audio streaming ({first_bytes} bytes, {binary_msgs} frames)")
 
-    # ── Step 6: Start playback + stats ──
+    # ── Step 6: Playback + recording ──
     if play and sd:
         threading.Thread(target=audio_playback_thread, daemon=True).start()
     threading.Thread(target=stats_thread, daemon=True).start()
 
-    # ── Step 7: Record for duration ──
-    print(f"\n[6] Recording {duration}s of audio ...")
+    print(f"\n[6] Recording {duration}s ...")
     if play and sd:
-        print("    Audio playing through speakers")
+        print("    Playing through speakers")
     print("    (Ctrl+C to stop early)\n")
 
     try:
@@ -427,40 +465,33 @@ def run_tests(host, port, freq_mhz, gain, duration, play, wav_file):
     except KeyboardInterrupt:
         print("\n[INTERRUPTED]")
 
-    # ── Step 8: Unsubscribe and close ──
+    # ── Step 7: Stop ──
     print("\n[7] Stopping ...")
-    try:
-        ws.send(json.dumps({"cmd": "audio_off"}))
-    except Exception:
-        pass
+    rws.send(json.dumps({"cmd": "audio_off"}))
     running = False
     time.sleep(0.5)
-    try:
-        ws.close()
-    except Exception:
-        pass
+    rws.close()
 
-    # ── Step 9: Check RDS ──
+    # ── Step 8: RDS ──
     rds = api_get(host, port, 'rds')
     if rds:
         ps = rds.get('ps_name', '').strip()
         rt = rds.get('radio_text', '').strip()
         pi = rds.get('pi_code', '')
         pty = rds.get('pty', 0)
-        rds_stereo = rds.get('stereo', False)
+        rds_st = rds.get('stereo', False)
         print(f"\n[RDS] PS=\"{ps}\" RT=\"{rt}\"")
-        print(f"      PI={pi} PTY={pty} Stereo={rds_stereo}")
-    else:
-        print("\n[RDS] Could not fetch RDS data")
+        print(f"      PI={pi} PTY={pty} Stereo={rds_st}")
 
-    # ── Step 10: Save WAV and summarize ──
-    rms_peak_dur = save_wav(wav_file, duration_limit=duration)
+    # ── Step 9: Save WAV ──
+    result = save_wav(wav_file, duration_limit=duration)
 
-    # Summary
+    # ── Summary ──
     with lock:
         total_samples = pcm_samples
         total_frames = binary_msgs
         total_bytes = binary_bytes
+        total_reconnects = ws_reconnects
 
     actual_dur = total_samples / AUDIO_RATE if total_samples > 0 else 0
     avg_rate = total_samples / duration if duration > 0 else 0
@@ -471,25 +502,25 @@ def run_tests(host, port, freq_mhz, gain, duration, play, wav_file):
     print(f"{'=' * 64}")
     print(f"  Frequency:     {freq_mhz:.3f} MHz")
     print(f"  WS frames:     {total_frames}")
-    print(f"  WS bytes:      {total_bytes / 1024:.0f} KB")
+    print(f"  WS data:       {total_bytes / 1024:.0f} KB")
+    print(f"  WS reconnects: {total_reconnects}")
     print(f"  PCM samples:   {total_samples} ({actual_dur:.1f}s)")
     print(f"  Avg fill rate: {avg_rate:.0f} sps ({fill_pct:.0f}% of 48kHz)")
-    print(f"  Channels:      {channels_detected} ({'stereo detected' if channels_detected == 2 else 'mono'})")
+    print(f"  Channels:      {channels_detected} ({'stereo' if channels_detected == 2 else 'mono'})")
     print(f"  Underruns:     {underruns}")
-    print(f"  Overruns:      {overruns}")
 
-    # Diagnosis
     if total_samples == 0:
-        print(f"\n  DIAGNOSIS: Zero audio — web_radio_push_audio() not wired or squelch closed")
+        print(f"\n  DIAGNOSIS: Zero audio — push_audio not wired or squelch closed")
         return False
     elif fill_pct < 50:
         print(f"\n  DIAGNOSIS: Audio underrun ({fill_pct:.0f}% fill)")
-        print(f"    - Check fm_pipeline_task is running and calling web_radio_push_audio()")
-        print(f"    - Check WebSocket bandwidth (TLS overhead on ESP32-P4)")
-        print(f"    - Try reducing volume or disabling stereo to reduce frame size")
+        if total_reconnects > 5:
+            print(f"    TLS reconnects ({total_reconnects}) are the bottleneck.")
+            print(f"    Each reconnect loses ~1-2s of audio.")
+            print(f"    Consider: larger WS frame batching or plain HTTP mode.")
         return False
     elif fill_pct < 90:
-        print(f"\n  WARNING: Slight underrun ({fill_pct:.0f}% fill) — may hear occasional glitches")
+        print(f"\n  WARNING: Slight underrun ({fill_pct:.0f}%) — occasional glitches")
         return True
     else:
         print(f"\n  OK: Audio stream healthy ({fill_pct:.0f}% fill)")
@@ -503,7 +534,7 @@ def main():
         description="ESP32-P4 FM Radio Browser Audio Test",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--host", default="192.168.1.232",
+    parser.add_argument("--host", default="192.168.1.233",
                         help="ESP32-P4 IP address")
     parser.add_argument("--port", type=int, default=8080,
                         help="HTTPS port")
@@ -520,8 +551,7 @@ def main():
     args = parser.parse_args()
 
     print(f"Target: {args.host}:{args.port}  Freq: {args.freq:.3f} MHz  "
-          f"Gain: {args.gain}  Duration: {args.duration}s")
-    print()
+          f"Gain: {args.gain}  Duration: {args.duration}s\n")
 
     success = run_tests(
         host=args.host,
@@ -533,8 +563,8 @@ def main():
         wav_file=args.wav,
     )
 
-    print(f"\nPlay saved audio:  aplay {args.wav}")
-    print(f"Analyze spectrum:  python3 -c \"import scipy.io.wavfile as w; "
+    print(f"\nPlay:    aplay {args.wav}")
+    print(f"Analyze: python3 -c \"import scipy.io.wavfile as w; "
           f"import matplotlib.pyplot as plt; r,d = w.read('{args.wav}'); "
           f"plt.specgram(d, Fs=r); plt.show()\"")
 

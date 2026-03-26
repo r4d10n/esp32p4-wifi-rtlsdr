@@ -38,6 +38,13 @@ extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
 #define WS_TIMER_PERIOD_MS  100     /* 10 Hz signal strength push */
 #define POST_BODY_MAX       256
 
+/* Audio send buffer — accumulate PCM and flush in ~100ms chunks.
+ * At 48kHz mono, 100ms = 4800 samples = 9600 bytes per TLS frame.
+ * This reduces WS frame rate from ~200/s to ~10/s, preventing TLS overload. */
+#define AUDIO_BUF_SAMPLES   4800    /* 100 ms @ 48 kHz */
+static int16_t              s_audio_buf[AUDIO_BUF_SAMPLES];
+static int                  s_audio_buf_pos = 0;
+
 /* ── Server State ── */
 
 static httpd_handle_t       s_httpd      = NULL;
@@ -669,33 +676,61 @@ void web_radio_update_rds(const char *ps_name, const char *radio_text,
     s_rds.stereo = stereo;
 }
 
-void web_radio_push_audio(const int16_t *samples, int count)
+static void ws_flush_audio(void)
 {
-    if (!s_httpd || count <= 0) return;
+    if (s_audio_buf_pos == 0) return;
 
     taskENTER_CRITICAL(&s_ws_mux);
     int n = s_ws_count;
     int fds[MAX_WS_CLIENTS];
-    bool audio[MAX_WS_CLIENTS];
+    bool audio_flag[MAX_WS_CLIENTS];
     for (int i = 0; i < n; i++) {
         fds[i] = s_ws_fds[i];
-        audio[i] = s_ws_audio[i];
+        audio_flag[i] = s_ws_audio[i];
     }
     taskEXIT_CRITICAL(&s_ws_mux);
 
+    bool any_audio = false;
     for (int i = 0; i < n; i++) {
-        if (!audio[i]) continue;
+        if (audio_flag[i]) { any_audio = true; break; }
+    }
+    if (!any_audio) {
+        s_audio_buf_pos = 0;
+        return;
+    }
+
+    for (int i = 0; i < n; i++) {
+        if (!audio_flag[i]) continue;
 
         httpd_ws_frame_t frame = {
             .type    = HTTPD_WS_TYPE_BINARY,
-            .payload = (uint8_t *)samples,
-            .len     = (size_t)(count * sizeof(int16_t)),
+            .payload = (uint8_t *)s_audio_buf,
+            .len     = (size_t)(s_audio_buf_pos * sizeof(int16_t)),
             .final   = true,
         };
         esp_err_t err = httpd_ws_send_frame_async(s_httpd, fds[i], &frame);
         if (err != ESP_OK) {
             ESP_LOGD(TAG, "audio ws send failed fd=%d, removing", fds[i]);
             ws_remove_fd(fds[i]);
+        }
+    }
+    s_audio_buf_pos = 0;
+}
+
+void web_radio_push_audio(const int16_t *samples, int count)
+{
+    if (!s_httpd || count <= 0) return;
+
+    while (count > 0) {
+        int space = AUDIO_BUF_SAMPLES - s_audio_buf_pos;
+        int copy = (count < space) ? count : space;
+        memcpy(&s_audio_buf[s_audio_buf_pos], samples, copy * sizeof(int16_t));
+        s_audio_buf_pos += copy;
+        samples += copy;
+        count -= copy;
+
+        if (s_audio_buf_pos >= AUDIO_BUF_SAMPLES) {
+            ws_flush_audio();
         }
     }
 }
