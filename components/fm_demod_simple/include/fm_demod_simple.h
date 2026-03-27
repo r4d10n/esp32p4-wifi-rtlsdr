@@ -13,6 +13,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "rds_decoder.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,6 +50,7 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
 
 float fm_demod_simple_get_signal_strength(fm_demod_simple_t *d);
 bool  fm_demod_simple_is_stereo(fm_demod_simple_t *d);
+void  fm_demod_simple_get_rds(fm_demod_simple_t *d, rds_data_t *out);
 
 #ifdef __cplusplus
 }

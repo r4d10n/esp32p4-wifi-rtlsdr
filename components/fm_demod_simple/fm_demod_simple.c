@@ -16,6 +16,7 @@
 #include <string.h>
 #include <math.h>
 #include "fm_demod_simple.h"
+#include "rds_decoder.h"
 
 /* ── Configuration ── */
 
@@ -107,6 +108,14 @@ struct fm_demod_simple {
     /* Stereo blend */
     float blend_ratio;          /* 0=mono, 1=full stereo */
 
+    /* RDS decoder (57kHz subcarrier) */
+    rds_decoder_t *rds;
+    float *rds_buf;             /* Accumulate-and-dump output buffer */
+    int    rds_buf_size;
+    float  rds_acc;             /* A&D accumulator */
+    int    rds_decim_phase;     /* A&D sample counter */
+    int    rds_decim;           /* Decimation ratio: sample_rate / ~2375 */
+
     /* Signal strength */
     float signal_rms;
     float signal_acc;
@@ -160,6 +169,20 @@ fm_demod_simple_t *fm_demod_simple_create(uint32_t sample_rate, uint32_t audio_r
         return NULL;
     }
 
+    /* RDS decoder: 57kHz mixing + accumulate-and-dump to symbol rate */
+    d->rds_decim = (int)(sample_rate / 2375.0f);
+    if (d->rds_decim < 1) d->rds_decim = 1;
+    d->rds_buf_size = d->work_buf_size / d->rds_decim + 2;
+    d->rds_buf = calloc(d->rds_buf_size, sizeof(float));
+    float rds_rate = sample_rate / (float)d->rds_decim;
+    d->rds = rds_decoder_create(rds_rate);
+    if (!d->rds || !d->rds_buf) {
+        free(d->rds_buf);
+        rds_decoder_free(d->rds);
+        d->rds = NULL;
+        d->rds_buf = NULL;
+    }
+
     return d;
 }
 
@@ -183,6 +206,7 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
     float *lpr_buf = d->lpr_buf;
     float *lmr_buf = d->lmr_buf;
     int mpx_count = 0;
+    int rds_count = 0;
 
     /* Step 1: U8→float IQ + FM discriminator → MPX */
     for (int i = 0; i < iq_pairs; i++) {
@@ -255,6 +279,26 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
         float lmr_filt = fir_process_sample(&d->fir_lmr, lmr_raw);
         d->deemph_lmr = d->deemph_alpha * lmr_filt + (1.0f - d->deemph_alpha) * d->deemph_lmr;
         lmr_buf[i] = d->deemph_lmr;
+
+        /* RDS: mix MPX with 57kHz (3× pilot phase), accumulate-and-dump */
+        if (d->rds) {
+            float ref_57k = sinf(3.0f * d->pll_phase);
+            float rds_mixed = mpx * ref_57k;
+            d->rds_acc += rds_mixed;
+            d->rds_decim_phase++;
+            if (d->rds_decim_phase >= d->rds_decim) {
+                if (rds_count < d->rds_buf_size) {
+                    d->rds_buf[rds_count++] = d->rds_acc / (float)(d->rds_decim / 8 + 1);
+                }
+                d->rds_acc = 0;
+                d->rds_decim_phase = 0;
+            }
+        }
+    }
+
+    /* Feed accumulated RDS samples to decoder */
+    if (d->rds && rds_count > 0) {
+        rds_decoder_process(d->rds, d->rds_buf, rds_count);
     }
 
     /* Step 3: Stereo blend */
@@ -329,4 +373,13 @@ float fm_demod_simple_get_signal_strength(fm_demod_simple_t *d)
 bool fm_demod_simple_is_stereo(fm_demod_simple_t *d)
 {
     return d ? (d->pilot_detected && d->pll_locked) : false;
+}
+
+void fm_demod_simple_get_rds(fm_demod_simple_t *d, rds_data_t *out)
+{
+    if (d && d->rds && out) {
+        rds_decoder_get_data(d->rds, out);
+    } else if (out) {
+        memset(out, 0, sizeof(*out));
+    }
 }
