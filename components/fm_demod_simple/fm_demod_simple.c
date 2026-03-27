@@ -111,6 +111,12 @@ struct fm_demod_simple {
     float signal_rms;
     float signal_acc;
     int   signal_count;
+
+    /* Pre-allocated work buffers (avoid malloc/free per block) */
+    int    work_buf_size;
+    float *mpx_buf;
+    float *lpr_buf;
+    float *lmr_buf;
 };
 
 fm_demod_simple_t *fm_demod_simple_create(uint32_t sample_rate, uint32_t audio_rate)
@@ -144,10 +150,22 @@ fm_demod_simple_t *fm_demod_simple_create(uint32_t sample_rate, uint32_t audio_r
     d->resample_ratio = (float)sample_rate / (float)audio_rate;
     d->resample_phase = 0.0f;
 
+    /* Pre-allocate work buffers for max block size (16384 bytes = 8192 IQ pairs) */
+    d->work_buf_size = 8192 + 1;
+    d->mpx_buf = calloc(d->work_buf_size, sizeof(float));
+    d->lpr_buf = calloc(d->work_buf_size, sizeof(float));
+    d->lmr_buf = calloc(d->work_buf_size, sizeof(float));
+    if (!d->mpx_buf || !d->lpr_buf || !d->lmr_buf) {
+        free(d->mpx_buf); free(d->lpr_buf); free(d->lmr_buf); free(d);
+        return NULL;
+    }
+
     return d;
 }
 
-void fm_demod_simple_free(fm_demod_simple_t *d) { free(d); }
+void fm_demod_simple_free(fm_demod_simple_t *d) {
+    if (d) { free(d->mpx_buf); free(d->lpr_buf); free(d->lmr_buf); free(d); }
+}
 
 /* ── Processing ── */
 
@@ -159,17 +177,11 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
     int iq_pairs = iq_bytes / 2;
     int audio_count = 0;
 
-    /* Temp buffers for one block of MPX-rate samples.
-     * Use heap, not stack — 8192 pairs × 3 buffers × 4 bytes = 96KB,
-     * far exceeds the 16KB task stack. */
-    int max_mpx = iq_pairs + 1;
-    float *mpx_buf = malloc(max_mpx * sizeof(float));
-    float *lpr_buf = malloc(max_mpx * sizeof(float));
-    float *lmr_buf = malloc(max_mpx * sizeof(float));
-    if (!mpx_buf || !lpr_buf || !lmr_buf) {
-        free(mpx_buf); free(lpr_buf); free(lmr_buf);
-        return 0;
-    }
+    /* Use pre-allocated work buffers */
+    if (iq_pairs >= d->work_buf_size) iq_pairs = d->work_buf_size - 1;
+    float *mpx_buf = d->mpx_buf;
+    float *lpr_buf = d->lpr_buf;
+    float *lmr_buf = d->lmr_buf;
     int mpx_count = 0;
 
     /* Step 1: U8→float IQ + FM discriminator → MPX */
@@ -306,9 +318,6 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
         d->signal_count = 0;
     }
 
-    free(mpx_buf);
-    free(lpr_buf);
-    free(lmr_buf);
     return audio_count;
 }
 

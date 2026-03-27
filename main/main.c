@@ -201,8 +201,10 @@ static void fm_pipeline_task(void *arg)
         int64_t t1 = esp_timer_get_time();
 
         if (pairs > 0) {
-            /* Write stereo to I2S (already interleaved L,R) */
-            audio_out_simple_write_stereo(audio_s16_buf, pairs, 0);
+            /* Write stereo to I2S — block briefly to avoid dropping audio.
+             * At 48kHz stereo, ~384 pairs = 8ms. DMA buffer is 240ms,
+             * so this should rarely block. */
+            audio_out_simple_write_stereo(audio_s16_buf, pairs, 50);
 
             /* Push interleaved stereo to WebSocket */
             web_radio_simple_push_audio(audio_s16_buf, pairs * 2);
