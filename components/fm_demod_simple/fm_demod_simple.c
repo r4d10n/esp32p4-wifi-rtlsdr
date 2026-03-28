@@ -470,12 +470,37 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
         if (d->blend_ratio < 0.0f) d->blend_ratio = 0.0f;
     }
 
-    /* Step 4: Resample 256k→48k + stereo matrix + AGC → int16 output */
+    /* Step 4: Noise squelch using IQ signal level.
+     * signal_rms measures IQ magnitude: low with no signal (ADC noise ~0.15),
+     * high with FM signal (0.3+). This is the most reliable squelch indicator. */
+    float squelch_gain = 1.0f;
+    {
+        float sig = d->signal_rms;
+        const float squelch_open  = 0.25f;  /* Open above this level */
+        const float squelch_close = 0.20f;  /* Close below this level (hysteresis) */
+        static bool squelch_open_state = false;
+
+        if (squelch_open_state) {
+            if (sig < squelch_close) squelch_open_state = false;
+        } else {
+            if (sig > squelch_open) squelch_open_state = true;
+        }
+
+        if (!squelch_open_state) {
+            squelch_gain = 0.0f;  /* Muted */
+        } else if (sig < squelch_open + 0.05f) {
+            /* Soft fade near threshold */
+            squelch_gain = (sig - squelch_close) / (squelch_open + 0.05f - squelch_close);
+            if (squelch_gain > 1.0f) squelch_gain = 1.0f;
+            if (squelch_gain < 0.0f) squelch_gain = 0.0f;
+        }
+    }
+
+    /* Step 5: Resample 128k→48k + stereo matrix + AGC → int16 output */
     float vol = (float)d->volume / 100.0f;
 
-    /* AGC: track peak and adjust gain slowly.
-     * Target: 70% of full scale (22937 out of 32767).
-     * Attack: fast (immediate peak update). Release: slow (0.9995 decay). */
+    /* AGC: only active when squelch is open (signal present).
+     * Target: 70% of full scale. */
     float agc_target = 0.7f;
 
     while (d->resample_phase < (float)fir_count && audio_count < max_pairs) {
@@ -503,20 +528,23 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
         float peak = fabsf(L);
         float peak_r = fabsf(R);
         if (peak_r > peak) peak = peak_r;
-        if (peak > d->agc_peak) {
-            d->agc_peak = d->agc_peak * 0.999f + peak * 0.001f;      /* ~100ms attack (no pumping) */
-        } else {
-            d->agc_peak = d->agc_peak * 0.99999f + peak * 0.00001f;  /* ~2s release (smooth) */
-        }
-        if (d->agc_peak > 0.001f) {
-            d->agc_gain = agc_target / d->agc_peak;
-            if (d->agc_gain > 10.0f) d->agc_gain = 10.0f;   /* Max 20dB gain (was 26) */
-            if (d->agc_gain < 0.5f) d->agc_gain = 0.5f;     /* Min -6dB */
+        /* Only update AGC when squelch is open — prevents noise amplification */
+        if (squelch_gain > 0.1f) {
+            if (peak > d->agc_peak) {
+                d->agc_peak = d->agc_peak * 0.999f + peak * 0.001f;
+            } else {
+                d->agc_peak = d->agc_peak * 0.99999f + peak * 0.00001f;
+            }
+            if (d->agc_peak > 0.001f) {
+                d->agc_gain = agc_target / d->agc_peak;
+                if (d->agc_gain > 10.0f) d->agc_gain = 10.0f;
+                if (d->agc_gain < 0.5f) d->agc_gain = 0.5f;
+            }
         }
 
-        /* Apply AGC + volume + convert to int16 */
-        L *= d->agc_gain * vol * 32767.0f;
-        R *= d->agc_gain * vol * 32767.0f;
+        /* Apply squelch + AGC + volume → int16 */
+        L *= squelch_gain * d->agc_gain * vol * 32767.0f;
+        R *= squelch_gain * d->agc_gain * vol * 32767.0f;
         if (L > 32767.0f) L = 32767.0f;
         if (L < -32768.0f) L = -32768.0f;
         if (R > 32767.0f) R = 32767.0f;
