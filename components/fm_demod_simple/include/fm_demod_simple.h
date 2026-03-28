@@ -52,6 +52,12 @@ float fm_demod_simple_get_signal_strength(fm_demod_simple_t *d);
 bool  fm_demod_simple_is_stereo(fm_demod_simple_t *d);
 void  fm_demod_simple_get_rds(fm_demod_simple_t *d, rds_data_t *out);
 
+#define MPX_SPECTRUM_BINS 128
+
+/** Get MPX baseband power spectrum (128 bins, 0-128kHz, 1kHz resolution).
+ *  Output: uint8 log-magnitude (0=-80dB, 255=0dB). */
+void fm_demod_simple_get_mpx_spectrum(fm_demod_simple_t *d, uint8_t *bins_out, int *num_bins);
+
 #ifdef __cplusplus
 }
 #endif

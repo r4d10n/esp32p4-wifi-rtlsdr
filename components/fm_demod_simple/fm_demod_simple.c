@@ -27,6 +27,7 @@
 #define SIN_LUT_MASK    (SIN_LUT_SIZE - 1)
 #define DEEMPH_TAU_US   75      /* 75us NA/Japan, 50us Europe */
 #define FM_DEVIATION    75000.0f
+#define MPX_FFT_SIZE    256     /* Capture buffer for MPX spectrum visualization */
 
 /* ── Fast Math: Sin/Cos LUT ── */
 
@@ -224,6 +225,10 @@ struct fm_demod_simple {
     float signal_acc;
     int   signal_count;
 
+    /* MPX spectrum capture for visualization */
+    float mpx_fft_buf[MPX_FFT_SIZE];
+    int   mpx_fft_wr;
+
     /* Pre-allocated work buffers (avoid malloc/free per block) */
     int    work_buf_size;
     float *mpx_buf;
@@ -344,6 +349,10 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
 
         float mpx = fast_atan2f(cross, dot) * d->fm_scale;
         mpx_buf[mpx_count++] = mpx;
+
+        /* Capture MPX samples for spectrum visualization */
+        d->mpx_fft_buf[d->mpx_fft_wr] = mpx;
+        d->mpx_fft_wr = (d->mpx_fft_wr + 1) & (MPX_FFT_SIZE - 1);
     }
 
     /* Step 2: Per-MPX-sample: Goertzel + PLL + RDS at full rate (256kSPS).
@@ -587,4 +596,74 @@ void fm_demod_simple_get_rds(fm_demod_simple_t *d, rds_data_t *out)
     } else if (out) {
         memset(out, 0, sizeof(*out));
     }
+}
+
+/* ── 256-point radix-2 DIT FFT (in-place, float) ── */
+
+static void fft_radix2(float *re, float *im, int n)
+{
+    /* Bit-reversal permutation */
+    for (int i = 1, j = 0; i < n; i++) {
+        int bit = n >> 1;
+        for (; j & bit; bit >>= 1)
+            j ^= bit;
+        j ^= bit;
+        if (i < j) {
+            float t;
+            t = re[i]; re[i] = re[j]; re[j] = t;
+            t = im[i]; im[i] = im[j]; im[j] = t;
+        }
+    }
+
+    /* Butterfly stages */
+    for (int len = 2; len <= n; len <<= 1) {
+        float ang = -2.0f * (float)M_PI / (float)len;
+        float wre = cosf(ang), wim = sinf(ang);
+        for (int i = 0; i < n; i += len) {
+            float cur_re = 1.0f, cur_im = 0.0f;
+            int half = len / 2;
+            for (int j = 0; j < half; j++) {
+                int u = i + j;
+                int v = u + half;
+                float tre = re[v] * cur_re - im[v] * cur_im;
+                float tim = re[v] * cur_im + im[v] * cur_re;
+                re[v] = re[u] - tre;
+                im[v] = im[u] - tim;
+                re[u] += tre;
+                im[u] += tim;
+                float new_re = cur_re * wre - cur_im * wim;
+                cur_im = cur_re * wim + cur_im * wre;
+                cur_re = new_re;
+            }
+        }
+    }
+}
+
+void fm_demod_simple_get_mpx_spectrum(fm_demod_simple_t *d, uint8_t *bins_out, int *num_bins)
+{
+    if (!d || !bins_out || !num_bins) return;
+
+    float re[MPX_FFT_SIZE], im[MPX_FFT_SIZE];
+
+    /* Copy circular buffer in-order with Hann window */
+    for (int i = 0; i < MPX_FFT_SIZE; i++) {
+        int idx = (d->mpx_fft_wr + i) & (MPX_FFT_SIZE - 1);
+        float w = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * (float)i / (float)MPX_FFT_SIZE));
+        re[i] = d->mpx_fft_buf[idx] * w;
+        im[i] = 0.0f;
+    }
+
+    fft_radix2(re, im, MPX_FFT_SIZE);
+
+    /* Convert to log-magnitude uint8 (0 = -80dB, 255 = 0dB) */
+    int half = MPX_FFT_SIZE / 2;
+    for (int i = 0; i < half; i++) {
+        float mag = sqrtf(re[i] * re[i] + im[i] * im[i]);
+        float db = 20.0f * log10f(mag + 1e-10f);
+        int val = (int)((db + 80.0f) * (255.0f / 80.0f));
+        if (val < 0) val = 0;
+        if (val > 255) val = 255;
+        bins_out[i] = (uint8_t)val;
+    }
+    *num_bins = half;
 }

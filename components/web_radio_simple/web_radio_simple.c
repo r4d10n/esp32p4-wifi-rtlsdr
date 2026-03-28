@@ -64,6 +64,13 @@ static portMUX_TYPE s_ws_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static esp_timer_handle_t   s_ws_timer   = NULL;
 
+/* Radio info for web display (stereo, RDS, spectrum) */
+static bool                 s_stereo = false;
+static web_radio_rds_info_t s_rds_info;
+static uint8_t              s_spectrum[WEB_RADIO_SPECTRUM_BINS];
+static int                  s_spectrum_bins = 0;
+static portMUX_TYPE         s_info_mux = portMUX_INITIALIZER_UNLOCKED;
+
 /* ── WebSocket client tracking ── */
 
 static void ws_add_fd(int fd)
@@ -98,14 +105,30 @@ static void on_close_socket(httpd_handle_t hd, int fd)
     close(fd);
 }
 
-/* ── WebSocket signal-strength timer ── */
+/* ── JSON string escape (RDS text is mostly ASCII, but be safe) ── */
+
+static int json_escape(char *dst, int dst_size, const char *src)
+{
+    int j = 0;
+    for (int i = 0; src[i] && j < dst_size - 2; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '"' || c == '\\') dst[j++] = '\\';
+        else if (c < 0x20 || c >= 0x80) continue; /* strip control + non-ASCII */
+        dst[j++] = c;
+    }
+    dst[j] = '\0';
+    return j;
+}
+
+/* ── WebSocket metadata + signal timer ── */
 
 static void ws_timer_cb(void *arg)
 {
     if (!s_httpd) return;
 
-    /* Skip signal strength push if any client has audio active —
-     * avoid TLS frame contention that causes connection drops. */
+    static int tick = 0;
+    tick++;
+
     taskENTER_CRITICAL(&s_ws_mux);
     int count = s_ws_count;
     int fds[MAX_WS_CLIENTS];
@@ -116,17 +139,63 @@ static void ws_timer_cb(void *arg)
     }
     taskEXIT_CRITICAL(&s_ws_mux);
 
-    if (any_audio) return;  /* Audio frames have priority */
+    if (count == 0) return;
 
-    char buf[64];
-    int len = snprintf(buf, sizeof(buf), "{\"signal_strength\":%d}",
-                       (int)s_signal_strength);
+    /* Skip WS metadata entirely during audio — even small TLS text frames
+     * contend with audio binary frames on the same connection.
+     * Browser polls /api/rds via separate HTTP requests instead. */
+    if (any_audio) return;
+
+    /* Snapshot radio info under spinlock */
+    int16_t sig;
+    bool stereo;
+    web_radio_rds_info_t rds;
+    uint8_t spectrum[WEB_RADIO_SPECTRUM_BINS];
+    int spec_bins;
+
+    taskENTER_CRITICAL(&s_info_mux);
+    sig = s_signal_strength;
+    stereo = s_stereo;
+    rds = s_rds_info;
+    spec_bins = s_spectrum_bins;
+    if (spec_bins > 0) memcpy(spectrum, s_spectrum, spec_bins);
+    taskEXIT_CRITICAL(&s_info_mux);
+
+    /* Build JSON into static buffer (no heap allocation) */
+    static char json[2048];
+    char safe_ps[20], safe_rt[140];
+    json_escape(safe_ps, sizeof(safe_ps), rds.ps_name);
+    json_escape(safe_rt, sizeof(safe_rt), rds.radio_text);
+
+    int pos = snprintf(json, sizeof(json),
+        "{\"signal_strength\":%d,\"stereo\":%s,"
+        "\"rds\":{\"ps\":\"%s\",\"rt\":\"%s\",\"pi\":%u,\"pty\":%u,"
+        "\"tp\":%s,\"synced\":%s,\"groups\":%lu,\"errors\":%lu}",
+        (int)sig, stereo ? "true" : "false",
+        safe_ps, safe_rt,
+        (unsigned)rds.pi_code, (unsigned)rds.pty,
+        rds.tp ? "true" : "false", rds.synced ? "true" : "false",
+        (unsigned long)rds.groups_received, (unsigned long)rds.block_errors);
+
+    /* Include spectrum only when no audio active — spectrum JSON (~500 bytes)
+     * causes TLS frame contention when interleaved with audio frames. */
+    if (!any_audio && spec_bins > 0 && pos < (int)sizeof(json) - 700) {
+        pos += snprintf(json + pos, sizeof(json) - pos, ",\"spectrum\":[");
+        for (int i = 0; i < spec_bins; i++) {
+            if (i > 0 && pos < (int)sizeof(json) - 6) json[pos++] = ',';
+            pos += snprintf(json + pos, sizeof(json) - pos, "%u", (unsigned)spectrum[i]);
+        }
+        if (pos < (int)sizeof(json) - 2) json[pos++] = ']';
+    }
+
+    if (pos < (int)sizeof(json) - 2) json[pos++] = '}';
+    json[pos] = '\0';
 
     for (int i = 0; i < count; i++) {
         httpd_ws_frame_t frame = {
             .type    = HTTPD_WS_TYPE_TEXT,
-            .payload = (uint8_t *)buf,
-            .len     = (size_t)len,
+            .payload = (uint8_t *)json,
+            .len     = (size_t)pos,
             .final   = true,
         };
         esp_err_t err = httpd_ws_send_frame_async(s_httpd, fds[i], &frame);
@@ -232,6 +301,54 @@ static esp_err_t handler_gain(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── REST: GET /api/rds ── */
+
+static esp_err_t handler_rds(httpd_req_t *req)
+{
+    web_radio_rds_info_t rds;
+    bool stereo;
+
+    taskENTER_CRITICAL(&s_info_mux);
+    rds = s_rds_info;
+    stereo = s_stereo;
+    taskEXIT_CRITICAL(&s_info_mux);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "stereo", stereo);
+    cJSON_AddStringToObject(root, "ps", rds.ps_name);
+    cJSON_AddStringToObject(root, "rt", rds.radio_text);
+    cJSON_AddNumberToObject(root, "pi", rds.pi_code);
+    cJSON_AddNumberToObject(root, "pty", rds.pty);
+    cJSON_AddBoolToObject(root, "tp", rds.tp);
+    cJSON_AddBoolToObject(root, "synced", rds.synced);
+    cJSON_AddNumberToObject(root, "groups", (double)rds.groups_received);
+    cJSON_AddNumberToObject(root, "errors", (double)rds.block_errors);
+
+    /* Include signal strength */
+    cJSON_AddNumberToObject(root, "signal_strength", (int)s_signal_strength);
+
+    /* Include spectrum if available */
+    taskENTER_CRITICAL(&s_info_mux);
+    int spec_bins = s_spectrum_bins;
+    uint8_t spec_copy[WEB_RADIO_SPECTRUM_BINS];
+    if (spec_bins > 0) memcpy(spec_copy, s_spectrum, spec_bins);
+    taskEXIT_CRITICAL(&s_info_mux);
+
+    if (spec_bins > 0) {
+        cJSON *spec_arr = cJSON_CreateArray();
+        for (int i = 0; i < spec_bins; i++) {
+            cJSON_AddItemToArray(spec_arr, cJSON_CreateNumber(spec_copy[i]));
+        }
+        cJSON_AddItemToObject(root, "spectrum", spec_arr);
+    }
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    send_json(req, json);
+    free(json);
+    return ESP_OK;
+}
+
 /* ── REST: POST /api/volume ── */
 
 static esp_err_t handler_volume(httpd_req_t *req)
@@ -325,6 +442,7 @@ static const httpd_uri_t s_uris[] = {
     { .uri = "/api/freq",     .method = HTTP_POST,    .handler = handler_freq     },
     { .uri = "/api/gain",     .method = HTTP_POST,    .handler = handler_gain     },
     { .uri = "/api/volume",   .method = HTTP_POST,    .handler = handler_volume   },
+    { .uri = "/api/rds",      .method = HTTP_GET,     .handler = handler_rds      },
     { .uri = "/ws",           .method = HTTP_GET,     .handler = handler_ws,
       .is_websocket = true                                                        },
     { .uri = "/api/*",        .method = HTTP_OPTIONS, .handler = handler_cors_preflight },
@@ -438,6 +556,36 @@ static void ws_flush_audio(void)
         }
     }
     s_audio_buf_pos = 0;
+}
+
+/* Strip non-ASCII bytes from RDS string in-place (corrupted blocks can inject 0x80+ bytes) */
+static void sanitize_rds_string(char *s, int maxlen)
+{
+    int j = 0;
+    for (int i = 0; i < maxlen && s[i]; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c >= 0x20 && c < 0x80) s[j++] = (char)c;
+    }
+    s[j] = '\0';
+}
+
+void web_radio_simple_update_radio_info(bool stereo, const web_radio_rds_info_t *rds,
+                                         const uint8_t *spectrum, int spectrum_bins)
+{
+    taskENTER_CRITICAL(&s_info_mux);
+    s_stereo = stereo;
+    if (rds) {
+        s_rds_info = *rds;
+        /* Sanitize strings at storage time so all consumers get clean ASCII */
+        sanitize_rds_string(s_rds_info.ps_name, sizeof(s_rds_info.ps_name));
+        sanitize_rds_string(s_rds_info.radio_text, sizeof(s_rds_info.radio_text));
+    }
+    if (spectrum && spectrum_bins > 0) {
+        if (spectrum_bins > WEB_RADIO_SPECTRUM_BINS) spectrum_bins = WEB_RADIO_SPECTRUM_BINS;
+        memcpy(s_spectrum, spectrum, spectrum_bins);
+        s_spectrum_bins = spectrum_bins;
+    }
+    taskEXIT_CRITICAL(&s_info_mux);
 }
 
 void web_radio_simple_push_audio(const int16_t *samples, int count)

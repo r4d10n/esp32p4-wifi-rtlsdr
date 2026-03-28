@@ -47,6 +47,24 @@ void web_radio_simple_update_status(const web_radio_simple_params_t *params, int
 /* Push demodulated PCM audio to WebSocket clients (called from DSP pipeline) */
 void web_radio_simple_push_audio(const int16_t *samples, int count);
 
+/* RDS metadata for web display (decoupled from rds_decoder.h) */
+typedef struct {
+    char     ps_name[9];
+    char     radio_text[65];
+    uint16_t pi_code;
+    uint8_t  pty;
+    bool     tp;
+    bool     synced;
+    uint32_t groups_received;
+    uint32_t block_errors;
+} web_radio_rds_info_t;
+
+#define WEB_RADIO_SPECTRUM_BINS 128
+
+/* Update stereo/RDS/spectrum state for web display (called from DSP pipeline) */
+void web_radio_simple_update_radio_info(bool stereo, const web_radio_rds_info_t *rds,
+                                         const uint8_t *spectrum, int spectrum_bins);
+
 #ifdef __cplusplus
 }
 #endif

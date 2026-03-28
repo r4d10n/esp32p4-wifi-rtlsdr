@@ -233,8 +233,10 @@ static void fm_pipeline_task(void *arg)
 
         /* Update signal strength for web UI */
         float sig = fm_demod_simple_get_signal_strength(demod);
-        int16_t sig_int = (int16_t)(sig * 32767.0f);
-        if (sig_int > 32767) sig_int = 32767;
+        int32_t sig_i32 = (int32_t)(sig * 32767.0f);
+        if (sig_i32 > 32767) sig_i32 = 32767;
+        if (sig_i32 < 0) sig_i32 = 0;
+        int16_t sig_int = (int16_t)sig_i32;
 
         web_radio_simple_params_t status = {
             .frequency = radio_freq,
@@ -243,6 +245,34 @@ static void fm_pipeline_task(void *arg)
             .muted     = radio_muted,
         };
         web_radio_simple_update_status(&status, sig_int);
+
+        /* Update stereo/RDS/spectrum for web UI */
+        {
+            bool stereo = fm_demod_simple_is_stereo(demod);
+            rds_data_t rds_raw;
+            fm_demod_simple_get_rds(demod, &rds_raw);
+
+            web_radio_rds_info_t rds_info;
+            memcpy(rds_info.ps_name, rds_raw.ps_name, sizeof(rds_info.ps_name));
+            memcpy(rds_info.radio_text, rds_raw.radio_text, sizeof(rds_info.radio_text));
+            rds_info.pi_code = rds_raw.pi_code;
+            rds_info.pty = rds_raw.pty;
+            rds_info.tp = rds_raw.tp;
+            rds_info.synced = rds_raw.synced;
+            rds_info.groups_received = rds_raw.groups_received;
+            rds_info.block_errors = rds_raw.block_errors;
+
+            /* Compute spectrum at ~2Hz (every 16 blocks ≈ 500ms) */
+            static int spectrum_cnt = 0;
+            uint8_t spectrum[MPX_SPECTRUM_BINS];
+            int nbins = 0;
+            if (++spectrum_cnt >= 16) {
+                spectrum_cnt = 0;
+                fm_demod_simple_get_mpx_spectrum(demod, spectrum, &nbins);
+            }
+            web_radio_simple_update_radio_info(stereo, &rds_info,
+                                                nbins > 0 ? spectrum : NULL, nbins);
+        }
     }
 }
 

@@ -3,58 +3,104 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ESP32-P4 FM Radio (Mono)</title>
+<title>ESP32-P4 FM Radio</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
     font-family: 'Segoe UI', system-ui, sans-serif;
     background: #1a1a2e; color: #e0e0e0;
-    display: flex; justify-content: center; padding: 20px;
+    display: flex; justify-content: center; padding: 16px;
     min-height: 100vh;
 }
-.container { max-width: 480px; width: 100%; }
-h1 { text-align: center; color: #e94560; margin-bottom: 20px; font-size: 1.4em; }
+.container { max-width: 520px; width: 100%; }
+h1 { text-align: center; color: #e94560; margin-bottom: 16px; font-size: 1.3em; }
 
+/* ── Frequency Display ── */
 .freq-display {
     background: #16213e; border: 2px solid #e94560; border-radius: 12px;
-    padding: 20px; text-align: center; margin-bottom: 20px;
+    padding: 16px; margin-bottom: 12px;
 }
+.freq-row { display: flex; align-items: center; justify-content: center; gap: 12px; }
 .freq-value {
-    font-family: 'Courier New', monospace; font-size: 2.8em;
+    font-family: 'Courier New', monospace; font-size: 2.6em;
     color: #00ff88; letter-spacing: 2px;
 }
-.freq-unit { color: #888; font-size: 0.8em; margin-left: 8px; }
+.freq-unit { color: #888; font-size: 0.8em; }
 
-.tune-row { display: flex; gap: 8px; justify-content: center; margin-top: 12px; }
+/* Badges */
+.badge {
+    display: inline-block; padding: 3px 10px; border-radius: 10px;
+    font-size: 0.7em; font-weight: bold; letter-spacing: 1px;
+    text-transform: uppercase; vertical-align: middle;
+}
+.badge-stereo { background: #00ff88; color: #1a1a2e; }
+.badge-mono { background: #444; color: #888; }
+.badge-sm {
+    display: inline-block; padding: 2px 6px; border-radius: 6px;
+    font-size: 0.7em; font-weight: bold;
+}
+.badge-on { background: #00ff88; color: #1a1a2e; }
+.badge-off { background: #333; color: #666; }
+
+.tune-row { display: flex; gap: 6px; justify-content: center; margin-top: 10px; }
 .tune-btn {
     background: #0f3460; border: 1px solid #e94560; color: #e0e0e0;
-    padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.9em;
+    padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 0.85em;
 }
 .tune-btn:hover { background: #e94560; color: white; }
 .tune-btn:active { transform: scale(0.95); }
 
+/* ── Controls ── */
 .control-group {
-    background: #16213e; border-radius: 10px; padding: 16px; margin-bottom: 12px;
+    background: #16213e; border-radius: 10px; padding: 12px 14px; margin-bottom: 10px;
 }
-.control-label { color: #888; font-size: 0.85em; margin-bottom: 6px; display: flex; justify-content: space-between; }
+.control-label { color: #888; font-size: 0.82em; margin-bottom: 4px; display: flex; justify-content: space-between; }
 .control-label span { color: #00ff88; }
 input[type="range"] {
     width: 100%; accent-color: #e94560; height: 6px;
     -webkit-appearance: none; background: #0f3460; border-radius: 3px; outline: none;
 }
 input[type="range"]::-webkit-slider-thumb {
-    -webkit-appearance: none; width: 20px; height: 20px;
+    -webkit-appearance: none; width: 18px; height: 18px;
     background: #e94560; border-radius: 50%; cursor: pointer;
 }
 
-.meter {
-    height: 8px; background: #0f3460; border-radius: 4px; overflow: hidden; margin-top: 4px;
-}
+.meter { height: 8px; background: #0f3460; border-radius: 4px; overflow: hidden; margin-top: 4px; }
 .meter-fill { height: 100%; background: linear-gradient(90deg, #00ff88, #e94560); transition: width 0.3s; }
 
+/* ── RDS Panel ── */
+.rds-panel {
+    background: #16213e; border-radius: 10px; padding: 12px 14px; margin-bottom: 10px;
+    border-left: 3px solid #e94560;
+}
+.rds-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 8px; font-size: 0.75em; color: #888; text-transform: uppercase; letter-spacing: 1px;
+}
+.rds-row { display: flex; gap: 16px; margin-bottom: 4px; font-size: 0.85em; }
+.rds-label { color: #888; min-width: 24px; }
+.rds-value { color: #e0e0e0; font-family: 'Courier New', monospace; }
+.rds-ps { font-size: 1.2em; color: #00ff88; font-weight: bold; letter-spacing: 1px; }
+.rds-rt { color: #ccc; font-style: italic; word-break: break-word; max-width: 100%; }
+.rds-stats { display: flex; gap: 12px; align-items: center; font-size: 0.75em; color: #666; margin-top: 6px; }
+
+/* ── Spectrum Canvas ── */
+.spectrum-panel {
+    background: #16213e; border-radius: 10px; padding: 10px; margin-bottom: 10px;
+}
+.spectrum-header {
+    font-size: 0.75em; color: #888; text-transform: uppercase; letter-spacing: 1px;
+    margin-bottom: 6px;
+}
+#specCanvas {
+    width: 100%; height: 140px; border-radius: 6px; display: block;
+    background: #0a0a1a;
+}
+
+/* ── Buttons ── */
 .action-btn {
-    width: 100%; padding: 14px; border-radius: 10px; border: 2px solid #e94560;
-    background: transparent; color: #e94560; font-size: 1.1em; cursor: pointer;
+    width: 100%; padding: 12px; border-radius: 10px; border: 2px solid #e94560;
+    background: transparent; color: #e94560; font-size: 1em; cursor: pointer;
     font-weight: bold; transition: all 0.2s; margin-bottom: 8px;
 }
 .action-btn.active { background: #e94560; color: white; }
@@ -62,20 +108,25 @@ input[type="range"]::-webkit-slider-thumb {
 .action-btn.playing.active { background: #00ff88; color: #1a1a2e; }
 
 select {
-    width: 100%; padding: 10px; background: #0f3460; color: #e0e0e0;
-    border: 1px solid #333; border-radius: 6px; font-size: 0.95em;
+    width: 100%; padding: 8px; background: #0f3460; color: #e0e0e0;
+    border: 1px solid #333; border-radius: 6px; font-size: 0.9em;
 }
 
-.audio-meter { height: 4px; background: #0f3460; border-radius: 2px; margin-top: 8px; }
+.audio-meter { height: 4px; background: #0f3460; border-radius: 2px; margin-top: 6px; }
 .audio-meter-fill { height: 100%; background: #00ff88; border-radius: 2px; width: 0%; transition: width 0.1s; }
+#audioStatus { text-align: center; font-size: 0.72em; color: #555; margin-bottom: 10px; }
 </style>
 </head>
 <body>
 <div class="container">
-    <h1>ESP32-P4 FM Radio (Mono)</h1>
+    <h1>ESP32-P4 FM Radio</h1>
 
+    <!-- Frequency + Stereo Badge -->
     <div class="freq-display">
-        <div><span class="freq-value" id="freqDisplay">100.000</span><span class="freq-unit">MHz</span></div>
+        <div class="freq-row">
+            <div><span class="freq-value" id="freqDisplay">100.000</span><span class="freq-unit"> MHz</span></div>
+            <span class="badge badge-mono" id="stereoBadge">MONO</span>
+        </div>
         <div class="tune-row">
             <button class="tune-btn" onclick="tune(-1000000)">-1M</button>
             <button class="tune-btn" onclick="tune(-100000)">-100k</button>
@@ -86,16 +137,50 @@ select {
         </div>
     </div>
 
+    <!-- Signal Strength -->
     <div class="control-group">
         <div class="control-label">Signal<span id="sigVal">--</span></div>
         <div class="meter"><div class="meter-fill" id="sigMeter" style="width:0%"></div></div>
     </div>
 
+    <!-- RDS Panel -->
+    <div class="rds-panel" id="rdsPanel">
+        <div class="rds-header">
+            <span>RDS</span>
+            <span class="badge-sm badge-off" id="rdsSync">NO SYNC</span>
+        </div>
+        <div class="rds-row">
+            <span class="rds-label">PS</span>
+            <span class="rds-value rds-ps" id="rdsPs">--</span>
+            <span style="flex:1"></span>
+            <span class="rds-label">PI</span>
+            <span class="rds-value" id="rdsPi">--</span>
+        </div>
+        <div class="rds-row">
+            <span class="rds-label">RT</span>
+            <span class="rds-value rds-rt" id="rdsRt"></span>
+        </div>
+        <div class="rds-stats">
+            <span>PTY: <span id="rdsPty">0</span></span>
+            <span>TP: <span id="rdsTp">-</span></span>
+            <span>Groups: <span id="rdsGroups">0</span></span>
+            <span>Errors: <span id="rdsErrors">0</span></span>
+        </div>
+    </div>
+
+    <!-- MPX Spectrum -->
+    <div class="spectrum-panel">
+        <div class="spectrum-header">MPX Spectrum</div>
+        <canvas id="specCanvas" width="500" height="140"></canvas>
+    </div>
+
+    <!-- Volume -->
     <div class="control-group">
         <div class="control-label">Volume<span id="volVal">90</span></div>
         <input type="range" id="volume" min="0" max="100" value="90" oninput="setVolume(this.value)">
     </div>
 
+    <!-- Gain -->
     <div class="control-group">
         <div class="control-label">Gain</div>
         <select id="gain" onchange="setGain(this.value)">
@@ -133,29 +218,28 @@ select {
     <div class="audio-meter" id="audioMeterBox" style="display:none">
         <div class="audio-meter-fill" id="audioMeter"></div>
     </div>
-    <div id="audioStatus" style="text-align:center;font-size:0.75em;color:#666;margin-bottom:12px;"></div>
+    <div id="audioStatus"></div>
 </div>
 
 <script>
 let state = {freq: 100000000, gain: 0, volume: 90, muted: false};
 let ws = null;
 let audioPlaying = false, aCtx = null, wkNode = null;
+let spectrumData = null;
 
+/* ── AudioWorklet PCM Player ── */
 const PROC_CODE = `
 class PCMPlayer extends AudioWorkletProcessor {
   constructor() {
     super();
     this.ringL = new Float32Array(48000);
     this.ringR = new Float32Array(48000);
-    this.wPtr = 0;
-    this.rPtr = 0;
-    this.count = 0;
+    this.wPtr = 0; this.rPtr = 0; this.count = 0;
     this.port.onmessage = (e) => {
       if (e.data.type === 'pcm') {
         const s16 = e.data.samples;
         const n = s16.length;
         const sz = this.ringL.length;
-        // De-interleave stereo [L,R,L,R,...] into separate L/R rings
         for (let i = 0; i < n; i += 2) {
           this.ringL[this.wPtr] = s16[i] / 32768.0;
           this.ringR[this.wPtr] = (i+1 < n) ? s16[i+1] / 32768.0 : s16[i] / 32768.0;
@@ -196,6 +280,7 @@ class PCMPlayer extends AudioWorkletProcessor {
 registerProcessor('pcm-player', PCMPlayer);
 `;
 
+/* ── UI Helpers ── */
 function updateUI() {
     document.getElementById('freqDisplay').textContent = (state.freq / 1e6).toFixed(3);
     document.getElementById('volVal').textContent = state.volume;
@@ -206,7 +291,9 @@ function updateUI() {
 
 async function api(path, body) {
     try {
-        const opts = body !== undefined ? {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)} : {};
+        const opts = body !== undefined
+            ? {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)}
+            : {};
         const r = await fetch('/api/' + path, opts);
         return await r.json();
     } catch(e) { return null; }
@@ -237,7 +324,7 @@ async function toggleMute() {
     await api('volume', {value: state.muted ? 0 : state.volume});
 }
 
-/* WebSocket */
+/* ── WebSocket ── */
 function connectWS() {
     ws = new WebSocket('wss://' + location.host + '/ws');
     ws.binaryType = 'arraybuffer';
@@ -245,13 +332,44 @@ function connectWS() {
         if (typeof e.data === 'string') {
             try {
                 const d = JSON.parse(e.data);
+
+                /* Signal strength */
                 if (d.signal_strength !== undefined) {
                     const pct = Math.min(100, Math.max(0, d.signal_strength * 100 / 32767));
                     document.getElementById('sigMeter').style.width = pct + '%';
                     document.getElementById('sigVal').textContent = pct.toFixed(0) + '%';
                 }
+
+                /* Stereo badge */
+                if (d.stereo !== undefined) {
+                    const b = document.getElementById('stereoBadge');
+                    b.textContent = d.stereo ? 'STEREO' : 'MONO';
+                    b.className = 'badge ' + (d.stereo ? 'badge-stereo' : 'badge-mono');
+                }
+
+                /* RDS */
+                if (d.rds) {
+                    const r = d.rds;
+                    document.getElementById('rdsPs').textContent = r.ps && r.ps.trim() ? r.ps.trim() : '--';
+                    document.getElementById('rdsRt').textContent = r.rt || '';
+                    document.getElementById('rdsPi').textContent = r.pi
+                        ? '0x' + r.pi.toString(16).toUpperCase().padStart(4, '0') : '--';
+                    document.getElementById('rdsPty').textContent = r.pty || '0';
+                    document.getElementById('rdsTp').textContent = r.tp ? 'Yes' : 'No';
+                    document.getElementById('rdsGroups').textContent = r.groups || '0';
+                    document.getElementById('rdsErrors').textContent = r.errors || '0';
+                    const sync = document.getElementById('rdsSync');
+                    sync.textContent = r.synced ? 'SYNC' : 'NO SYNC';
+                    sync.className = 'badge-sm ' + (r.synced ? 'badge-on' : 'badge-off');
+                }
+
+                /* Spectrum */
+                if (d.spectrum) {
+                    spectrumData = new Uint8Array(d.spectrum);
+                }
             } catch(ex) {}
         } else {
+            /* Binary audio data */
             if (wkNode) {
                 const s16 = new Int16Array(e.data);
                 wkNode.port.postMessage({type: 'pcm', samples: s16});
@@ -262,16 +380,14 @@ function connectWS() {
     ws.onerror = () => { try { ws.close(); } catch(e) {} };
 }
 
+/* ── Audio Controls ── */
 async function startAudio() {
     aCtx = new AudioContext({sampleRate: 48000});
     await aCtx.resume();
     const blob = new Blob([PROC_CODE], {type: 'application/javascript'});
     const url = URL.createObjectURL(blob);
-    try {
-        await aCtx.audioWorklet.addModule(url);
-    } finally {
-        URL.revokeObjectURL(url);
-    }
+    try { await aCtx.audioWorklet.addModule(url); }
+    finally { URL.revokeObjectURL(url); }
     wkNode = new AudioWorkletNode(aCtx, 'pcm-player', {outputChannelCount: [2]});
     wkNode.port.onmessage = (e) => {
         const pct = Math.min(100, e.data.pk / 0.8 * 100);
@@ -280,20 +396,53 @@ async function startAudio() {
             'buf: ' + e.data.buf + ' | peak: ' + (e.data.pk * 100).toFixed(0) + '%';
     };
     wkNode.connect(aCtx.destination);
-    if (ws && ws.readyState === 1) {
-        ws.send(JSON.stringify({cmd: 'audio_on'}));
-    }
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({cmd: 'audio_on'}));
     document.getElementById('audioMeterBox').style.display = 'block';
 }
 
 function stopAudio() {
-    if (ws && ws.readyState === 1) {
-        ws.send(JSON.stringify({cmd: 'audio_off'}));
-    }
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({cmd: 'audio_off'}));
     if (wkNode) { wkNode.disconnect(); wkNode = null; }
     if (aCtx) { aCtx.close(); aCtx = null; }
     document.getElementById('audioMeterBox').style.display = 'none';
     document.getElementById('audioStatus').textContent = '';
+}
+
+/* Poll /api/rds during audio (separate TCP, no WS contention) */
+let radioPollId = null;
+async function pollRadio() {
+    try {
+        const r = await fetch('/api/rds');
+        const d = await r.json();
+        /* Signal */
+        if (d.signal_strength !== undefined) {
+            const pct = Math.min(100, Math.max(0, d.signal_strength * 100 / 32767));
+            document.getElementById('sigMeter').style.width = pct + '%';
+            document.getElementById('sigVal').textContent = pct.toFixed(0) + '%';
+        }
+        /* Stereo */
+        if (d.stereo !== undefined) {
+            const b = document.getElementById('stereoBadge');
+            b.textContent = d.stereo ? 'STEREO' : 'MONO';
+            b.className = 'badge ' + (d.stereo ? 'badge-stereo' : 'badge-mono');
+        }
+        /* RDS */
+        if (d.ps !== undefined) {
+            document.getElementById('rdsPs').textContent = d.ps && d.ps.trim() ? d.ps.trim() : '--';
+            document.getElementById('rdsRt').textContent = d.rt || '';
+            document.getElementById('rdsPi').textContent = d.pi
+                ? '0x' + d.pi.toString(16).toUpperCase().padStart(4, '0') : '--';
+            document.getElementById('rdsPty').textContent = d.pty || '0';
+            document.getElementById('rdsTp').textContent = d.tp ? 'Yes' : 'No';
+            document.getElementById('rdsGroups').textContent = d.groups || '0';
+            document.getElementById('rdsErrors').textContent = d.errors || '0';
+            const sync = document.getElementById('rdsSync');
+            sync.textContent = d.synced ? 'SYNC' : 'NO SYNC';
+            sync.className = 'badge-sm ' + (d.synced ? 'badge-on' : 'badge-off');
+        }
+        /* Spectrum */
+        if (d.spectrum) spectrumData = new Uint8Array(d.spectrum);
+    } catch(e) {}
 }
 
 function toggleAudio() {
@@ -303,6 +452,8 @@ function toggleAudio() {
             btn.innerHTML = '&#9724; Stop Audio';
             btn.classList.add('active');
             audioPlaying = true;
+            /* WS metadata paused during audio — poll REST instead */
+            radioPollId = setInterval(pollRadio, 1500);
         }).catch((err) => {
             document.getElementById('audioStatus').textContent = 'Error: ' + err;
         });
@@ -311,13 +462,146 @@ function toggleAudio() {
         btn.innerHTML = '&#9654; Browser Audio';
         btn.classList.remove('active');
         audioPlaying = false;
+        if (radioPollId) { clearInterval(radioPollId); radioPollId = null; }
     }
 }
 
+/* ── MPX Spectrum Rendering ── */
+function drawSpectrum() {
+    const canvas = document.getElementById('specCanvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width;
+    const h = canvas.height;
+    const pad = 18;
+    const topPad = 14;
+    const plotH = h - pad - topPad;
+
+    /* Clear */
+    ctx.fillStyle = '#0a0a1a';
+    ctx.fillRect(0, 0, w, h);
+
+    /* Grid lines at pilot, stereo, RDS frequencies */
+    const markers = [
+        {f: 19, label: 'Pilot', color: '#2a2a4e'},
+        {f: 38, label: 'L\u2212R', color: '#2a2a4e'},
+        {f: 57, label: 'RDS', color: '#2a2a4e'}
+    ];
+    ctx.lineWidth = 1;
+    markers.forEach(m => {
+        const x = Math.round((m.f / 128) * w) + 0.5;
+        ctx.strokeStyle = m.color;
+        ctx.setLineDash([2, 4]);
+        ctx.beginPath();
+        ctx.moveTo(x, topPad);
+        ctx.lineTo(x, topPad + plotH);
+        ctx.stroke();
+        /* Label above */
+        ctx.fillStyle = '#556';
+        ctx.font = '9px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText(m.label, x, 10);
+    });
+    ctx.setLineDash([]);
+
+    /* Frequency axis labels */
+    ctx.fillStyle = '#445';
+    ctx.font = '9px system-ui';
+    ctx.textAlign = 'center';
+    [0, 19, 38, 57, 76, 100, 128].forEach(f => {
+        const x = (f / 128) * w;
+        ctx.fillText(f + 'k', x, h - 3);
+    });
+
+    if (!spectrumData || spectrumData.length === 0) {
+        ctx.fillStyle = '#333';
+        ctx.font = '11px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText('Waiting for spectrum data...', w/2, topPad + plotH/2);
+        requestAnimationFrame(drawSpectrum);
+        return;
+    }
+
+    const n = spectrumData.length;
+    const binW = w / n;
+
+    /* Autoscale: find data range and map display to show dynamic range clearly */
+    let minVal = 255, maxVal = 0;
+    for (let i = 0; i < n; i++) {
+        if (spectrumData[i] < minVal) minVal = spectrumData[i];
+        if (spectrumData[i] > maxVal) maxVal = spectrumData[i];
+    }
+    let range = maxVal - minVal;
+    if (range < 15) range = 15; /* Minimum range to avoid noise amplification */
+    let floor = minVal - range * 0.08;
+    let ceil = maxVal + range * 0.12;
+    if (floor < 0) floor = 0;
+    if (ceil > 255) ceil = 255;
+    const scale = ceil - floor;
+
+    /* dB axis labels (left side) */
+    ctx.fillStyle = '#445';
+    ctx.font = '8px system-ui';
+    ctx.textAlign = 'right';
+    const dbTop = -80 + (ceil / 255) * 80;
+    const dbBot = -80 + (floor / 255) * 80;
+    ctx.fillText(dbTop.toFixed(0)+'dB', 28, topPad + 8);
+    ctx.fillText(dbBot.toFixed(0)+'dB', 28, topPad + plotH - 2);
+
+    /* Filled spectrum area */
+    ctx.beginPath();
+    ctx.moveTo(0, topPad + plotH);
+    for (let i = 0; i < n; i++) {
+        const x = (i + 0.5) * binW;
+        const norm = Math.max(0, Math.min(1, (spectrumData[i] - floor) / scale));
+        const y = topPad + plotH * (1 - norm);
+        ctx.lineTo(x, y);
+    }
+    ctx.lineTo(w, topPad + plotH);
+    ctx.closePath();
+
+    const grad = ctx.createLinearGradient(0, topPad, 0, topPad + plotH);
+    grad.addColorStop(0, 'rgba(233, 69, 96, 0.7)');
+    grad.addColorStop(0.3, 'rgba(0, 255, 136, 0.4)');
+    grad.addColorStop(1, 'rgba(0, 255, 136, 0.02)');
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    /* Stroke line on top */
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+        const x = (i + 0.5) * binW;
+        const norm = Math.max(0, Math.min(1, (spectrumData[i] - floor) / scale));
+        const y = topPad + plotH * (1 - norm);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = '#00ff88';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    /* Highlight pilot peak */
+    if (n > 19) {
+        const pilotNorm = Math.max(0, Math.min(1, (spectrumData[19] - floor) / scale));
+        if (pilotNorm > 0.3) {
+            const px = (19.5) * binW;
+            const py = topPad + plotH * (1 - pilotNorm);
+            ctx.beginPath();
+            ctx.arc(px, py, 3, 0, 2 * Math.PI);
+            ctx.fillStyle = '#e94560';
+            ctx.fill();
+        }
+    }
+
+    requestAnimationFrame(drawSpectrum);
+}
+
+/* ── Initialization ── */
 (async () => {
     const s = await api('status');
     if (s) { Object.assign(state, s); updateUI(); }
     connectWS();
+    requestAnimationFrame(drawSpectrum);
 })();
 </script>
 </body>
