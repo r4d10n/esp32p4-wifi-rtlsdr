@@ -20,7 +20,8 @@
 
 /* ── Configuration ── */
 
-#define FIR_TAPS        15     /* 15 taps: ~50% less CPU than 31. Wider transition but adequate for mono+stereo */
+#define FIR_TAPS        31     /* 31 taps at 128kSPS after 2:1 decim. Transition band = 4kHz — proper 19kHz rejection */
+#define MPX_DECIM       2      /* Decimate MPX by 2 before FIR: 256k→128k. Halves FIR CPU. */
 #define GOERTZEL_N      1024
 #define SIN_LUT_SIZE    1024    /* Must be power of 2 */
 #define SIN_LUT_MASK    (SIN_LUT_SIZE - 1)
@@ -164,8 +165,9 @@ static float fir_process_sample(fir_state_t *f, float in)
 struct fm_demod_simple {
     uint32_t sample_rate;
     uint32_t audio_rate;
+    uint32_t fir_rate;          /* Rate after MPX decimation (sample_rate/MPX_DECIM) */
     float    fm_scale;          /* 1/max_angle for normalization */
-    float    resample_ratio;    /* sample_rate / audio_rate */
+    float    resample_ratio;    /* fir_rate / audio_rate */
     float    resample_phase;
     int      volume;            /* 0-100, applied as float multiply */
 
@@ -246,23 +248,28 @@ fm_demod_simple_t *fm_demod_simple_create(uint32_t sample_rate, uint32_t audio_r
     float max_angle = 2.0f * (float)M_PI * FM_DEVIATION / (float)sample_rate;
     d->fm_scale = 1.0f / max_angle;
 
-    /* De-emphasis */
-    float tau = (float)DEEMPH_TAU_US * 1e-6f;
-    d->deemph_alpha = 1.0f - expf(-1.0f / (tau * (float)sample_rate));
+    /* FIR operates at decimated rate */
+    d->fir_rate = sample_rate / MPX_DECIM;
 
-    /* Design 15kHz LPF for both L+R and L-R paths */
-    design_lpf(d->fir_lpr.taps, FIR_TAPS, 15000.0f, (float)sample_rate);
+    /* De-emphasis at FIR rate (after decimation) */
+    float tau = (float)DEEMPH_TAU_US * 1e-6f;
+    d->deemph_alpha = 1.0f - expf(-1.0f / (tau * (float)d->fir_rate));
+
+    /* Design 15kHz LPF at the DECIMATED rate (128kSPS).
+     * Transition band = 128000/31 ≈ 4.1kHz → stopband starts at 19.1kHz.
+     * This properly rejects the 19kHz pilot (-40dB+). */
+    design_lpf(d->fir_lpr.taps, FIR_TAPS, 15000.0f, (float)d->fir_rate);
     memcpy(d->fir_lmr.taps, d->fir_lpr.taps, sizeof(d->fir_lpr.taps));
 
-    /* Goertzel: 2*cos(2*pi*19000/sample_rate) */
+    /* Goertzel at FULL rate (before decimation) for pilot detection */
     d->goertzel_coeff = 2.0f * cosf(2.0f * (float)M_PI * 19000.0f / (float)sample_rate);
 
     /* PLL: uint32 phase accumulator. 2^32 = one full cycle.
      * freq_inc = 19000 / sample_rate * 2^32 */
     d->pll_freq = (uint32_t)(19000.0 / (double)sample_rate * 4294967296.0);
 
-    /* Resampler */
-    d->resample_ratio = (float)sample_rate / (float)audio_rate;
+    /* Resampler: from FIR rate (128kSPS) to audio rate (48kHz) */
+    d->resample_ratio = (float)d->fir_rate / (float)audio_rate;
     d->resample_phase = 0.0f;
 
     /* Pre-allocate work buffers for max block size (16384 bytes = 8192 IQ pairs) */
@@ -337,9 +344,17 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
         mpx_buf[mpx_count++] = mpx;
     }
 
-    /* Step 2: Per-MPX-sample processing: Goertzel + PLL + L+R/L-R extraction */
+    /* Step 2: Per-MPX-sample: Goertzel + PLL + RDS at full rate (256kSPS).
+     * Then 2:1 decimate → FIR + deemph at 128kSPS.
+     * This saves 50% FIR CPU and gives proper 19kHz stopband rejection. */
+    int fir_count = 0;  /* Output index for decimated FIR rate */
+    static int mpx_decim_phase = 0;
+    static float mpx_decim_acc_lpr = 0, mpx_decim_acc_lmr = 0;
+
     for (int i = 0; i < mpx_count; i++) {
         float mpx = mpx_buf[i];
+
+        /* ── Full-rate section (256kSPS) ── */
 
         /* Goertzel pilot detector */
         float s0 = d->goertzel_coeff * d->goertzel_s1 - d->goertzel_s2 + mpx;
@@ -352,79 +367,82 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
                         + d->goertzel_s2 * d->goertzel_s2
                         - d->goertzel_coeff * d->goertzel_s1 * d->goertzel_s2;
             d->goertzel_power = power;
-            /* Threshold: empirically tuned for 256kSPS FM signal */
-            float thresh = 0.001f;
-            d->pilot_detected = (power > thresh);
+            d->pilot_detected = (power > 0.001f);
             d->goertzel_s1 = 0;
             d->goertzel_s2 = 0;
             d->goertzel_count = 0;
         }
 
-        /* PLL tracking 19kHz pilot */
-        /* PLL: use uint32 phase accumulator for fast LUT access */
+        /* PLL tracking 19kHz pilot (uint32 phase accumulator) */
         float nco_sin = sin_u32(d->pll_phase);
-
-        /* Phase detector: quadrature error */
         float pd_q = mpx * nco_sin;
-
-        /* PI loop filter → phase correction as uint32 increment */
         d->pll_integrator += 0.0001f * pd_q;
         float correction = 0.01f * pd_q + d->pll_integrator;
-        /* Convert float correction (radians) to uint32 phase units.
-         * Precomputed: (1<<30)/PI = 341782637.8 */
         int32_t corr_u32 = (int32_t)(correction * 341782638.0f);
-
         d->pll_phase += d->pll_freq + (uint32_t)corr_u32;
-        /* uint32 wraps naturally — no range check needed */
-
         d->pll_locked = d->pilot_detected;
 
-        /* L+R: MPX → LPF → 19kHz notch → de-emphasis */
-        float lpr_filt = fir_process_sample(&d->fir_lpr, mpx);
-
-        /* 19kHz pilot notch (2nd-order IIR, r=0.95).
-         * H(z) = (1 + b1·z⁻¹ + z⁻²) / (1 + a1·z⁻¹ + a2·z⁻²)
-         * b1 = -2cos(w0) = -1.7865, a1 = -2r·cos(w0) = -1.6971, a2 = r² = 0.9025
-         * Gives -inf dB at 19kHz, <0.6dB effect on 0-15kHz audio */
-        {
-            const float b1 = -1.78645f, a1 = -1.69713f, a2 = 0.90250f;
-            float y = lpr_filt + b1 * d->notch_x1 + d->notch_x2
-                    - a1 * d->notch_y1 - a2 * d->notch_y2;
-            d->notch_x2 = d->notch_x1; d->notch_x1 = lpr_filt;
-            d->notch_y2 = d->notch_y1; d->notch_y1 = y;
-            lpr_filt = y;
-        }
-
-        d->deemph_lpr = d->deemph_alpha * lpr_filt + (1.0f - d->deemph_alpha) * d->deemph_lpr;
-        lpr_buf[i] = d->deemph_lpr;
-
-        /* L-R: only compute when stereo is active (saves ~30% CPU in mono) */
+        /* L-R demod at full rate (need 38kHz ref before decimation) */
+        float lmr_raw = 0;
         if (d->blend_ratio > 0.001f || d->pilot_detected) {
             float ref_38k = sin_u32(d->pll_phase << 1);
-            float lmr_raw = mpx * ref_38k * 2.0f;
-            float lmr_filt = fir_process_sample(&d->fir_lmr, lmr_raw);
-            d->deemph_lmr = d->deemph_alpha * lmr_filt + (1.0f - d->deemph_alpha) * d->deemph_lmr;
-            lmr_buf[i] = d->deemph_lmr;
-        } else {
-            lmr_buf[i] = 0.0f;
+            lmr_raw = mpx * ref_38k * 2.0f;
         }
 
-        /* RDS: mix MPX with 57kHz (3× pilot phase), fractional A&D */
+        /* RDS: 57kHz mixing + fractional A&D */
         if (d->rds) {
             float ref_57k = sin_u32(d->pll_phase * 3);
-            float rds_mixed = mpx * ref_57k;
-            d->rds_acc += rds_mixed;
+            d->rds_acc += mpx * ref_57k;
             d->rds_acc_count++;
             d->rds_phase += d->rds_phase_inc;
             if (d->rds_phase >= 1.0f) {
                 d->rds_phase -= 1.0f;
                 if (rds_count < d->rds_buf_size && d->rds_acc_count > 0) {
-                    /* Normalize by sample count for consistent amplitude */
                     d->rds_buf[rds_count++] = d->rds_acc / (float)d->rds_acc_count;
                 }
                 d->rds_acc = 0;
                 d->rds_acc_count = 0;
             }
+        }
+
+        /* ── 2:1 decimation: accumulate pairs, output at 128kSPS ── */
+        mpx_decim_acc_lpr += mpx;
+        mpx_decim_acc_lmr += lmr_raw;
+        mpx_decim_phase++;
+
+        if (mpx_decim_phase >= MPX_DECIM) {
+            mpx_decim_phase = 0;
+            float dec_lpr = mpx_decim_acc_lpr * (1.0f / MPX_DECIM);
+            float dec_lmr = mpx_decim_acc_lmr * (1.0f / MPX_DECIM);
+            mpx_decim_acc_lpr = 0;
+            mpx_decim_acc_lmr = 0;
+
+            /* ── Decimated-rate section (128kSPS) ── */
+
+            /* L+R: FIR LPF → 19kHz notch → de-emphasis */
+            float lpr_filt = fir_process_sample(&d->fir_lpr, dec_lpr);
+            {
+                /* 19kHz notch at 128kSPS: w0=2π×19000/128000, cos(w0)=0.5957
+                 * b1=-2cos=-1.1914, a1=-2r·cos=-1.1318, a2=r²=0.9025 */
+                const float b1 = -1.19140f, a1 = -1.13183f, a2 = 0.90250f;
+                float y = lpr_filt + b1 * d->notch_x1 + d->notch_x2
+                        - a1 * d->notch_y1 - a2 * d->notch_y2;
+                d->notch_x2 = d->notch_x1; d->notch_x1 = lpr_filt;
+                d->notch_y2 = d->notch_y1; d->notch_y1 = y;
+                lpr_filt = y;
+            }
+            d->deemph_lpr = d->deemph_alpha * lpr_filt + (1.0f - d->deemph_alpha) * d->deemph_lpr;
+            lpr_buf[fir_count] = d->deemph_lpr;
+
+            /* L-R: FIR LPF → de-emphasis */
+            if (d->blend_ratio > 0.001f || d->pilot_detected) {
+                float lmr_filt = fir_process_sample(&d->fir_lmr, dec_lmr);
+                d->deemph_lmr = d->deemph_alpha * lmr_filt + (1.0f - d->deemph_alpha) * d->deemph_lmr;
+                lmr_buf[fir_count] = d->deemph_lmr;
+            } else {
+                lmr_buf[fir_count] = 0.0f;
+            }
+            fir_count++;
         }
     }
 
@@ -453,10 +471,10 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
      * Attack: fast (immediate peak update). Release: slow (0.9995 decay). */
     float agc_target = 0.7f;
 
-    while (d->resample_phase < (float)mpx_count && audio_count < max_pairs) {
+    while (d->resample_phase < (float)fir_count && audio_count < max_pairs) {
         int idx0 = (int)d->resample_phase;
         float frac = d->resample_phase - (float)idx0;
-        int idx1 = (idx0 + 1 < mpx_count) ? idx0 + 1 : idx0;
+        int idx1 = (idx0 + 1 < fir_count) ? idx0 + 1 : idx0;
 
         /* Interpolate L+R and L-R */
         float lpr = lpr_buf[idx0] + frac * (lpr_buf[idx1] - lpr_buf[idx0]);
@@ -504,7 +522,7 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
         d->resample_phase += d->resample_ratio;
     }
 
-    d->resample_phase -= (float)mpx_count;
+    d->resample_phase -= (float)fir_count;
     if (d->resample_phase < 0.0f) d->resample_phase = 0.0f;
 
     /* Update signal strength */
