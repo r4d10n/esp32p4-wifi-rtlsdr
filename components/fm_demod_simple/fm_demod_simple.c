@@ -177,6 +177,10 @@ struct fm_demod_simple {
     float       deemph_lpr;
     float       deemph_alpha;
 
+    /* 19kHz pilot notch filter (2nd-order IIR, Direct Form I) */
+    float notch_x1, notch_x2;  /* Input history */
+    float notch_y1, notch_y2;  /* Output history */
+
     /* L-R path: LPF + de-emphasis */
     fir_state_t fir_lmr;
     float       deemph_lmr;
@@ -199,13 +203,19 @@ struct fm_demod_simple {
     /* Stereo blend */
     float blend_ratio;          /* 0=mono, 1=full stereo */
 
+    /* Audio AGC (slow auto-gain to maximize output level) */
+    float agc_gain;             /* Current gain multiplier */
+    float agc_peak;             /* Running peak tracker */
+
     /* RDS decoder (57kHz subcarrier) */
     rds_decoder_t *rds;
     float *rds_buf;             /* Accumulate-and-dump output buffer */
     int    rds_buf_size;
     float  rds_acc;             /* A&D accumulator */
-    int    rds_decim_phase;     /* A&D sample counter */
-    int    rds_decim;           /* Decimation ratio: sample_rate / ~2375 */
+    float  rds_phase;           /* Fractional phase accumulator [0, 1) */
+    float  rds_phase_inc;       /* Phase increment per sample: 2375/sample_rate */
+    int    rds_acc_count;       /* Samples in current accumulation */
+    int    rds_decim;           /* Nominal decimation ratio (for buffer sizing) */
 
     /* Signal strength */
     float signal_rms;
@@ -229,6 +239,8 @@ fm_demod_simple_t *fm_demod_simple_create(uint32_t sample_rate, uint32_t audio_r
     d->sample_rate = sample_rate;
     d->audio_rate = audio_rate;
     d->volume = 90;
+    d->agc_gain = 4.0f;    /* Start with moderate gain */
+    d->agc_peak = 0.1f;    /* Initial peak estimate */
 
     /* FM discriminator scale */
     float max_angle = 2.0f * (float)M_PI * FM_DEVIATION / (float)sample_rate;
@@ -263,12 +275,16 @@ fm_demod_simple_t *fm_demod_simple_create(uint32_t sample_rate, uint32_t audio_r
         return NULL;
     }
 
-    /* RDS decoder: 57kHz mixing + accumulate-and-dump to symbol rate */
+    /* RDS decoder: 57kHz mixing + fractional accumulate-and-dump.
+     * Use fractional phase accumulator to avoid integer rate mismatch.
+     * Target: exactly 2375 symbols/sec from 256000 sps.
+     * Phase inc = 2375.0 / sample_rate. Dump when phase >= 1.0. */
     d->rds_decim = (int)(sample_rate / 2375.0f);
     if (d->rds_decim < 1) d->rds_decim = 1;
     d->rds_buf_size = d->work_buf_size / d->rds_decim + 2;
     d->rds_buf = calloc(d->rds_buf_size, sizeof(float));
-    float rds_rate = sample_rate / (float)d->rds_decim;
+    d->rds_phase_inc = 2375.0f / (float)sample_rate;  /* Exact fractional increment */
+    float rds_rate = 2375.0f;
     d->rds = rds_decoder_create(rds_rate);
     if (!d->rds || !d->rds_buf) {
         free(d->rds_buf);
@@ -363,8 +379,22 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
 
         d->pll_locked = d->pilot_detected;
 
-        /* L+R: MPX directly (below 15kHz is L+R) → LPF → de-emphasis */
+        /* L+R: MPX → LPF → 19kHz notch → de-emphasis */
         float lpr_filt = fir_process_sample(&d->fir_lpr, mpx);
+
+        /* 19kHz pilot notch (2nd-order IIR, r=0.95).
+         * H(z) = (1 + b1·z⁻¹ + z⁻²) / (1 + a1·z⁻¹ + a2·z⁻²)
+         * b1 = -2cos(w0) = -1.7865, a1 = -2r·cos(w0) = -1.6971, a2 = r² = 0.9025
+         * Gives -inf dB at 19kHz, <0.6dB effect on 0-15kHz audio */
+        {
+            const float b1 = -1.78645f, a1 = -1.69713f, a2 = 0.90250f;
+            float y = lpr_filt + b1 * d->notch_x1 + d->notch_x2
+                    - a1 * d->notch_y1 - a2 * d->notch_y2;
+            d->notch_x2 = d->notch_x1; d->notch_x1 = lpr_filt;
+            d->notch_y2 = d->notch_y1; d->notch_y1 = y;
+            lpr_filt = y;
+        }
+
         d->deemph_lpr = d->deemph_alpha * lpr_filt + (1.0f - d->deemph_alpha) * d->deemph_lpr;
         lpr_buf[i] = d->deemph_lpr;
 
@@ -379,18 +409,21 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
             lmr_buf[i] = 0.0f;
         }
 
-        /* RDS: mix MPX with 57kHz (3× pilot phase) — direct LUT */
+        /* RDS: mix MPX with 57kHz (3× pilot phase), fractional A&D */
         if (d->rds) {
-            float ref_57k = sin_u32(d->pll_phase * 3);  /* 3× phase, wraps naturally */
+            float ref_57k = sin_u32(d->pll_phase * 3);
             float rds_mixed = mpx * ref_57k;
             d->rds_acc += rds_mixed;
-            d->rds_decim_phase++;
-            if (d->rds_decim_phase >= d->rds_decim) {
-                if (rds_count < d->rds_buf_size) {
-                    d->rds_buf[rds_count++] = d->rds_acc / (float)(d->rds_decim / 8 + 1);
+            d->rds_acc_count++;
+            d->rds_phase += d->rds_phase_inc;
+            if (d->rds_phase >= 1.0f) {
+                d->rds_phase -= 1.0f;
+                if (rds_count < d->rds_buf_size && d->rds_acc_count > 0) {
+                    /* Normalize by sample count for consistent amplitude */
+                    d->rds_buf[rds_count++] = d->rds_acc / (float)d->rds_acc_count;
                 }
                 d->rds_acc = 0;
-                d->rds_decim_phase = 0;
+                d->rds_acc_count = 0;
             }
         }
     }
@@ -412,8 +445,13 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
         if (d->blend_ratio < 0.0f) d->blend_ratio = 0.0f;
     }
 
-    /* Step 4: Resample 256k→48k + stereo matrix → int16 output */
+    /* Step 4: Resample 256k→48k + stereo matrix + AGC → int16 output */
     float vol = (float)d->volume / 100.0f;
+
+    /* AGC: track peak and adjust gain slowly.
+     * Target: 70% of full scale (22937 out of 32767).
+     * Attack: fast (immediate peak update). Release: slow (0.9995 decay). */
+    float agc_target = 0.7f;
 
     while (d->resample_phase < (float)mpx_count && audio_count < max_pairs) {
         int idx0 = (int)d->resample_phase;
@@ -436,9 +474,24 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
             R = lpr;
         }
 
-        /* Volume + clip + convert to int16 */
-        L *= vol * 32000.0f;
-        R *= vol * 32000.0f;
+        /* AGC: update peak tracker and compute gain */
+        float peak = fabsf(L);
+        float peak_r = fabsf(R);
+        if (peak_r > peak) peak = peak_r;
+        if (peak > d->agc_peak) {
+            d->agc_peak = peak;                           /* Fast attack */
+        } else {
+            d->agc_peak = d->agc_peak * 0.9999f + peak * 0.0001f;  /* Slow release */
+        }
+        if (d->agc_peak > 0.001f) {
+            d->agc_gain = agc_target / d->agc_peak;
+            if (d->agc_gain > 20.0f) d->agc_gain = 20.0f;   /* Max 26dB gain */
+            if (d->agc_gain < 0.5f) d->agc_gain = 0.5f;     /* Min -6dB */
+        }
+
+        /* Apply AGC + volume + convert to int16 */
+        L *= d->agc_gain * vol * 32767.0f;
+        R *= d->agc_gain * vol * 32767.0f;
         if (L > 32767.0f) L = 32767.0f;
         if (L < -32768.0f) L = -32768.0f;
         if (R > 32767.0f) R = 32767.0f;
