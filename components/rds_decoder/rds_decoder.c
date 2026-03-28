@@ -38,8 +38,8 @@ static const char *TAG = "rds";
 #define MF_LEN              (MF_HALF * 2)  /* 8 samples total */
 
 /* Clock recovery PLL parameters */
-#define CR_BN               12.0f       /* Loop bandwidth Hz */
-#define CR_ZETA             0.707f      /* Damping factor */
+#define CR_BN               5.0f        /* Loop bandwidth Hz (narrower for stable lock) */
+#define CR_ZETA             1.0f        /* Critically damped (no overshoot) */
 
 /* ── CRC-10 ── */
 

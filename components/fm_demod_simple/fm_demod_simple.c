@@ -288,10 +288,12 @@ fm_demod_simple_t *fm_demod_simple_create(uint32_t sample_rate, uint32_t audio_r
      * Phase inc = 2375.0 / sample_rate. Dump when phase >= 1.0. */
     d->rds_decim = (int)(sample_rate / 2375.0f);
     if (d->rds_decim < 1) d->rds_decim = 1;
-    d->rds_buf_size = d->work_buf_size / d->rds_decim + 2;
+    d->rds_buf_size = d->work_buf_size / (d->rds_decim > 4 ? d->rds_decim / 4 : 1) + 2;
     d->rds_buf = calloc(d->rds_buf_size, sizeof(float));
-    d->rds_phase_inc = 2375.0f / (float)sample_rate;  /* Exact fractional increment */
-    float rds_rate = 2375.0f;
+    /* RDS decoder needs 4 samples/half-symbol for matched filter (MF_HALF=4).
+     * Symbol rate = 2375, so need 2375*4 = 9500 sps input to decoder. */
+    d->rds_phase_inc = 9500.0f / (float)sample_rate;
+    float rds_rate = 9500.0f;
     d->rds = rds_decoder_create(rds_rate);
     if (!d->rds || !d->rds_buf) {
         free(d->rds_buf);
@@ -497,9 +499,9 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
         float peak_r = fabsf(R);
         if (peak_r > peak) peak = peak_r;
         if (peak > d->agc_peak) {
-            d->agc_peak = peak;                           /* Fast attack */
+            d->agc_peak = d->agc_peak * 0.99f + peak * 0.01f;       /* 21ms attack (smooth) */
         } else {
-            d->agc_peak = d->agc_peak * 0.9999f + peak * 0.0001f;  /* Slow release */
+            d->agc_peak = d->agc_peak * 0.99995f + peak * 0.00005f;  /* 417ms release */
         }
         if (d->agc_peak > 0.001f) {
             d->agc_gain = agc_target / d->agc_peak;
