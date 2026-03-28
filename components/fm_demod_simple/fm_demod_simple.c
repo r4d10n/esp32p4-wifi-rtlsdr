@@ -179,9 +179,9 @@ struct fm_demod_simple {
     float       deemph_lpr;
     float       deemph_alpha;
 
-    /* 19kHz pilot notch filter (2nd-order IIR, Direct Form I) */
-    float notch_x1, notch_x2;  /* Input history */
-    float notch_y1, notch_y2;  /* Output history */
+    /* Cascaded 19kHz pilot notch filters (2× 2nd-order IIR for -80dB+ rejection) */
+    float notch_x1, notch_x2, notch_y1, notch_y2;     /* Stage 1 */
+    float notch2_x1, notch2_x2, notch2_y1, notch2_y2;  /* Stage 2 */
 
     /* L-R path: LPF + de-emphasis */
     fir_state_t fir_lmr;
@@ -421,17 +421,22 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
 
             /* ── Decimated-rate section (128kSPS) ── */
 
-            /* L+R: FIR LPF → 19kHz notch → de-emphasis */
+            /* L+R: FIR LPF → cascaded 19kHz notch (2 stages) → de-emphasis */
             float lpr_filt = fir_process_sample(&d->fir_lpr, dec_lpr);
             {
-                /* 19kHz notch at 128kSPS: w0=2π×19000/128000, cos(w0)=0.5957
-                 * b1=-2cos=-1.1914, a1=-2r·cos=-1.1318, a2=r²=0.9025 */
+                /* 19kHz notch at 128kSPS: b1=-2cos(w0), a1=-2r·cos(w0), a2=r²
+                 * Stage 1: r=0.95 (narrow notch) */
                 const float b1 = -1.19140f, a1 = -1.13183f, a2 = 0.90250f;
                 float y = lpr_filt + b1 * d->notch_x1 + d->notch_x2
                         - a1 * d->notch_y1 - a2 * d->notch_y2;
                 d->notch_x2 = d->notch_x1; d->notch_x1 = lpr_filt;
                 d->notch_y2 = d->notch_y1; d->notch_y1 = y;
-                lpr_filt = y;
+                /* Stage 2: same coefficients, cascaded for -80dB+ total rejection */
+                float y2 = y + b1 * d->notch2_x1 + d->notch2_x2
+                         - a1 * d->notch2_y1 - a2 * d->notch2_y2;
+                d->notch2_x2 = d->notch2_x1; d->notch2_x1 = y;
+                d->notch2_y2 = d->notch2_y1; d->notch2_y1 = y2;
+                lpr_filt = y2;
             }
             d->deemph_lpr = d->deemph_alpha * lpr_filt + (1.0f - d->deemph_alpha) * d->deemph_lpr;
             lpr_buf[fir_count] = d->deemph_lpr;
@@ -499,13 +504,13 @@ int fm_demod_simple_process(fm_demod_simple_t *d, const uint8_t *iq_u8, int iq_b
         float peak_r = fabsf(R);
         if (peak_r > peak) peak = peak_r;
         if (peak > d->agc_peak) {
-            d->agc_peak = d->agc_peak * 0.99f + peak * 0.01f;       /* 21ms attack (smooth) */
+            d->agc_peak = d->agc_peak * 0.999f + peak * 0.001f;      /* ~100ms attack (no pumping) */
         } else {
-            d->agc_peak = d->agc_peak * 0.99995f + peak * 0.00005f;  /* 417ms release */
+            d->agc_peak = d->agc_peak * 0.99999f + peak * 0.00001f;  /* ~2s release (smooth) */
         }
         if (d->agc_peak > 0.001f) {
             d->agc_gain = agc_target / d->agc_peak;
-            if (d->agc_gain > 20.0f) d->agc_gain = 20.0f;   /* Max 26dB gain */
+            if (d->agc_gain > 10.0f) d->agc_gain = 10.0f;   /* Max 20dB gain (was 26) */
             if (d->agc_gain < 0.5f) d->agc_gain = 0.5f;     /* Min -6dB */
         }
 
