@@ -18,14 +18,15 @@
 #include "esp_timer.h"
 #include "cJSON.h"
 #include "gsm_kalibrate.h"
-#include "lte_pss.h"
+#include "lte_sync.h"
 
 static const char *TAG = "kal";
 
 /* ──────────────────────── Constants ──────────────────────── */
 
 #define GSM_SAMPLE_RATE     1024000     /* 1.024 MSPS for GSM */
-#define LTE_SAMPLE_RATE     2048000     /* 2.048 MSPS for LTE */
+/* LTE sample rate now defined in lte_sync.h as LTE_SAMPLE_RATE_HZ (1920000) */
+#define LTE_SAMPLE_RATE     LTE_SAMPLE_RATE_HZ
 #define FFT_SIZE            1024
 #define FCCH_FREQ_HZ        67708.3f    /* GSM FCCH tone = (1625000/6)/4 Hz */
 #define CAPTURE_BUF_SIZE    (LTE_SAMPLE_RATE * 2 / 5)  /* 200ms at max rate = 819200 bytes */
@@ -107,8 +108,8 @@ static struct {
     float          *goertzel_re;
     float          *goertzel_im;
 
-    /* LTE PSS templates (generated once at init) */
-    lte_pss_templates_t pss_templates;
+    /* LTE sync engine (PSS+SSS, initialized once) */
+    lte_sync_t *lte_ctx;
 
     /* HTTP server (created internally if none provided) */
     httpd_handle_t  httpd;
@@ -711,20 +712,13 @@ static void scan_task(void *arg)
     float ppm_sum = 0, ppm_sum2 = 0;
 
     if (is_lte) {
-        /* ── LTE: PSS cross-correlation per candidate ── */
-        ESP_LOGI(TAG, "── Stage 2: LTE PSS correlation (%d candidates) ──", cand_count);
+        /* ── LTE: FFT-domain PSS/SSS cell detection per candidate ── */
+        ESP_LOGI(TAG, "── Stage 2: LTE PSS/SSS detection (%d candidates) ──", cand_count);
 
-        /* Float IQ buffers for PSS correlation */
-        int float_buf_size = s_kal.capture_pos / 2;  /* max samples per capture */
-        if (float_buf_size < 1) float_buf_size = CAPTURE_BUF_SIZE / 2;
-        float *fiq_re = heap_caps_malloc(float_buf_size * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        float *fiq_im = heap_caps_malloc(float_buf_size * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-
-        if (!fiq_re || !fiq_im) {
-            ESP_LOGE(TAG, "Failed to allocate LTE float IQ buffers");
-            free(fiq_re); free(fiq_im);
+        if (!s_kal.lte_ctx) {
+            ESP_LOGE(TAG, "LTE sync engine not initialized");
             res->state = KAL_STATE_ERROR;
-            snprintf(res->status_msg, sizeof(res->status_msg), "Out of memory (LTE)");
+            snprintf(res->status_msg, sizeof(res->status_msg), "LTE sync not init");
             goto cleanup;
         }
 
@@ -739,69 +733,92 @@ static void scan_task(void *arg)
             esp_err_t ret = capture_iq(cfg->dwell_ms + 500);
             if (ret != ESP_OK) continue;
 
-            /* Convert uint8 IQ to float */
-            int num_samples = s_kal.capture_pos / 2;
-            for (int i = 0; i < num_samples; i++) {
-                fiq_re[i] = ((float)s_kal.capture_buf[2 * i] - 127.5f) / 127.5f;
-                fiq_im[i] = ((float)s_kal.capture_buf[2 * i + 1] - 127.5f) / 127.5f;
-            }
-
-            /* PSS frequency error estimation */
-            float freq_err = lte_pss_freq_error(fiq_re, fiq_im, num_samples,
-                                                 &s_kal.pss_templates,
-                                                 (float)sample_rate);
-
-            /* Get the best peak for N_ID_2 and confidence (reuse coarse from freq_error) */
-            lte_pss_peak_t peak;
-            lte_pss_correlate(fiq_re, fiq_im, num_samples,
-                              &s_kal.pss_templates, 16, &peak);
+            /* Run FFT-domain PSS+SSS cell search */
+            lte_cell_t cells[2];
+            int n_cells = lte_sync_detect(s_kal.lte_ctx,
+                                          s_kal.capture_buf, s_kal.capture_pos,
+                                          cand->freq_hz, cells, 2);
 
             /* Yield to prevent WDT on long scans */
             vTaskDelay(1);
 
-            /* Store result */
-            if (res->channel_count < KAL_MAX_CHANNELS) {
+            if (n_cells == 0) {
+                /* No cell found — still record the candidate */
+                if (res->channel_count < KAL_MAX_CHANNELS) {
+                    kal_channel_t *ch = &res->channels[res->channel_count];
+                    ch->arfcn = 0;
+                    ch->freq_hz = cand->freq_hz;
+                    ch->power_dbfs = cand->power_dbfs;
+                    ch->n_id_2 = 0;
+                    ch->pci = 0xFFFF;
+                    ch->confidence = 0;
+                    ch->fcch_detected = false;
+                    ch->burst_count = 0;
+                    ch->freq_error_hz = 0;
+                    ch->ppm = 0;
+
+                    ESP_LOGI(TAG, "  %lu.%01lu MHz  PSS: no   power: %.1f dBFS",
+                             (unsigned long)(ch->freq_hz / 1000000),
+                             (unsigned long)((ch->freq_hz % 1000000) / 100000),
+                             ch->power_dbfs);
+
+                    res->channel_count++;
+                }
+                continue;
+            }
+
+            /* Store detected cells */
+            for (int ci = 0; ci < n_cells && res->channel_count < KAL_MAX_CHANNELS; ci++) {
+                lte_cell_t *cell = &cells[ci];
                 kal_channel_t *ch = &res->channels[res->channel_count];
                 ch->arfcn = 0;
                 ch->freq_hz = cand->freq_hz;
                 ch->power_dbfs = cand->power_dbfs;
-                ch->n_id_2 = peak.n_id_2;
-                ch->confidence = peak.magnitude;
+                ch->n_id_2 = cell->n_id_2;
+                ch->pci = cell->pci;
+                ch->confidence = cell->pss_power;
 
-                bool pss_found = (freq_err != 0.0f && peak.magnitude > 1.0f);
+                bool pss_found = (cell->pss_power > 1.0f);
                 ch->fcch_detected = pss_found;
                 ch->burst_count = pss_found ? 1 : 0;
 
                 if (pss_found) {
-                    ch->freq_error_hz = freq_err;
-                    ch->ppm = freq_err / (float)cand->freq_hz * 1e6f;
+                    ch->freq_error_hz = cell->freq_error_hz;
+                    ch->ppm = cell->ppm;
 
                     ppm_sum += ch->ppm;
                     ppm_sum2 += ch->ppm * ch->ppm;
                     res->fcch_count++;
 
-                    ESP_LOGI(TAG, "  %lu.%01lu MHz  PSS: YES  N_ID_2=%d  "
-                             "freq_err: %+.1f Hz  ppm: %+.2f  mag: %.0f",
-                             (unsigned long)(ch->freq_hz / 1000000),
-                             (unsigned long)((ch->freq_hz % 1000000) / 100000),
-                             ch->n_id_2, ch->freq_error_hz, ch->ppm,
-                             peak.magnitude);
+                    if (cell->sss_valid) {
+                        ESP_LOGI(TAG, "  %lu.%01lu MHz  PCI=%u (N_ID_1=%u N_ID_2=%u)  "
+                                 "freq_err: %+.1f Hz  ppm: %+.2f  mag: %.0f  sf=%d",
+                                 (unsigned long)(ch->freq_hz / 1000000),
+                                 (unsigned long)((ch->freq_hz % 1000000) / 100000),
+                                 cell->pci, cell->n_id_1, cell->n_id_2,
+                                 ch->freq_error_hz, ch->ppm,
+                                 cell->pss_power, cell->subframe);
+                    } else {
+                        ESP_LOGI(TAG, "  %lu.%01lu MHz  PSS: YES  N_ID_2=%d  "
+                                 "freq_err: %+.1f Hz  ppm: %+.2f  mag: %.0f  (no SSS)",
+                                 (unsigned long)(ch->freq_hz / 1000000),
+                                 (unsigned long)((ch->freq_hz % 1000000) / 100000),
+                                 ch->n_id_2, ch->freq_error_hz, ch->ppm,
+                                 cell->pss_power);
+                    }
                 } else {
                     ch->freq_error_hz = 0;
                     ch->ppm = 0;
 
-                    ESP_LOGI(TAG, "  %lu.%01lu MHz  PSS: no   power: %.1f dBFS  mag: %.0f",
+                    ESP_LOGI(TAG, "  %lu.%01lu MHz  PSS: weak  power: %.1f dBFS  mag: %.0f",
                              (unsigned long)(ch->freq_hz / 1000000),
                              (unsigned long)((ch->freq_hz % 1000000) / 100000),
-                             ch->power_dbfs, peak.magnitude);
+                             ch->power_dbfs, cell->pss_power);
                 }
 
                 res->channel_count++;
             }
         }
-
-        free(fiq_re);
-        free(fiq_im);
 
     } else {
         /* ── GSM: FCCH validation on candidates ── */
@@ -983,8 +1000,11 @@ esp_err_t kal_init(const kal_config_t *config)
         ESP_LOGW(TAG, "HTTP server start failed: %s (API unavailable)", esp_err_to_name(ret));
     }
 
-    /* Generate LTE PSS templates */
-    lte_pss_generate(&s_kal.pss_templates);
+    /* Initialize LTE sync engine (PSS+SSS, FFT tables) */
+    s_kal.lte_ctx = lte_sync_init();
+    if (!s_kal.lte_ctx) {
+        ESP_LOGW(TAG, "LTE sync init failed — LTE bands will not work");
+    }
 
     s_kal.result.state = KAL_STATE_IDLE;
     s_kal.initialized = true;
@@ -1061,6 +1081,9 @@ static esp_err_t http_get_results(httpd_req_t *req)
         cJSON_AddNumberToObject(jch, "freq_mhz", (double)ch->freq_hz / 1e6);
         cJSON_AddNumberToObject(jch, "power_dbfs", ch->power_dbfs);
         cJSON_AddBoolToObject(jch, "fcch", ch->fcch_detected);
+        if (ch->pci != 0 && ch->pci != 0xFFFF) {
+            cJSON_AddNumberToObject(jch, "pci", ch->pci);
+        }
         if (ch->fcch_detected) {
             cJSON_AddNumberToObject(jch, "freq_error_hz", ch->freq_error_hz);
             cJSON_AddNumberToObject(jch, "ppm", ch->ppm);

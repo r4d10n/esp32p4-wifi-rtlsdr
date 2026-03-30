@@ -60,6 +60,7 @@ typedef struct {
     float    ppm;               /* PPM offset for this channel */
     int      burst_count;       /* Number of FCCH bursts measured */
     uint8_t  n_id_2;           /* LTE: PSS root index (0-2), GSM: unused */
+    uint16_t pci;              /* LTE: Physical Cell ID (0-503), GSM: unused */
     float    confidence;        /* LTE: correlation confidence 0-1, GSM: unused */
 } kal_channel_t;
 
