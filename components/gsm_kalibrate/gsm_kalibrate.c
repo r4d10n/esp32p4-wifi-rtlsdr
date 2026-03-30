@@ -18,15 +18,17 @@
 #include "esp_timer.h"
 #include "cJSON.h"
 #include "gsm_kalibrate.h"
+#include "lte_pss.h"
 
 static const char *TAG = "kal";
 
 /* ──────────────────────── Constants ──────────────────────── */
 
-#define SAMPLE_RATE         1024000     /* 1.024 MSPS */
+#define GSM_SAMPLE_RATE     1024000     /* 1.024 MSPS for GSM */
+#define LTE_SAMPLE_RATE     2048000     /* 2.048 MSPS for LTE */
 #define FFT_SIZE            1024
 #define FCCH_FREQ_HZ        67708.3f    /* GSM FCCH tone = (1625000/6)/4 Hz */
-#define CAPTURE_BUF_SIZE    (SAMPLE_RATE * 2 / 5)  /* 200ms of IQ = 409600 bytes */
+#define CAPTURE_BUF_SIZE    (LTE_SAMPLE_RATE * 2 / 5)  /* 200ms at max rate = 819200 bytes */
 #define SCAN_TASK_STACK     16384
 #define SCAN_TASK_PRIO      5
 #define SETTLE_MS           80          /* Tuner settle time after retune */
@@ -60,6 +62,31 @@ static const kal_band_info_t bands[KAL_BAND_COUNT] = {
         .arfcn_start = 512, .arfcn_end = 810,
         .dl_freq_start = 1930200000, .dl_freq_end = 1989800000,
     },
+    [KAL_BAND_LTE_B1] = {
+        .name = "LTE-B1",
+        .arfcn_start = 0, .arfcn_end = 0,  /* EARFCN handled separately */
+        .dl_freq_start = 2110000000, .dl_freq_end = 2170000000,
+    },
+    [KAL_BAND_LTE_B3] = {
+        .name = "LTE-B3",
+        .arfcn_start = 0, .arfcn_end = 0,
+        .dl_freq_start = 1805000000, .dl_freq_end = 1880000000,
+    },
+    [KAL_BAND_LTE_B7] = {
+        .name = "LTE-B7",
+        .arfcn_start = 0, .arfcn_end = 0,
+        .dl_freq_start = 2620000000, .dl_freq_end = 2690000000,
+    },
+    [KAL_BAND_LTE_B20] = {
+        .name = "LTE-B20",
+        .arfcn_start = 0, .arfcn_end = 0,
+        .dl_freq_start = 791000000, .dl_freq_end = 821000000,
+    },
+    [KAL_BAND_LTE_B28] = {
+        .name = "LTE-B28",
+        .arfcn_start = 0, .arfcn_end = 0,
+        .dl_freq_start = 758000000, .dl_freq_end = 803000000,
+    },
 };
 
 /* ──────────────────────── Module State ──────────────────────── */
@@ -79,6 +106,9 @@ static struct {
     /* Pre-allocated Goertzel work buffers (avoid per-step malloc) */
     float          *goertzel_re;
     float          *goertzel_im;
+
+    /* LTE PSS templates (generated once at init) */
+    lte_pss_templates_t pss_templates;
 
     /* HTTP server (created internally if none provided) */
     httpd_handle_t  httpd;
@@ -164,7 +194,33 @@ uint16_t kal_freq_to_arfcn(uint32_t freq_hz, kal_band_t band)
 int kal_band_channel_count(kal_band_t band)
 {
     if (band >= KAL_BAND_COUNT) return 0;
+    if (kal_band_is_lte(band)) {
+        /* LTE: number of 1 MHz steps across the band */
+        const kal_band_info_t *bi = &bands[band];
+        return (int)((bi->dl_freq_end - bi->dl_freq_start) / 1000000);
+    }
     return bands[band].arfcn_end - bands[band].arfcn_start + 1;
+}
+
+bool kal_band_is_lte(kal_band_t band)
+{
+    return band >= KAL_BAND_LTE_B1 && band < KAL_BAND_COUNT;
+}
+
+uint32_t kal_earfcn_to_freq(uint32_t earfcn)
+{
+    /* 3GPP TS 36.101 Table 5.7.3-1: F_DL = F_DL_low + 0.1 * (N_DL - N_offs_DL) */
+    if (earfcn <= 599)                        /* Band 1 */
+        return 2110000000u + earfcn * 100000u;
+    if (earfcn >= 1200 && earfcn <= 1949)     /* Band 3 */
+        return 1805000000u + (earfcn - 1200) * 100000u;
+    if (earfcn >= 2750 && earfcn <= 3449)     /* Band 7 */
+        return 2620000000u + (earfcn - 2750) * 100000u;
+    if (earfcn >= 6150 && earfcn <= 6449)     /* Band 20 */
+        return 791000000u + (earfcn - 6150) * 100000u;
+    if (earfcn >= 9210 && earfcn <= 9659)     /* Band 28 */
+        return 758000000u + (earfcn - 9210) * 100000u;
+    return 0;
 }
 
 /* ──────────────────────── IQ Capture ──────────────────────── */
@@ -283,7 +339,7 @@ static void power_scan_step(const uint8_t *iq_buf, uint32_t iq_len,
     float min_power = 999.0f;
     for (int ch = 0; ch < NUM_SUBCHANS; ch++) {
         float f_offset = (float)subchan_offsets[ch];
-        float bin_frac = f_offset / (float)SAMPLE_RATE * (float)n;
+        float bin_frac = f_offset / (float)GSM_SAMPLE_RATE * (float)n;
         if (bin_frac < 0) bin_frac += (float)n;
 
         /* Average Goertzel over 3 adjacent bins for robustness */
@@ -319,7 +375,7 @@ static int ddc_extract(const uint8_t *iq_in, uint32_t in_samples,
                        float *out_re, float *out_im, int max_out)
 {
     float phase = 0;
-    float phase_inc = TWO_PI * (float)offset_hz / (float)SAMPLE_RATE;
+    float phase_inc = TWO_PI * (float)offset_hz / (float)GSM_SAMPLE_RATE;
     int decim = 5;
     float acc_re = 0, acc_im = 0;
     int acc_cnt = 0;
@@ -493,7 +549,9 @@ static void scan_task(void *arg)
     ESP_LOGI(TAG, "╚══════════════════════════════════════════════╝");
 
     /* Configure RTL-SDR for scanning */
-    rtlsdr_set_sample_rate(cfg->dev, SAMPLE_RATE);
+    bool is_lte = kal_band_is_lte(res->band);
+    uint32_t sample_rate = is_lte ? LTE_SAMPLE_RATE : GSM_SAMPLE_RATE;
+    rtlsdr_set_sample_rate(cfg->dev, sample_rate);
     if (cfg->gain == 0) {
         rtlsdr_set_tuner_gain_mode(cfg->dev, 0);  /* AGC */
     } else {
@@ -631,104 +689,190 @@ static void scan_task(void *arg)
         }
     }
 
-    /* ── Stage 2: FCCH validation on candidates ── */
-    ESP_LOGI(TAG, "── Stage 2: FCCH validation (%d candidates) ──", cand_count);
-
-    /* Narrowband output buffer: 200ms at 204.8 kSPS = 40960 samples */
-    int nb_buf_size = SAMPLE_RATE / 5;  /* 204800 samples */
-    float *nb_re = malloc(nb_buf_size * sizeof(float));
-    float *nb_im = malloc(nb_buf_size * sizeof(float));
-
-    if (!nb_re || !nb_im) {
-        ESP_LOGE(TAG, "Failed to allocate narrowband buffers");
-        free(nb_re); free(nb_im);
-        res->state = KAL_STATE_ERROR;
-        snprintf(res->status_msg, sizeof(res->status_msg), "Out of memory");
-        goto cleanup;
-    }
-
+    /* ── Stage 2: Signal validation (FCCH for GSM, PSS for LTE) ── */
     float ppm_sum = 0, ppm_sum2 = 0;
 
-    for (int c = 0; c < cand_count && !s_kal.scan_abort; c++) {
-        candidate_t *cand = &candidates[c];
+    if (is_lte) {
+        /* ── LTE: PSS cross-correlation per candidate ── */
+        ESP_LOGI(TAG, "── Stage 2: LTE PSS correlation (%d candidates) ──", cand_count);
 
-        /* Retune to the step that contained this channel */
-        rtlsdr_set_center_freq(cfg->dev, cand->step_center);
-        vTaskDelay(pdMS_TO_TICKS(SETTLE_MS));
+        /* Float IQ buffers for PSS correlation */
+        int float_buf_size = s_kal.capture_pos / 2;  /* max samples per capture */
+        if (float_buf_size < 1) float_buf_size = CAPTURE_BUF_SIZE / 2;
+        float *fiq_re = heap_caps_malloc(float_buf_size * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        float *fiq_im = heap_caps_malloc(float_buf_size * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
-        /* Capture fresh IQ data for FCCH detection */
-        int fcch_total_bursts = 0;
-        float fcch_freq_sum = 0;
+        if (!fiq_re || !fiq_im) {
+            ESP_LOGE(TAG, "Failed to allocate LTE float IQ buffers");
+            free(fiq_re); free(fiq_im);
+            res->state = KAL_STATE_ERROR;
+            snprintf(res->status_msg, sizeof(res->status_msg), "Out of memory (LTE)");
+            goto cleanup;
+        }
 
-        /* Capture multiple dwells for burst averaging */
-        int dwells = (cfg->fcch_bursts + 3) / 4;  /* ~4 bursts per 200ms dwell */
-        if (dwells < 1) dwells = 1;
-        if (dwells > 4) dwells = 4;
+        for (int c = 0; c < cand_count && !s_kal.scan_abort; c++) {
+            candidate_t *cand = &candidates[c];
 
-        for (int d = 0; d < dwells && !s_kal.scan_abort; d++) {
+            /* Tune to candidate frequency directly (LTE uses wideband PSS) */
+            rtlsdr_set_center_freq(cfg->dev, cand->freq_hz);
+            vTaskDelay(pdMS_TO_TICKS(SETTLE_MS));
+
+            /* Capture IQ */
             esp_err_t ret = capture_iq(cfg->dwell_ms + 500);
             if (ret != ESP_OK) continue;
 
-            /* DDC extract narrowband channel */
-            int nb_len = ddc_extract(s_kal.capture_buf,
-                                     s_kal.capture_pos / 2,
-                                     cand->ddc_offset_hz,
-                                     nb_re, nb_im, nb_buf_size);
+            /* Convert uint8 IQ to float */
+            int num_samples = s_kal.capture_pos / 2;
+            for (int i = 0; i < num_samples; i++) {
+                fiq_re[i] = ((float)s_kal.capture_buf[2 * i] - 127.5f) / 127.5f;
+                fiq_im[i] = ((float)s_kal.capture_buf[2 * i + 1] - 127.5f) / 127.5f;
+            }
 
-            if (nb_len < 100) continue;
+            /* PSS frequency error estimation */
+            float freq_err = lte_pss_freq_error(fiq_re, fiq_im, num_samples,
+                                                 &s_kal.pss_templates,
+                                                 (float)sample_rate);
 
-            /* FCCH detection via FM discriminator */
-            float avg_freq;
-            float nb_rate = (float)SAMPLE_RATE / 5.0f;  /* 204.8 kHz */
-            int bursts = fcch_detect(nb_re, nb_im, nb_len, nb_rate, &avg_freq);
+            /* Also get the best peak for confidence/n_id_2 */
+            lte_pss_peak_t peak;
+            lte_pss_correlate(fiq_re, fiq_im, num_samples,
+                              &s_kal.pss_templates, 4, &peak);
 
-            if (bursts > 0) {
-                fcch_total_bursts += bursts;
-                fcch_freq_sum += avg_freq * (float)bursts;
+            /* Store result */
+            if (res->channel_count < KAL_MAX_CHANNELS) {
+                kal_channel_t *ch = &res->channels[res->channel_count];
+                ch->arfcn = 0;  /* LTE uses direct frequency */
+                ch->freq_hz = cand->freq_hz;
+                ch->power_dbfs = cand->power_dbfs;
+                ch->n_id_2 = peak.n_id_2;
+                ch->confidence = peak.magnitude;
+
+                bool pss_found = (freq_err != 0.0f && peak.magnitude > 1.0f);
+                ch->fcch_detected = pss_found;  /* Reuse field: "sync signal found" */
+                ch->burst_count = pss_found ? 1 : 0;
+
+                if (pss_found) {
+                    ch->freq_error_hz = freq_err;
+                    ch->ppm = freq_err / (float)cand->freq_hz * 1e6f;
+
+                    ppm_sum += ch->ppm;
+                    ppm_sum2 += ch->ppm * ch->ppm;
+                    res->fcch_count++;
+
+                    ESP_LOGI(TAG, "  %lu.%01lu MHz  PSS: YES  N_ID_2=%d  "
+                             "freq_err: %+.1f Hz  ppm: %+.2f  mag: %.0f",
+                             (unsigned long)(ch->freq_hz / 1000000),
+                             (unsigned long)((ch->freq_hz % 1000000) / 100000),
+                             ch->n_id_2, ch->freq_error_hz, ch->ppm,
+                             peak.magnitude);
+                } else {
+                    ch->freq_error_hz = 0;
+                    ch->ppm = 0;
+
+                    ESP_LOGI(TAG, "  %lu.%01lu MHz  PSS: no   power: %.1f dBFS  mag: %.0f",
+                             (unsigned long)(ch->freq_hz / 1000000),
+                             (unsigned long)((ch->freq_hz % 1000000) / 100000),
+                             ch->power_dbfs, peak.magnitude);
+                }
+
+                res->channel_count++;
             }
         }
 
-        /* Store channel result */
-        if (res->channel_count < KAL_MAX_CHANNELS) {
-            kal_channel_t *ch = &res->channels[res->channel_count];
-            ch->arfcn = cand->arfcn;
-            ch->freq_hz = cand->freq_hz;
-            ch->power_dbfs = cand->power_dbfs;
-            ch->fcch_detected = (fcch_total_bursts > 0);
-            ch->burst_count = fcch_total_bursts;
+        free(fiq_re);
+        free(fiq_im);
 
-            if (fcch_total_bursts > 0) {
-                float measured_freq = fcch_freq_sum / (float)fcch_total_bursts;
-                ch->freq_error_hz = measured_freq - FCCH_FREQ_HZ;
-                ch->ppm = ch->freq_error_hz / (float)cand->freq_hz * 1e6f;
+    } else {
+        /* ── GSM: FCCH validation on candidates ── */
+        ESP_LOGI(TAG, "── Stage 2: FCCH validation (%d candidates) ──", cand_count);
 
-                ppm_sum += ch->ppm;
-                ppm_sum2 += ch->ppm * ch->ppm;
-                res->fcch_count++;
+        int nb_buf_size = GSM_SAMPLE_RATE / 5;  /* 204800 samples at 204.8 kSPS */
+        float *nb_re = malloc(nb_buf_size * sizeof(float));
+        float *nb_im = malloc(nb_buf_size * sizeof(float));
 
-                ESP_LOGI(TAG, "  ARFCN %3d (%lu.%01lu MHz)  FCCH: YES  "
-                         "bursts: %d  freq_err: %+.1f Hz  ppm: %+.2f",
-                         ch->arfcn,
-                         (unsigned long)(ch->freq_hz / 1000000),
-                         (unsigned long)((ch->freq_hz % 1000000) / 100000),
-                         ch->burst_count, ch->freq_error_hz, ch->ppm);
-            } else {
-                ch->freq_error_hz = 0;
-                ch->ppm = 0;
+        if (!nb_re || !nb_im) {
+            ESP_LOGE(TAG, "Failed to allocate narrowband buffers");
+            free(nb_re); free(nb_im);
+            res->state = KAL_STATE_ERROR;
+            snprintf(res->status_msg, sizeof(res->status_msg), "Out of memory");
+            goto cleanup;
+        }
 
-                ESP_LOGI(TAG, "  ARFCN %3d (%lu.%01lu MHz)  FCCH: no   power: %.1f dBFS",
-                         ch->arfcn,
-                         (unsigned long)(ch->freq_hz / 1000000),
-                         (unsigned long)((ch->freq_hz % 1000000) / 100000),
-                         ch->power_dbfs);
+        for (int c = 0; c < cand_count && !s_kal.scan_abort; c++) {
+            candidate_t *cand = &candidates[c];
+
+            rtlsdr_set_center_freq(cfg->dev, cand->step_center);
+            vTaskDelay(pdMS_TO_TICKS(SETTLE_MS));
+
+            int fcch_total_bursts = 0;
+            float fcch_freq_sum = 0;
+
+            int dwells = (cfg->fcch_bursts + 3) / 4;
+            if (dwells < 1) dwells = 1;
+            if (dwells > 4) dwells = 4;
+
+            for (int d = 0; d < dwells && !s_kal.scan_abort; d++) {
+                esp_err_t ret = capture_iq(cfg->dwell_ms + 500);
+                if (ret != ESP_OK) continue;
+
+                int nb_len = ddc_extract(s_kal.capture_buf,
+                                         s_kal.capture_pos / 2,
+                                         cand->ddc_offset_hz,
+                                         nb_re, nb_im, nb_buf_size);
+
+                if (nb_len < 100) continue;
+
+                float avg_freq;
+                float nb_rate = (float)GSM_SAMPLE_RATE / 5.0f;
+                int bursts = fcch_detect(nb_re, nb_im, nb_len, nb_rate, &avg_freq);
+
+                if (bursts > 0) {
+                    fcch_total_bursts += bursts;
+                    fcch_freq_sum += avg_freq * (float)bursts;
+                }
             }
 
-            res->channel_count++;
-        }
-    }
+            if (res->channel_count < KAL_MAX_CHANNELS) {
+                kal_channel_t *ch = &res->channels[res->channel_count];
+                ch->arfcn = cand->arfcn;
+                ch->freq_hz = cand->freq_hz;
+                ch->power_dbfs = cand->power_dbfs;
+                ch->fcch_detected = (fcch_total_bursts > 0);
+                ch->burst_count = fcch_total_bursts;
 
-    free(nb_re);
-    free(nb_im);
+                if (fcch_total_bursts > 0) {
+                    float measured_freq = fcch_freq_sum / (float)fcch_total_bursts;
+                    ch->freq_error_hz = measured_freq - FCCH_FREQ_HZ;
+                    ch->ppm = ch->freq_error_hz / (float)cand->freq_hz * 1e6f;
+
+                    ppm_sum += ch->ppm;
+                    ppm_sum2 += ch->ppm * ch->ppm;
+                    res->fcch_count++;
+
+                    ESP_LOGI(TAG, "  ARFCN %3d (%lu.%01lu MHz)  FCCH: YES  "
+                             "bursts: %d  freq_err: %+.1f Hz  ppm: %+.2f",
+                             ch->arfcn,
+                             (unsigned long)(ch->freq_hz / 1000000),
+                             (unsigned long)((ch->freq_hz % 1000000) / 100000),
+                             ch->burst_count, ch->freq_error_hz, ch->ppm);
+                } else {
+                    ch->freq_error_hz = 0;
+                    ch->ppm = 0;
+
+                    ESP_LOGI(TAG, "  ARFCN %3d (%lu.%01lu MHz)  FCCH: no   power: %.1f dBFS",
+                             ch->arfcn,
+                             (unsigned long)(ch->freq_hz / 1000000),
+                             (unsigned long)((ch->freq_hz % 1000000) / 100000),
+                             ch->power_dbfs);
+                }
+
+                res->channel_count++;
+            }
+        }
+
+        free(nb_re);
+        free(nb_im);
+    } /* end GSM/LTE branch */
 
     /* ── Compute summary statistics ── */
     if (res->fcch_count > 0) {
@@ -818,10 +962,13 @@ esp_err_t kal_init(const kal_config_t *config)
         ESP_LOGW(TAG, "HTTP server start failed: %s (API unavailable)", esp_err_to_name(ret));
     }
 
+    /* Generate LTE PSS templates */
+    lte_pss_generate(&s_kal.pss_templates);
+
     s_kal.result.state = KAL_STATE_IDLE;
     s_kal.initialized = true;
 
-    ESP_LOGI(TAG, "GSM Kalibrate initialized (capture buf: %d KB)",
+    ESP_LOGI(TAG, "Kalibrate initialized (capture buf: %d KB, GSM+LTE)",
              CAPTURE_BUF_SIZE / 1024);
     return ESP_OK;
 }

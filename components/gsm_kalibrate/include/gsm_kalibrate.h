@@ -31,6 +31,11 @@ typedef enum {
     KAL_BAND_GSM900,
     KAL_BAND_DCS1800,
     KAL_BAND_PCS1900,
+    KAL_BAND_LTE_B1,     /* 2110-2170 MHz (FDD Band 1) */
+    KAL_BAND_LTE_B3,     /* 1805-1880 MHz (FDD Band 3) */
+    KAL_BAND_LTE_B7,     /* 2620-2690 MHz (FDD Band 7) */
+    KAL_BAND_LTE_B20,    /* 791-821 MHz (FDD Band 20) */
+    KAL_BAND_LTE_B28,    /* 758-803 MHz (FDD Band 28, APAC) */
     KAL_BAND_COUNT
 } kal_band_t;
 
@@ -54,6 +59,8 @@ typedef struct {
     float    freq_error_hz;     /* FCCH frequency error (Hz) */
     float    ppm;               /* PPM offset for this channel */
     int      burst_count;       /* Number of FCCH bursts measured */
+    uint8_t  n_id_2;           /* LTE: PSS root index (0-2), GSM: unused */
+    float    confidence;        /* LTE: correlation confidence 0-1, GSM: unused */
 } kal_channel_t;
 
 typedef enum {
@@ -126,6 +133,17 @@ uint16_t kal_freq_to_arfcn(uint32_t freq_hz, kal_band_t band);
  * Return the number of channels in a band.
  */
 int kal_band_channel_count(kal_band_t band);
+
+/**
+ * Return true if the band is an LTE band.
+ */
+bool kal_band_is_lte(kal_band_t band);
+
+/**
+ * Convert EARFCN to downlink frequency (Hz) for supported LTE bands.
+ * Returns 0 for unsupported EARFCNs.
+ */
+uint32_t kal_earfcn_to_freq(uint32_t earfcn);
 
 /* ──────────────────────── Scan Control API ──────────────────────── */
 
