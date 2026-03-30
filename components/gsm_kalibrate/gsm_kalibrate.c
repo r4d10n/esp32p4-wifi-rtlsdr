@@ -1000,12 +1000,39 @@ static void scan_task(void *arg)
             bool sch_found = false;
 
             if (n_bits >= GSM_BURST_LEN) {
+                /* Debug: log first SCH bits to check polarity */
+                ESP_LOGI(TAG, "  SCH soft[0..9]: %d %d %d %d %d %d %d %d %d %d",
+                         soft_bits[0], soft_bits[1], soft_bits[2],
+                         soft_bits[3], soft_bits[4], soft_bits[5],
+                         soft_bits[6], soft_bits[7], soft_bits[8], soft_bits[9]);
+
+                /* Try normal polarity first */
                 if (gsm_sch_decode(soft_bits, &sch_info)) {
                     ch->cell_id.bsic = sch_info.bsic;
                     sch_found = true;
                     ESP_LOGI(TAG, "  SCH: BSIC=%d (NCC=%d BCC=%d) FN=%lu",
                              sch_info.bsic, sch_info.ncc, sch_info.bcc,
                              (unsigned long)sch_info.fn);
+                } else {
+                    /* Try inverted polarity — GMSK phase convention may differ */
+                    int8_t *inv = soft_bits + n_bits;  /* reuse tail of buffer */
+                    if (n_bits + GSM_BURST_LEN <= max_soft) {
+                        for (int j = 0; j < GSM_BURST_LEN; j++)
+                            inv[j] = (int8_t)(-soft_bits[j]);
+                        gsm_sch_info_t inv_info;
+                        if (gsm_sch_decode(inv, &inv_info)) {
+                            ESP_LOGW(TAG, "  SCH decoded with INVERTED polarity!");
+                            sch_info = inv_info;
+                            ch->cell_id.bsic = sch_info.bsic;
+                            sch_found = true;
+                            /* Invert all remaining bits too */
+                            for (int j = 0; j < n_bits; j++)
+                                soft_bits[j] = (int8_t)(-soft_bits[j]);
+                            ESP_LOGI(TAG, "  SCH: BSIC=%d (NCC=%d BCC=%d) FN=%lu",
+                                     sch_info.bsic, sch_info.ncc, sch_info.bcc,
+                                     (unsigned long)sch_info.fn);
+                        }
+                    }
                 }
             }
 

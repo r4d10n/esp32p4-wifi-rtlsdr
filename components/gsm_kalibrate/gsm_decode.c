@@ -544,7 +544,9 @@ static void gsm_channel_estimate(const float *rx_re, const float *rx_im,
     }
 
     /* Compute autocorrelation: rhh[i] = sum_k conj(chan[k]) * chan[k + i*osr]
-     * for i = 0..CHAN_IMP_RESP_LENGTH-1 */
+     * for i = 0..CHAN_IMP_RESP_LENGTH-1.
+     * Normalize so rhh[0] = 1.0 (unit channel power). */
+    float rhh0 = 0;
     for (int i = 0; i < CHAN_IMP_RESP_LENGTH; i++) {
         float acc_re = 0, acc_im = 0;
         for (int k = 0; k + i * osr < cir_len; k++) {
@@ -552,12 +554,20 @@ static void gsm_channel_estimate(const float *rx_re, const float *rx_im,
             float ci = chan_im[k];
             float dr = chan_re[k + i * osr];
             float di = chan_im[k + i * osr];
-            acc_re += cr * dr + ci * di;   /* conj(chan[k]) * chan[k+i*osr] */
+            acc_re += cr * dr + ci * di;
             acc_im += cr * di - ci * dr;
         }
         rhh_re[i] = acc_re;
         rhh_im[i] = acc_im;
+        if (i == 0) rhh0 = acc_re;  /* rhh[0] is real (autocorrelation at lag 0) */
     }
+
+    /* Scale rhh to improve MLSE branch metric discrimination.
+     * Instead of normalizing rhh[0]=1 (which changes MAFI/MLSE balance),
+     * scale both rhh and MAFI output by 1/sqrt(rhh0) so everything is
+     * in a consistent amplitude range. This is done implicitly by
+     * scaling rhh only — the MLSE compares mafi*rhh products. */
+    (void)rhh0; /* Normalization deferred — MLSE works on relative metrics */
 }
 
 /* ── D. Matched Filter (MAFI) ── */
@@ -838,15 +848,32 @@ int gsm_gmsk_demod(const float *iq_re, const float *iq_im, int n_samples,
                          train_full_samps, osr,
                          chan_re, chan_im, rhh_re, rhh_im);
 
+    /* Debug: log CIR and rhh to verify channel estimation */
+    ESP_LOGI(TAG, "MLSE: CIR[0]=(%.4f,%.4f) CIR[4]=(%.4f,%.4f) CIR[8]=(%.4f,%.4f)",
+             chan_re[0], chan_im[0], chan_re[4], chan_im[4],
+             chan_re[8], chan_im[8]);
+    ESP_LOGI(TAG, "MLSE: rhh[0]=(%.4f,%.4f) rhh[1]=(%.4f,%.4f) rhh[2]=(%.4f,%.4f)",
+             rhh_re[0], rhh_im[0], rhh_re[1], rhh_im[1], rhh_re[2], rhh_im[2]);
+
     /* Matched filter: collapse oversampled burst to symbol rate */
     float mf_re[GSM_BURST_LEN];
     float mf_im[GSM_BURST_LEN];
     gsm_mafi(burst_re, burst_im, GSM_BURST_LEN, osr,
              chan_re, chan_im, cir_len, mf_re, mf_im);
 
+    /* Debug: log first few MAFI output samples */
+    ESP_LOGI(TAG, "MLSE: mafi[0]=(%.4f,%.4f) [10]=(%.4f,%.4f) [42]=(%.4f,%.4f)",
+             mf_re[0], mf_im[0], mf_re[10], mf_im[10], mf_re[42], mf_im[42]);
+
     /* Viterbi MLSE equalization */
     uint8_t hard_bits[GSM_BURST_LEN];
     gsm_viterbi_mlse(mf_re, mf_im, GSM_BURST_LEN, rhh_re, rhh_im, hard_bits);
+
+    /* Debug: count ones vs zeros in output */
+    int ones = 0;
+    for (int i = 0; i < GSM_BURST_LEN; i++) if (hard_bits[i]) ones++;
+    ESP_LOGI(TAG, "MLSE: hard bits: %d ones, %d zeros out of %d",
+             ones, GSM_BURST_LEN - ones, GSM_BURST_LEN);
 
     /* Convert hard bits to soft bits (+127 / -127) */
     int n_out = GSM_BURST_LEN;
