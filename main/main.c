@@ -33,7 +33,9 @@ static const char *TAG = "main";
 #define WIFI_SSID       CONFIG_WIFI_SSID
 #define WIFI_PASS       CONFIG_WIFI_PASSWORD
 
-/* Default scan band */
+/* Default scan band — GSM gives best calibration accuracy.
+ * LTE PSS works but has higher variance (stddev ~5 PPM vs ~0.01 for GSM FCCH).
+ * LTE needs FFT-domain PSS correlation for production accuracy. */
 #define DEFAULT_BAND    KAL_BAND_GSM900
 
 static rtlsdr_dev_t *sdr_dev = NULL;

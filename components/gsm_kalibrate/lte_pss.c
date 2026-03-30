@@ -95,61 +95,89 @@ float lte_pss_freq_error(const float *iq_re, const float *iq_im, int iq_len,
                          const lte_pss_templates_t *templates,
                          float sample_rate)
 {
-    /* Step 1: Find the best peak using step=4 */
-    lte_pss_peak_t best;
-    int found = lte_pss_correlate(iq_re, iq_im, iq_len, templates, 4, &best);
+    /* Step 1: Coarse search with step=16 (fast, avoids WDT) */
+    lte_pss_peak_t coarse;
+    int found = lte_pss_correlate(iq_re, iq_im, iq_len, templates, 16, &coarse);
 
-    if (!found || best.magnitude < 1.0f) {
-        ESP_LOGD(TAG, "No PSS peak found (mag=%.2f)", best.magnitude);
+    if (!found || coarse.magnitude < 1.0f) {
+        ESP_LOGD(TAG, "No PSS peak found (mag=%.2f)", coarse.magnitude);
         return 0.0f;
     }
 
-    ESP_LOGD(TAG, "Best peak: mag=%.2f at offset=%d, N_ID_2=%d",
-             best.magnitude, best.offset, best.n_id_2);
+    /* Step 2: Fine search at step=1 within ±32 samples of coarse peak */
+    int fine_start = coarse.offset - 32;
+    int fine_end = coarse.offset + 32;
+    if (fine_start < 0) fine_start = 0;
+    if (fine_end > iq_len - LTE_PSS_LEN) fine_end = iq_len - LTE_PSS_LEN;
 
-    /* Step 2: Search at all offsets to find ALL peaks above 40% of best */
-    float threshold = best.magnitude * 0.4f;
-    float phase_sum = 0.0f;
-    int peak_count = 0;
-    int max_offset = iq_len - LTE_PSS_LEN;
+    float best_mag = 0;
+    float best_phase = 0;
+    int best_root = coarse.n_id_2;
 
-    for (int offset = 0; offset <= max_offset; offset++) {
+    for (int offset = fine_start; offset <= fine_end; offset++) {
         for (int r = 0; r < LTE_PSS_ROOTS; r++) {
-            float corr_re = 0.0f;
-            float corr_im = 0.0f;
-
+            float corr_re = 0.0f, corr_im = 0.0f;
             for (int k = 0; k < LTE_PSS_LEN; k++) {
-                float sig_re = iq_re[offset + k];
-                float sig_im = iq_im[offset + k];
-                float tmpl_re = templates->re[r][k];
-                float tmpl_im = templates->im[r][k];
-
-                corr_re += sig_re * tmpl_re + sig_im * tmpl_im;
-                corr_im += sig_im * tmpl_re - sig_re * tmpl_im;
+                corr_re += iq_re[offset + k] * templates->re[r][k]
+                         + iq_im[offset + k] * templates->im[r][k];
+                corr_im += iq_im[offset + k] * templates->re[r][k]
+                         - iq_re[offset + k] * templates->im[r][k];
             }
-
             float mag = sqrtf(corr_re * corr_re + corr_im * corr_im);
-
-            if (mag >= threshold) {
-                float phase = atan2f(corr_im, corr_re);
-                phase_sum += phase;
-                peak_count++;
+            if (mag > best_mag) {
+                best_mag = mag;
+                best_phase = atan2f(corr_im, corr_re);
+                best_root = r;
             }
         }
     }
 
-    if (peak_count == 0) {
-        ESP_LOGD(TAG, "No peaks above threshold");
-        return 0.0f;
+    /* Step 3: Look for repeated PSS peaks at 5ms intervals (half-frame).
+     * PSS occurs twice per 10ms LTE frame → every 5ms = sample_rate/200.
+     * Average phase across multiple peaks for better accuracy. */
+    int pss_period = (int)(sample_rate / 200.0f);  /* 5ms in samples */
+    float phase_sum = best_phase;
+    int peak_count = 1;
+    float threshold = best_mag * 0.3f;
+
+    /* Search forward from best peak at 5ms intervals */
+    for (int rep_offset = coarse.offset + pss_period;
+         rep_offset + LTE_PSS_LEN < iq_len && peak_count < 40;
+         rep_offset += pss_period) {
+        /* Fine search ±16 around expected position */
+        int rs = rep_offset - 16;
+        int re = rep_offset + 16;
+        if (rs < 0) rs = 0;
+        if (re > iq_len - LTE_PSS_LEN) re = iq_len - LTE_PSS_LEN;
+
+        float rep_best_mag = 0, rep_phase = 0;
+        for (int off = rs; off <= re; off++) {
+            float cr = 0, ci = 0;
+            for (int k = 0; k < LTE_PSS_LEN; k++) {
+                cr += iq_re[off + k] * templates->re[best_root][k]
+                    + iq_im[off + k] * templates->im[best_root][k];
+                ci += iq_im[off + k] * templates->re[best_root][k]
+                    - iq_re[off + k] * templates->im[best_root][k];
+            }
+            float m = sqrtf(cr * cr + ci * ci);
+            if (m > rep_best_mag) {
+                rep_best_mag = m;
+                rep_phase = atan2f(ci, cr);
+            }
+        }
+        if (rep_best_mag >= threshold) {
+            phase_sum += rep_phase;
+            peak_count++;
+        }
     }
 
-    /* Step 3: Average phase and convert to frequency error */
+    /* Step 4: Convert averaged phase to frequency error */
     float avg_phase = phase_sum / (float)peak_count;
     float pss_duration = (float)LTE_PSS_LEN / sample_rate;
     float freq_error_hz = avg_phase / (2.0f * (float)M_PI * pss_duration);
 
-    ESP_LOGI(TAG, "Freq error: %.1f Hz (from %d peaks, avg_phase=%.4f)",
-             freq_error_hz, peak_count, avg_phase);
+    ESP_LOGI(TAG, "Freq error: %.1f Hz (from %d PSS peaks, N_ID_2=%d, mag=%.0f)",
+             freq_error_hz, peak_count, best_root, best_mag);
 
     return freq_error_hz;
 }

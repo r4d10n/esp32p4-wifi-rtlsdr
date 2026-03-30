@@ -629,20 +629,30 @@ static void scan_task(void *arg)
             float excess = power_db[ch] - noise_floor;
             if (excess < cfg->threshold_db) continue;
 
-            /* Map to ARFCN */
             uint32_t chan_freq = center + subchan_offsets[ch];
-            uint16_t arfcn = kal_freq_to_arfcn(chan_freq, res->band);
-            if (arfcn == 0xFFFF) continue;
+            uint16_t arfcn = 0;
 
-            /* Snap to exact ARFCN frequency */
-            chan_freq = kal_arfcn_to_freq_band(arfcn, res->band);
+            if (is_lte) {
+                /* LTE: use direct frequency, no ARFCN grid snapping */
+                /* Check for duplicates by frequency (within 100 kHz) */
+                bool dup = false;
+                for (int c = 0; c < cand_count; c++) {
+                    int32_t diff = (int32_t)candidates[c].freq_hz - (int32_t)chan_freq;
+                    if (abs(diff) < 100000) { dup = true; break; }
+                }
+                if (dup) continue;
+            } else {
+                /* GSM: map to ARFCN grid */
+                arfcn = kal_freq_to_arfcn(chan_freq, res->band);
+                if (arfcn == 0xFFFF) continue;
+                chan_freq = kal_arfcn_to_freq_band(arfcn, res->band);
 
-            /* Check for duplicates (adjacent steps can overlap) */
-            bool dup = false;
-            for (int c = 0; c < cand_count; c++) {
-                if (candidates[c].arfcn == arfcn) { dup = true; break; }
+                bool dup = false;
+                for (int c = 0; c < cand_count; c++) {
+                    if (candidates[c].arfcn == arfcn) { dup = true; break; }
+                }
+                if (dup) continue;
             }
-            if (dup) continue;
 
             candidates[cand_count++] = (candidate_t){
                 .freq_hz = chan_freq,
@@ -652,11 +662,19 @@ static void scan_task(void *arg)
                 .step_center = center,
             };
 
-            ESP_LOGI(TAG, "  [%d/%d] ARFCN %d (%lu.%01lu MHz)  power: %.1f dBFS (+%.1f dB)",
-                     step + 1, total_steps, arfcn,
-                     (unsigned long)(chan_freq / 1000000),
-                     (unsigned long)((chan_freq % 1000000) / 100000),
-                     power_db[ch], excess);
+            if (is_lte) {
+                ESP_LOGI(TAG, "  [%d/%d] %lu.%01lu MHz  power: %.1f dBFS (+%.1f dB)",
+                         step + 1, total_steps,
+                         (unsigned long)(chan_freq / 1000000),
+                         (unsigned long)((chan_freq % 1000000) / 100000),
+                         power_db[ch], excess);
+            } else {
+                ESP_LOGI(TAG, "  [%d/%d] ARFCN %d (%lu.%01lu MHz)  power: %.1f dBFS (+%.1f dB)",
+                         step + 1, total_steps, arfcn,
+                         (unsigned long)(chan_freq / 1000000),
+                         (unsigned long)((chan_freq % 1000000) / 100000),
+                         power_db[ch], excess);
+            }
         }
     }
 
@@ -733,22 +751,25 @@ static void scan_task(void *arg)
                                                  &s_kal.pss_templates,
                                                  (float)sample_rate);
 
-            /* Also get the best peak for confidence/n_id_2 */
+            /* Get the best peak for N_ID_2 and confidence (reuse coarse from freq_error) */
             lte_pss_peak_t peak;
             lte_pss_correlate(fiq_re, fiq_im, num_samples,
-                              &s_kal.pss_templates, 4, &peak);
+                              &s_kal.pss_templates, 16, &peak);
+
+            /* Yield to prevent WDT on long scans */
+            vTaskDelay(1);
 
             /* Store result */
             if (res->channel_count < KAL_MAX_CHANNELS) {
                 kal_channel_t *ch = &res->channels[res->channel_count];
-                ch->arfcn = 0;  /* LTE uses direct frequency */
+                ch->arfcn = 0;
                 ch->freq_hz = cand->freq_hz;
                 ch->power_dbfs = cand->power_dbfs;
                 ch->n_id_2 = peak.n_id_2;
                 ch->confidence = peak.magnitude;
 
                 bool pss_found = (freq_err != 0.0f && peak.magnitude > 1.0f);
-                ch->fcch_detected = pss_found;  /* Reuse field: "sync signal found" */
+                ch->fcch_detected = pss_found;
                 ch->burst_count = pss_found ? 1 : 0;
 
                 if (pss_found) {
