@@ -143,6 +143,118 @@ typedef struct {
     float corr_im;      /* Imag part of best correlation */
 } pss_result_t;
 
+/* ──────────────────────── CP Autocorrelation ──────────────────────── */
+
+/**
+ * CP autocorrelation for OFDM symbol boundary detection and fractional CFO.
+ *
+ * The cyclic prefix is a copy of the last N_CP samples of the OFDM symbol.
+ * Correlating z[n] with z[n + N_FFT] produces a peak at symbol boundaries
+ * and the phase of the peak gives the fractional carrier frequency offset.
+ *
+ * We average over multiple symbols within one slot (7 symbols) for SNR gain.
+ *
+ * @param re, im    Float IQ arrays
+ * @param num_samples Total samples
+ * @param best_offset Output: sample offset of first symbol boundary in slot
+ * @param frac_cfo_hz Output: fractional CFO in Hz (±7500 Hz range)
+ * @return true if a valid CP correlation peak was found
+ */
+static bool cp_sync(const float *re, const float *im, int num_samples,
+                    int *best_offset, float *frac_cfo_hz)
+{
+    /* Search one slot worth of offsets (960 samples).
+     * At each candidate offset, accumulate CP correlation across 7 symbols. */
+    int search_range = LTE_SLOT_SAMPLES;
+    if (search_range > num_samples - LTE_SLOT_SAMPLES)
+        search_range = num_samples - LTE_SLOT_SAMPLES;
+    if (search_range < 1) return false;
+
+    float best_mag = 0.0f;
+    float best_phase = 0.0f;
+    int   best_pos = 0;
+
+    /* Symbol offsets within a slot (from slot start to FFT window start):
+     * sym0: CP0=10, sym1: 138+CP=147, sym2: 284, sym3: 421, sym4: 558, sym5: 695, sym6: 832 */
+    static const int sym_offsets[LTE_N_SYMB_SLOT] = {
+        0, /* sym0: CP starts at slot_start + 0 */
+        138, 275, 412, 549, 686, 823
+    };
+    static const int sym_cp[LTE_N_SYMB_SLOT] = {
+        LTE_CP0, LTE_CPN, LTE_CPN, LTE_CPN, LTE_CPN, LTE_CPN, LTE_CPN
+    };
+
+    for (int offset = 0; offset < search_range; offset++) {
+        float corr_re_sum = 0.0f, corr_im_sum = 0.0f;
+
+        /* Accumulate CP correlation across all 7 symbols in this slot */
+        for (int s = 0; s < LTE_N_SYMB_SLOT; s++) {
+            int cp_start = offset + sym_offsets[s];
+            int cp_len = sym_cp[s];
+            int fft_start = cp_start + cp_len;  /* FFT window after CP */
+
+            if (fft_start + LTE_N_FFT > num_samples) break;
+
+            /* Correlate: P = Σ z[cp_start+i] * conj(z[cp_start+i+N_FFT]) */
+            for (int i = 0; i < cp_len; i++) {
+                int a = cp_start + i;
+                int b = a + LTE_N_FFT;
+                /* z[a] * conj(z[b]) = (re_a + j*im_a)(re_b - j*im_b) */
+                corr_re_sum += re[a] * re[b] + im[a] * im[b];
+                corr_im_sum += im[a] * re[b] - re[a] * im[b];
+            }
+        }
+
+        float mag = corr_re_sum * corr_re_sum + corr_im_sum * corr_im_sum;
+        if (mag > best_mag) {
+            best_mag = mag;
+            best_phase = atan2f(corr_im_sum, corr_re_sum);
+            best_pos = offset;
+        }
+    }
+
+    if (best_mag < 1e-10f) return false;
+
+    /* The CP correlation phase gives fractional CFO:
+     * phase = 2π × f_err × N_FFT / Fs
+     * f_err = phase × Fs / (2π × N_FFT) */
+    float cfo = -best_phase * (float)LTE_SAMPLE_RATE_HZ /
+                (2.0f * (float)M_PI * (float)LTE_N_FFT);
+
+    *best_offset = best_pos;
+    *frac_cfo_hz = cfo;
+
+    ESP_LOGI(TAG, "CP sync: offset=%d frac_cfo=%+.1f Hz (phase=%.4f)",
+             best_pos, cfo, best_phase);
+    return true;
+}
+
+/**
+ * Apply fractional frequency correction to IQ buffer (in-place).
+ * Rotates by exp(-j * 2π * cfo * n / Fs) to remove frequency offset.
+ */
+static void apply_cfo_correction(float *re, float *im, int num_samples,
+                                 float cfo_hz)
+{
+    float phase = 0.0f;
+    float phase_inc = -2.0f * (float)M_PI * cfo_hz / (float)LTE_SAMPLE_RATE_HZ;
+
+    for (int i = 0; i < num_samples; i++) {
+        float c = cosf(phase);
+        float s = sinf(phase);
+        float r = re[i] * c - im[i] * s;
+        float j = re[i] * s + im[i] * c;
+        re[i] = r;
+        im[i] = j;
+        phase += phase_inc;
+        /* Keep phase bounded to avoid float precision loss */
+        if (phase > (float)M_PI) phase -= 2.0f * (float)M_PI;
+        if (phase < -(float)M_PI) phase += 2.0f * (float)M_PI;
+    }
+}
+
+/* ──────────────────────── PSS Detection ──────────────────────── */
+
 /**
  * Slide 128-pt FFT across IQ, correlate with 3 PSS templates.
  *
@@ -622,6 +734,14 @@ int lte_sync_detect(lte_sync_t *ctx,
 
     int cell_count = 0;
 
+    /* CP autocorrelation is disabled: at 1.92 MSPS the CP is only 9 samples,
+     * which is too short for reliable timing/CFO estimation at indoor SNR.
+     * The PSS-based IFO + split-phase CFO gives better results. */
+    bool cp_valid = false;
+    float cp_cfo_hz = 0.0f;
+    (void)cp_sync;           /* Suppress unused warning */
+    (void)apply_cfo_correction;
+
     /* PSS detection: find strongest peak */
     pss_result_t pss;
     pss_detect(ctx, num_samples, &pss);
@@ -645,8 +765,14 @@ int lte_sync_detect(lte_sync_t *ctx,
 
     /* If SSS decoded, prefer PSS-SSS phase rotation CFO (immune to multipath) */
     if (sss.valid) {
-        /* PSS-SSS CFO gives fractional part; add IFO for total */
         freq_err = (float)ifo * 15000.0f + sss.freq_err_hz;
+    }
+
+    /* Add back the CP-based fractional CFO that was corrected before PSS search.
+     * The IFO+split-phase/SSS measures residual after CP correction.
+     * Total = CP_CFO + residual. */
+    if (cp_valid) {
+        freq_err += cp_cfo_hz;
     }
 
     /* Fill first cell result */
@@ -723,6 +849,7 @@ int lte_sync_detect(lte_sync_t *ctx,
                 if (sss2.valid) {
                     freq_err2 = (float)ifo2 * 15000.0f + sss2.freq_err_hz;
                 }
+                if (cp_valid) freq_err2 += cp_cfo_hz;
 
                 lte_cell_t *cell2 = &cells[cell_count];
                 memset(cell2, 0, sizeof(*cell2));
