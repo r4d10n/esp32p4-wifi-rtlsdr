@@ -319,6 +319,13 @@ bool gsm_sch_decode(const int8_t *burst_bits, gsm_sch_info_t *info)
         return false;
     }
 
+    /* Reject all-zero decoded data (noise artifact) */
+    if (decoded_packed[0] == 0 && decoded_packed[1] == 0 &&
+        decoded_packed[2] == 0 && decoded_packed[3] == 0) {
+        ESP_LOGD(TAG, "SCH: all-zero data rejected");
+        return false;
+    }
+
     /* Extract fields from 25 data bits (MSB first in packed format):
      * bits[0..10]  = T1 (11 bits)
      * bits[11..15] = T2 (5 bits)
@@ -485,6 +492,16 @@ bool gsm_bcch_decode(const int8_t burst_bits[4][116], uint8_t l2_frame[GSM_BCCH_
     /* Step 3: Fire code CRC check over 184 + 40 = 224 bits */
     if (!fire_crc_check(decoded_packed, GSM_BCCH_DATA_BITS + GSM_FIRE_CRC_LEN)) {
         ESP_LOGD(TAG, "BCCH: Fire CRC check failed");
+        return false;
+    }
+
+    /* Reject all-zero frames (noise decodes to all-zero, which has valid CRC=0) */
+    bool all_zero = true;
+    for (int i = 0; i < GSM_BCCH_BLOCK_LEN && all_zero; i++) {
+        if (decoded_packed[i] != 0) all_zero = false;
+    }
+    if (all_zero) {
+        ESP_LOGD(TAG, "BCCH: all-zero frame rejected");
         return false;
     }
 
