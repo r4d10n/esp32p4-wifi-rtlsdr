@@ -229,15 +229,56 @@ static void pss_detect(lte_sync_t *ctx, int num_samples, pss_result_t *result)
              best_mag, best_offset, best_root);
 }
 
-/* ──────────────────────── Frequency Estimation ──────────────────────── */
+/* ──────────────────────── Frequency Estimation with IFO ──────────────────────── */
 
 /**
- * PSS split-phase CFO estimation.
- *
- * Re-extract 62 subcarrier bins at exact PSS peak, split into two halves,
- * compute differential phase -> frequency error in Hz.
+ * Extract 62 PSS subcarrier bins from FFT buffer with an integer frequency
+ * offset (IFO) shift of `ifo_shift` subcarriers.
  */
-static float freq_estimate(lte_sync_t *ctx, int pss_offset, int n_id_2)
+static void extract_pss_bins_shifted(const float *fft_buf, int ifo_shift,
+                                     float *pss_re, float *pss_im)
+{
+    /* Negative freq bins: nominally 97..127, shifted by ifo_shift */
+    for (int k = 0; k <= 30; k++) {
+        int bin = ((97 + k + ifo_shift) % LTE_N_FFT + LTE_N_FFT) % LTE_N_FFT;
+        pss_re[k] = fft_buf[bin * 2];
+        pss_im[k] = fft_buf[bin * 2 + 1];
+    }
+    /* Positive freq bins: nominally 1..31, shifted by ifo_shift */
+    for (int k = 0; k <= 30; k++) {
+        int bin = ((1 + k + ifo_shift) % LTE_N_FFT + LTE_N_FFT) % LTE_N_FFT;
+        pss_re[31 + k] = fft_buf[bin * 2];
+        pss_im[31 + k] = fft_buf[bin * 2 + 1];
+    }
+}
+
+/**
+ * Correlate extracted PSS bins with a pre-conjugated template.
+ * Returns squared magnitude.
+ */
+static float pss_corr_mag2(const float *rx_re, const float *rx_im,
+                           const float *ref_re, const float *ref_im)
+{
+    float cr = 0.0f, ci = 0.0f;
+    for (int k = 0; k < LTE_N_SC_PSS; k++) {
+        cr += rx_re[k] * ref_re[k] - rx_im[k] * ref_im[k];
+        ci += rx_re[k] * ref_im[k] + rx_im[k] * ref_re[k];
+    }
+    return cr * cr + ci * ci;
+}
+
+/**
+ * Full frequency estimation with IFO (Integer Frequency Offset) correction.
+ *
+ * 1. Re-FFT at PSS peak
+ * 2. Try IFO shifts -3..+3 subcarriers, find best PSS correlation
+ * 3. IFO gives integer Hz offset: ifo * 15000 Hz
+ * 4. Split-phase gives fractional Hz offset: ±7500 Hz
+ * 5. Total freq_error = ifo * 15000 + fractional_cfo
+ *
+ * This replaces the old split-phase-only estimator.
+ */
+static float freq_estimate(lte_sync_t *ctx, int pss_offset, int n_id_2, int *ifo_out)
 {
     /* Re-FFT at the exact peak position */
     for (int k = 0; k < LTE_N_FFT; k++) {
@@ -247,34 +288,31 @@ static float freq_estimate(lte_sync_t *ctx, int pss_offset, int n_id_2)
     dsps_fft2r_fc32(ctx->fft_buf, LTE_N_FFT);
     dsps_bit_rev_fc32(ctx->fft_buf, LTE_N_FFT);
 
-    /* Extract 62 PSS bins */
-    float pss_rx_re[LTE_N_SC_PSS];
-    float pss_rx_im[LTE_N_SC_PSS];
-
-    for (int k = 0; k <= 30; k++) {
-        int bin = 97 + k;
-        pss_rx_re[k] = ctx->fft_buf[bin * 2];
-        pss_rx_im[k] = ctx->fft_buf[bin * 2 + 1];
-    }
-    for (int k = 0; k <= 30; k++) {
-        int bin = 1 + k;
-        pss_rx_re[31 + k] = ctx->fft_buf[bin * 2];
-        pss_rx_im[31 + k] = ctx->fft_buf[bin * 2 + 1];
-    }
-
-    /* PSS reference (non-conjugated) for correlation */
     const float *ref_re = ctx->pss_fd_re[n_id_2];
     const float *ref_im = ctx->pss_fd_im[n_id_2];
-    /* Note: ref_im is pre-conjugated (negated), so conj(ref) has im = -ref_im.
-     * But ref_im is already -sin(phase), meaning the stored value IS conj.
-     * So: rx * conj(ref) = rx * (ref_re, ref_im) since ref_im = -sin = conj. */
 
-    /* Split-phase: correlate lower half (k=0..30) and upper half (k=31..61) */
+    /* ── IFO detection: try shifts -3..+3 subcarriers ── */
+    float pss_rx_re[LTE_N_SC_PSS], pss_rx_im[LTE_N_SC_PSS];
+    float best_ifo_mag = 0.0f;
+    int   best_ifo = 0;
+
+    for (int ifo = -3; ifo <= 3; ifo++) {
+        extract_pss_bins_shifted(ctx->fft_buf, ifo, pss_rx_re, pss_rx_im);
+        float mag = pss_corr_mag2(pss_rx_re, pss_rx_im, ref_re, ref_im);
+        if (mag > best_ifo_mag) {
+            best_ifo_mag = mag;
+            best_ifo = ifo;
+        }
+    }
+
+    /* Re-extract bins at the best IFO shift */
+    extract_pss_bins_shifted(ctx->fft_buf, best_ifo, pss_rx_re, pss_rx_im);
+
+    /* ── Fractional CFO via split-phase ── */
     float y0_re = 0.0f, y0_im = 0.0f;
     float y1_re = 0.0f, y1_im = 0.0f;
 
     for (int k = 0; k < 31; k++) {
-        /* rx * conj(ref): since ref is pre-conjugated, just multiply directly */
         y0_re += pss_rx_re[k] * ref_re[k] - pss_rx_im[k] * ref_im[k];
         y0_im += pss_rx_re[k] * ref_im[k] + pss_rx_im[k] * ref_re[k];
     }
@@ -283,15 +321,18 @@ static float freq_estimate(lte_sync_t *ctx, int pss_offset, int n_id_2)
         y1_im += pss_rx_re[k] * ref_im[k] + pss_rx_im[k] * ref_re[k];
     }
 
-    /* CFO = atan2(cross) / pi, then scale by half subcarrier spacing */
     float cross_re = y0_re * y1_re + y0_im * y1_im;
     float cross_im = y0_re * y1_im - y0_im * y1_re;
-    float cfo_norm = atan2f(cross_im, cross_re) / (float)M_PI;
+    float frac_cfo_norm = atan2f(cross_im, cross_re) / (float)M_PI;
+    float frac_cfo_hz = frac_cfo_norm * 15000.0f / 2.0f;  /* ±7500 Hz */
 
-    /* freq_error = cfo_norm * 15000 / 2 (half subcarrier spacing of 15 kHz) */
-    float freq_error_hz = cfo_norm * 15000.0f / 2.0f;
+    /* ── Total frequency error: IFO + fractional ── */
+    float freq_error_hz = (float)best_ifo * 15000.0f + frac_cfo_hz;
 
-    ESP_LOGD(TAG, "CFO estimate: %.1f Hz (cfo_norm=%.6f)", freq_error_hz, cfo_norm);
+    if (ifo_out) *ifo_out = best_ifo;
+
+    ESP_LOGI(TAG, "CFO: IFO=%+d (%.0f Hz) + frac=%+.1f Hz = total %+.1f Hz",
+             best_ifo, (float)best_ifo * 15000.0f, frac_cfo_hz, freq_error_hz);
     return freq_error_hz;
 }
 
@@ -354,7 +395,7 @@ static void gen_sss_ref(const lte_sync_t *ctx, int n_id_1, int n_id_2,
  *
  * Channel equalization via PSS channel estimate.
  */
-static void sss_detect(lte_sync_t *ctx, int pss_offset, int n_id_2,
+static void sss_detect(lte_sync_t *ctx, int pss_offset, int n_id_2, int ifo_shift,
                        int num_samples, sss_result_t *result)
 {
     result->valid = false;
@@ -377,18 +418,9 @@ static void sss_detect(lte_sync_t *ctx, int pss_offset, int n_id_2,
     dsps_fft2r_fc32(ctx->fft_buf, LTE_N_FFT);
     dsps_bit_rev_fc32(ctx->fft_buf, LTE_N_FFT);
 
-    /* Extract PSS received bins */
+    /* Extract PSS received bins with IFO correction */
     float pss_rx_re[LTE_N_SC_PSS], pss_rx_im[LTE_N_SC_PSS];
-    for (int k = 0; k <= 30; k++) {
-        int bin = 97 + k;
-        pss_rx_re[k] = ctx->fft_buf[bin * 2];
-        pss_rx_im[k] = ctx->fft_buf[bin * 2 + 1];
-    }
-    for (int k = 0; k <= 30; k++) {
-        int bin = 1 + k;
-        pss_rx_re[31 + k] = ctx->fft_buf[bin * 2];
-        pss_rx_im[31 + k] = ctx->fft_buf[bin * 2 + 1];
-    }
+    extract_pss_bins_shifted(ctx->fft_buf, ifo_shift, pss_rx_re, pss_rx_im);
 
     /* Channel estimate: H[k] = pss_rx[k] * conj(pss_ref[k])
      * pss_ref is pre-conjugated, so conj(pss_ref) = (re, -im) where
@@ -410,18 +442,9 @@ static void sss_detect(lte_sync_t *ctx, int pss_offset, int n_id_2,
     dsps_fft2r_fc32(ctx->fft_buf, LTE_N_FFT);
     dsps_bit_rev_fc32(ctx->fft_buf, LTE_N_FFT);
 
-    /* Extract SSS received bins */
+    /* Extract SSS received bins with same IFO correction as PSS */
     float sss_rx_re[LTE_N_SC_PSS], sss_rx_im[LTE_N_SC_PSS];
-    for (int k = 0; k <= 30; k++) {
-        int bin = 97 + k;
-        sss_rx_re[k] = ctx->fft_buf[bin * 2];
-        sss_rx_im[k] = ctx->fft_buf[bin * 2 + 1];
-    }
-    for (int k = 0; k <= 30; k++) {
-        int bin = 1 + k;
-        sss_rx_re[31 + k] = ctx->fft_buf[bin * 2];
-        sss_rx_im[31 + k] = ctx->fft_buf[bin * 2 + 1];
-    }
+    extract_pss_bins_shifted(ctx->fft_buf, ifo_shift, sss_rx_re, sss_rx_im);
 
     /* Channel equalize SSS: sss_eq[k] = sss_rx[k] * conj(H[k]) */
     float sss_eq_re[LTE_N_SC_PSS];
@@ -609,9 +632,22 @@ int lte_sync_detect(lte_sync_t *ctx,
         return 0;
     }
 
-    /* SSS detection at PSS-indicated timing (also computes PSS-SSS CFO) */
+    /* IFO + fractional CFO estimation (must come before SSS to get IFO) */
+    int ifo = 0;
+    float freq_err = 0.0f;
+    if (pss.offset + LTE_N_FFT <= num_samples) {
+        freq_err = freq_estimate(ctx, pss.offset, pss.n_id_2, &ifo);
+    }
+
+    /* SSS detection at PSS-indicated timing with IFO correction */
     sss_result_t sss;
-    sss_detect(ctx, pss.offset, pss.n_id_2, num_samples, &sss);
+    sss_detect(ctx, pss.offset, pss.n_id_2, ifo, num_samples, &sss);
+
+    /* If SSS decoded, prefer PSS-SSS phase rotation CFO (immune to multipath) */
+    if (sss.valid) {
+        /* PSS-SSS CFO gives fractional part; add IFO for total */
+        freq_err = (float)ifo * 15000.0f + sss.freq_err_hz;
+    }
 
     /* Fill first cell result */
     lte_cell_t *cell = &cells[0];
@@ -620,15 +656,6 @@ int lte_sync_detect(lte_sync_t *ctx,
     cell->pss_power = pss.magnitude;
     cell->pss_offset = pss.offset;
     cell->sss_valid = sss.valid;
-
-    /* Use PSS-SSS phase rotation CFO when SSS is valid (immune to multipath).
-     * Fall back to split-phase only when SSS fails. */
-    float freq_err = 0.0f;
-    if (sss.valid) {
-        freq_err = sss.freq_err_hz;
-    } else if (pss.offset + LTE_N_FFT <= num_samples) {
-        freq_err = freq_estimate(ctx, pss.offset, pss.n_id_2);
-    }
     cell->freq_error_hz = freq_err;
     cell->ppm = (carrier_hz > 0) ? (freq_err / (float)carrier_hz * 1e6f) : 0.0f;
 
@@ -684,14 +711,17 @@ int lte_sync_detect(lte_sync_t *ctx,
 
             /* Accept second cell if strong enough (at least 30% of first) */
             if (pss2.magnitude > pss.magnitude * 0.3f && pss2.magnitude > 1.0f) {
-                sss_result_t sss2;
-                sss_detect(ctx, pss2.offset, pss2.n_id_2, num_samples, &sss2);
-
+                int ifo2 = 0;
                 float freq_err2 = 0.0f;
+                if (pss2.offset + LTE_N_FFT <= num_samples) {
+                    freq_err2 = freq_estimate(ctx, pss2.offset, pss2.n_id_2, &ifo2);
+                }
+
+                sss_result_t sss2;
+                sss_detect(ctx, pss2.offset, pss2.n_id_2, ifo2, num_samples, &sss2);
+
                 if (sss2.valid) {
-                    freq_err2 = sss2.freq_err_hz;
-                } else if (pss2.offset + LTE_N_FFT <= num_samples) {
-                    freq_err2 = freq_estimate(ctx, pss2.offset, pss2.n_id_2);
+                    freq_err2 = (float)ifo2 * 15000.0f + sss2.freq_err_hz;
                 }
 
                 lte_cell_t *cell2 = &cells[cell_count];
