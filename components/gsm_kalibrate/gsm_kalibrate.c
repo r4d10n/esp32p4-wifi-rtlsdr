@@ -382,12 +382,12 @@ static void power_scan_step(const uint8_t *iq_buf, uint32_t iq_len,
  * decim_ratio=5 → 204.8 kSPS (for FCCH detection)
  * decim_ratio=3 → 341.3 kSPS (for GMSK demod at ~1.26 samples/symbol)
  */
-static int ddc_extract_r(const uint8_t *iq_in, uint32_t in_samples,
-                         int32_t offset_hz, int decim,
-                         float *out_re, float *out_im, int max_out)
+static int ddc_extract_rs(const uint8_t *iq_in, uint32_t in_samples,
+                          int32_t offset_hz, int decim, uint32_t samp_rate,
+                          float *out_re, float *out_im, int max_out)
 {
     float phase = 0;
-    float phase_inc = TWO_PI * (float)offset_hz / (float)GSM_SAMPLE_RATE;
+    float phase_inc = TWO_PI * (float)offset_hz / (float)samp_rate;
     float acc_re = 0, acc_im = 0;
     int acc_cnt = 0;
     int out_idx = 0;
@@ -423,12 +423,12 @@ static int ddc_extract_r(const uint8_t *iq_in, uint32_t in_samples,
     return out_idx;
 }
 
-/* Backward-compatible wrapper: decim=5 for FCCH (204.8 kSPS) */
+/* Wrapper: decim=5 at 1.024 MSPS for FCCH (204.8 kSPS) */
 static int ddc_extract(const uint8_t *iq_in, uint32_t in_samples,
                        int32_t offset_hz,
                        float *out_re, float *out_im, int max_out)
 {
-    return ddc_extract_r(iq_in, in_samples, offset_hz, 5, out_re, out_im, max_out);
+    return ddc_extract_rs(iq_in, in_samples, offset_hz, 5, GSM_SAMPLE_RATE, out_re, out_im, max_out);
 }
 
 /*
@@ -932,13 +932,21 @@ static void scan_task(void *arg)
         /* DDC at decim=3 → 341.3 kSPS (1.26 samples per GSM symbol at 270.833 kbaud).
          * This is close enough for differential GMSK demod with soft decisions.
          * The GSM symbol rate is 13e6/48 = 270833.33 Hz. */
-        #define GSM_DDC_DECIM    3
-        #define GSM_DDC_RATE     (GSM_SAMPLE_RATE / GSM_DDC_DECIM)  /* 341333 Hz */
-        #define GSM_SYMBOL_RATE  270833
+        /* Stage 3 uses 2.048 MSPS for high-quality GMSK demod (7.56 samp/sym).
+         * DDC decim=8 → 256 kSPS (0.945 samp/sym) — close to 1 samp/sym.
+         * The higher input rate gives the DDC/demod much better signal quality. */
+        /* Use 2.048 MSPS with NO DDC decimation (decim=1) for maximum GMSK quality.
+         * At 2.048 MSPS: 7.56 samples per GSM symbol (270.833 kbaud).
+         * The GMSK demod picks the best sample per symbol via interpolation. */
+        #define GSM_S3_SAMPLE_RATE  2048000
+        #define GSM_DDC_DECIM       1       /* No decimation — full 2.048 MSPS */
+        #define GSM_DDC_RATE        GSM_S3_SAMPLE_RATE
+        #define GSM_SYMBOL_RATE     270833
+        /* samp_per_sym = 2048000 / 270833 = 7.56 */
 
-        int s3_buf_size = GSM_DDC_RATE / 3;  /* ~113k samples for ~330ms */
-        float *s3_re = malloc(s3_buf_size * sizeof(float));
-        float *s3_im = malloc(s3_buf_size * sizeof(float));
+        int s3_buf_size = GSM_DDC_RATE / 5;  /* ~410k samples for 200ms */
+        float *s3_re = heap_caps_malloc(s3_buf_size * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        float *s3_im = heap_caps_malloc(s3_buf_size * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!s3_re || !s3_im) {
             ESP_LOGW(TAG, "Stage 3: alloc failed, skipping cell ID decode");
             free(s3_re); free(s3_im);
@@ -966,21 +974,22 @@ static void scan_task(void *arg)
                      (unsigned long)(ch->freq_hz / 1000000),
                      (unsigned long)((ch->freq_hz % 1000000) / 100000));
 
-            /* Retune and capture 200ms */
+            /* Switch to 2.048 MSPS for better GMSK demod quality */
+            rtlsdr_set_sample_rate(cfg->dev, GSM_S3_SAMPLE_RATE);
             rtlsdr_set_center_freq(cfg->dev, cand->step_center);
             vTaskDelay(pdMS_TO_TICKS(SETTLE_MS));
 
             esp_err_t ret = capture_iq(cfg->dwell_ms + 500);
             if (ret != ESP_OK) { ESP_LOGW(TAG, "  Capture timeout"); continue; }
 
-            /* DDC with decim=3 for GMSK-rate output (~341.3 kSPS) */
-            int nb_len = ddc_extract_r(s_kal.capture_buf, s_kal.capture_pos / 2,
-                                       cand->ddc_offset_hz, GSM_DDC_DECIM,
-                                       s3_re, s3_im, s3_buf_size);
+            /* DDC at 2.048 MSPS with decim=8 → 256 kSPS (~0.945 samp/sym) */
+            int nb_len = ddc_extract_rs(s_kal.capture_buf, s_kal.capture_pos / 2,
+                                        cand->ddc_offset_hz, GSM_DDC_DECIM,
+                                        GSM_S3_SAMPLE_RATE, s3_re, s3_im, s3_buf_size);
             if (nb_len < 1000) { ESP_LOGW(TAG, "  DDC too short"); continue; }
 
-            /* GMSK differential demod → soft bits */
-            int8_t *soft_bits = malloc(nb_len * sizeof(int8_t));
+            /* GMSK differential demod → soft bits (PSRAM for large buffers) */
+            int8_t *soft_bits = heap_caps_malloc(nb_len * sizeof(int8_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
             if (!soft_bits) continue;
             int n_bits = gsm_gmsk_demod(s3_re, s3_im, nb_len, soft_bits, nb_len);
 
@@ -1101,6 +1110,9 @@ static void scan_task(void *arg)
 
         free(s3_re);
         free(s3_im);
+
+        /* Restore sample rate back to GSM for any further operations */
+        rtlsdr_set_sample_rate(cfg->dev, sample_rate);
 skip_stage3:
 
         free(nb_re);
