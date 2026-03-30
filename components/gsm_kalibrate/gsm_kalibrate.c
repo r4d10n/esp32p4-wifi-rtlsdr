@@ -30,7 +30,7 @@ static const char *TAG = "kal";
 #define FFT_SIZE            1024
 #define FCCH_FREQ_HZ        67708.3f    /* GSM FCCH tone = (1625000/6)/4 Hz */
 #define CAPTURE_BUF_SIZE    (LTE_SAMPLE_RATE * 2 / 5)  /* 200ms at max rate = 819200 bytes */
-#define SCAN_TASK_STACK     16384
+#define SCAN_TASK_STACK     32768
 #define SCAN_TASK_PRIO      5
 #define SETTLE_MS           80          /* Tuner settle time after retune */
 #define TWO_PI              6.283185307f

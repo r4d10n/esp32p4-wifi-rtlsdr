@@ -301,7 +301,10 @@ typedef struct {
     int     n_id_1;     /* 0-167 */
     uint8_t subframe;   /* 0 or 5 */
     float   corr_mag;   /* Correlation magnitude */
+    float   second_corr;/* Second-best correlation (for validation) */
     bool    valid;       /* True if SSS was detected above threshold */
+    float   sss_ref[LTE_N_SC_PSS];  /* Matched SSS reference (for CFO) */
+    float   freq_err_hz;  /* PSS-SSS CFO estimate in Hz (when valid) */
 } sss_result_t;
 
 /**
@@ -429,48 +432,87 @@ static void sss_detect(lte_sync_t *ctx, int pss_offset, int n_id_2,
 
     /* Brute-force search: 168 N_ID_1 values x 2 subframes */
     float best_corr = 0.0f;
+    float second_corr = 0.0f;
     int   best_n_id_1 = 0;
     int   best_sf = 0;
-    float sss_ref[LTE_N_SC_PSS];
+    float sss_ref_tmp[LTE_N_SC_PSS];
     int   iter = 0;
 
     for (int sf = 0; sf <= 5; sf += 5) {
         for (int nid1 = 0; nid1 < 168; nid1++) {
-            gen_sss_ref(ctx, nid1, n_id_2, sf, sss_ref);
+            gen_sss_ref(ctx, nid1, n_id_2, sf, sss_ref_tmp);
 
-            /* Correlate: real-valued SSS ref against equalized SSS */
             float corr = 0.0f;
             for (int k = 0; k < LTE_N_SC_PSS; k++) {
-                corr += sss_eq_re[k] * sss_ref[k];
+                corr += sss_eq_re[k] * sss_ref_tmp[k];
             }
 
             float abs_corr = fabsf(corr);
             if (abs_corr > best_corr) {
+                second_corr = best_corr;
                 best_corr = abs_corr;
                 best_n_id_1 = nid1;
                 best_sf = sf;
+            } else if (abs_corr > second_corr) {
+                second_corr = abs_corr;
             }
 
             iter++;
-            /* Yield periodically to prevent WDT (336 iterations total) */
-            if (iter % 168 == 0) {
-                vTaskDelay(1);
-            }
+            if (iter % 168 == 0) vTaskDelay(1);
         }
     }
 
-    /* Determine if SSS is valid (compare best vs noise) */
-    float threshold = best_corr * 0.5f;
-    if (best_corr > threshold && best_corr > 0.01f) {
+    /* SSS is valid if best correlation is significantly above second-best.
+     * With 336 hypotheses, a real match should be >1.5x the next best. */
+    float ratio = (second_corr > 0.001f) ? best_corr / second_corr : 10.0f;
+    if (ratio > 1.05f && best_corr > 0.01f) {
         result->valid = true;
         result->n_id_1 = best_n_id_1;
         result->subframe = (uint8_t)best_sf;
         result->corr_mag = best_corr;
+        result->second_corr = second_corr;
 
-        ESP_LOGD(TAG, "SSS detect: N_ID_1=%d subframe=%d corr=%.2f",
-                 best_n_id_1, best_sf, best_corr);
+        /* Store the winning SSS reference for PSS-SSS CFO estimation */
+        gen_sss_ref(ctx, best_n_id_1, n_id_2, best_sf, result->sss_ref);
+
+        ESP_LOGD(TAG, "SSS: N_ID_1=%d sf=%d corr=%.2f ratio=%.2f",
+                 best_n_id_1, best_sf, best_corr, ratio);
     } else {
-        ESP_LOGD(TAG, "SSS not detected (best_corr=%.4f)", best_corr);
+        ESP_LOGD(TAG, "SSS rejected (corr=%.4f ratio=%.2f)", best_corr, ratio);
+    }
+
+    /* ── PSS-SSS frequency offset estimation ──
+     *
+     * Channel estimate from PSS: h_pss[k] = rx_pss[k] * conj(pss_ref[k])
+     * Channel estimate from SSS: h_sss[k] = rx_sss[k] * conj(sss_ref[k])
+     * Cross-correlation: M = Σ conj(h_sss[k]) × h_pss[k]
+     *   = Σ |H[k]|² × exp(j×2π×f_err×Δt)
+     * where Δt = (LTE_CPN + LTE_N_FFT) / Fs = 137/1920000 = 71.35 µs
+     *
+     * f_err = arg(M) / (2π × Δt)
+     * Unambiguous range: ±1/(2×Δt) = ±7003 Hz = ±8.8 PPM at 800 MHz
+     */
+    if (result->valid) {
+        /* h_pss already computed above (h_re, h_im) */
+        /* Compute h_sss: sss_rx * conj(sss_ref).
+         * sss_ref is real BPSK (±1), so conj(sss_ref) = sss_ref.
+         * h_sss = sss_rx * sss_ref */
+        float m_re = 0.0f, m_im = 0.0f;
+        for (int k = 0; k < LTE_N_SC_PSS; k++) {
+            float h_sss_re = sss_rx_re[k] * result->sss_ref[k];
+            float h_sss_im = sss_rx_im[k] * result->sss_ref[k];
+
+            /* M += conj(h_sss) * h_pss */
+            m_re += h_sss_re * h_re[k] + h_sss_im * h_im[k];
+            m_im += h_sss_re * h_im[k] - h_sss_im * h_re[k];
+        }
+
+        float delta_t = (float)(LTE_CPN + LTE_N_FFT) / (float)LTE_SAMPLE_RATE_HZ;
+        float phase = atan2f(m_im, m_re);
+        result->freq_err_hz = phase / (2.0f * (float)M_PI * delta_t);
+
+        ESP_LOGD(TAG, "PSS-SSS CFO: %.1f Hz (phase=%.4f, Δt=%.1fµs)",
+                 result->freq_err_hz, phase, delta_t * 1e6f);
     }
 }
 
@@ -567,13 +609,7 @@ int lte_sync_detect(lte_sync_t *ctx,
         return 0;
     }
 
-    /* Frequency estimation via split-phase method */
-    float freq_err = 0.0f;
-    if (pss.offset + LTE_N_FFT <= num_samples) {
-        freq_err = freq_estimate(ctx, pss.offset, pss.n_id_2);
-    }
-
-    /* SSS detection at PSS-indicated timing */
+    /* SSS detection at PSS-indicated timing (also computes PSS-SSS CFO) */
     sss_result_t sss;
     sss_detect(ctx, pss.offset, pss.n_id_2, num_samples, &sss);
 
@@ -583,9 +619,18 @@ int lte_sync_detect(lte_sync_t *ctx,
     cell->n_id_2 = (uint8_t)pss.n_id_2;
     cell->pss_power = pss.magnitude;
     cell->pss_offset = pss.offset;
+    cell->sss_valid = sss.valid;
+
+    /* Use PSS-SSS phase rotation CFO when SSS is valid (immune to multipath).
+     * Fall back to split-phase only when SSS fails. */
+    float freq_err = 0.0f;
+    if (sss.valid) {
+        freq_err = sss.freq_err_hz;
+    } else if (pss.offset + LTE_N_FFT <= num_samples) {
+        freq_err = freq_estimate(ctx, pss.offset, pss.n_id_2);
+    }
     cell->freq_error_hz = freq_err;
     cell->ppm = (carrier_hz > 0) ? (freq_err / (float)carrier_hz * 1e6f) : 0.0f;
-    cell->sss_valid = sss.valid;
 
     if (sss.valid) {
         cell->n_id_1 = (uint8_t)sss.n_id_1;
@@ -639,13 +684,15 @@ int lte_sync_detect(lte_sync_t *ctx,
 
             /* Accept second cell if strong enough (at least 30% of first) */
             if (pss2.magnitude > pss.magnitude * 0.3f && pss2.magnitude > 1.0f) {
-                float freq_err2 = 0.0f;
-                if (pss2.offset + LTE_N_FFT <= num_samples) {
-                    freq_err2 = freq_estimate(ctx, pss2.offset, pss2.n_id_2);
-                }
-
                 sss_result_t sss2;
                 sss_detect(ctx, pss2.offset, pss2.n_id_2, num_samples, &sss2);
+
+                float freq_err2 = 0.0f;
+                if (sss2.valid) {
+                    freq_err2 = sss2.freq_err_hz;
+                } else if (pss2.offset + LTE_N_FFT <= num_samples) {
+                    freq_err2 = freq_estimate(ctx, pss2.offset, pss2.n_id_2);
+                }
 
                 lte_cell_t *cell2 = &cells[cell_count];
                 memset(cell2, 0, sizeof(*cell2));
