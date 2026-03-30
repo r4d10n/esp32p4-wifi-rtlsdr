@@ -18,6 +18,7 @@
 #include "esp_timer.h"
 #include "cJSON.h"
 #include "gsm_kalibrate.h"
+#include "gsm_decode.h"
 #include "lte_sync.h"
 
 static const char *TAG = "kal";
@@ -915,6 +916,116 @@ static void scan_task(void *arg)
             }
         }
 
+        /* ── Stage 3: Cell Identity Decode (GSM only) ── */
+        ESP_LOGI(TAG, "── Stage 3: Cell identity decode (%d FCCH channels) ──", res->fcch_count);
+
+        /* Allocate fresh DDC buffers for Stage 3 (Stage 2 buffers were freed) */
+        int s3_buf_size = GSM_SAMPLE_RATE / 5;  /* 204800 samples for 200ms at 204.8 kSPS */
+        float *s3_re = malloc(s3_buf_size * sizeof(float));
+        float *s3_im = malloc(s3_buf_size * sizeof(float));
+        if (!s3_re || !s3_im) {
+            ESP_LOGW(TAG, "Stage 3: alloc failed, skipping cell ID decode");
+            free(s3_re); free(s3_im);
+            goto skip_stage3;
+        }
+
+        for (int i = 0; i < res->channel_count && !s_kal.scan_abort; i++) {
+            kal_channel_t *ch = &res->channels[i];
+            if (!ch->fcch_detected || ch->burst_count == 0) continue;
+
+            /* Find the candidate entry for this channel */
+            candidate_t *cand = NULL;
+            for (int c = 0; c < cand_count; c++) {
+                if (candidates[c].arfcn == ch->arfcn) {
+                    cand = &candidates[c];
+                    break;
+                }
+            }
+            if (!cand) continue;
+
+            ESP_LOGI(TAG, "  Decoding ARFCN %d (%lu.%01lu MHz)...",
+                     ch->arfcn,
+                     (unsigned long)(ch->freq_hz / 1000000),
+                     (unsigned long)((ch->freq_hz % 1000000) / 100000));
+
+            /* Retune and capture 200ms (fits in capture buffer at GSM rate) */
+            rtlsdr_set_center_freq(cfg->dev, cand->step_center);
+            vTaskDelay(pdMS_TO_TICKS(SETTLE_MS));
+
+            esp_err_t ret = capture_iq(cfg->dwell_ms + 500);
+            if (ret != ESP_OK) {
+                ESP_LOGW(TAG, "  Capture timeout, skipping");
+                continue;
+            }
+
+            /* DDC extract narrowband channel */
+            int nb_len = ddc_extract(s_kal.capture_buf, s_kal.capture_pos / 2,
+                                     cand->ddc_offset_hz, s3_re, s3_im, s3_buf_size);
+            if (nb_len < 500) continue;
+
+            /* GMSK demodulate */
+            int8_t *soft_bits = malloc(nb_len * sizeof(int8_t));
+            if (!soft_bits) continue;
+
+            int n_bits = gsm_gmsk_demod(s3_re, s3_im, nb_len, soft_bits, nb_len);
+            ESP_LOGD(TAG, "  GMSK demod: %d samples → %d bits", nb_len, n_bits);
+
+            /* Try SCH decode — search every 148 bits (one burst period) */
+            gsm_sch_info_t sch_info;
+            memset(&sch_info, 0, sizeof(sch_info));
+            bool sch_found = false;
+            for (int off = 0; off + GSM_BURST_LEN <= n_bits; off += GSM_BURST_LEN) {
+                if (gsm_sch_decode(&soft_bits[off], &sch_info)) {
+                    ch->cell_id.bsic = sch_info.bsic;
+                    sch_found = true;
+                    ESP_LOGI(TAG, "  SCH: BSIC=%d (NCC=%d BCC=%d) FN=%lu",
+                             sch_info.bsic, sch_info.ncc, sch_info.bcc,
+                             (unsigned long)sch_info.fn);
+                    break;
+                }
+            }
+
+            /* Try BCCH decode — extract 4 consecutive bursts at 148-bit boundaries */
+            bool si3_found = false;
+            for (int start = 0; start + 148 * 4 <= n_bits && !si3_found; start += 148) {
+                int8_t bcch_bursts[4][116];
+                bool valid_window = true;
+
+                for (int b = 0; b < 4; b++) {
+                    int boff = start + b * 148;
+                    if (boff + 148 > n_bits) { valid_window = false; break; }
+                    /* Normal burst: [3 tail][57 data][26 train][57 data][3 tail][guard] */
+                    memcpy(&bcch_bursts[b][0], &soft_bits[boff + 3], 57);
+                    memcpy(&bcch_bursts[b][57], &soft_bits[boff + 3 + 57 + 26], 57);
+                }
+                if (!valid_window) break;
+
+                uint8_t l2_frame[GSM_BCCH_BLOCK_LEN];
+                if (gsm_bcch_decode(bcch_bursts, l2_frame)) {
+                    gsm_cell_id_t cid;
+                    if (gsm_parse_si3(l2_frame, &cid)) {
+                        ch->cell_id = cid;
+                        ch->cell_id.bsic = sch_info.bsic;
+                        ch->cell_id.valid = true;
+                        si3_found = true;
+                        ESP_LOGI(TAG, "  *** CELL: MCC=%d MNC=%d LAC=%d CID=%d BSIC=%d ***",
+                                 cid.mcc, cid.mnc, cid.lac, cid.cell_id, sch_info.bsic);
+                    }
+                }
+            }
+
+            if (!sch_found && !si3_found) {
+                ESP_LOGI(TAG, "  No SCH/BCCH decoded (signal too weak or timing unknown)");
+            }
+
+            free(soft_bits);
+            vTaskDelay(1);  /* Yield between channels */
+        }
+
+        free(s3_re);
+        free(s3_im);
+skip_stage3:
+
         free(nb_re);
         free(nb_im);
     } /* end GSM/LTE branch */
@@ -945,6 +1056,16 @@ static void scan_task(void *arg)
         ESP_LOGW(TAG, "║  No FCCH bursts detected — cannot calibrate ║");
     }
     ESP_LOGI(TAG, "╚══════════════════════════════════════════════╝");
+
+    /* Print decoded cell identities */
+    for (int i = 0; i < res->channel_count; i++) {
+        const kal_channel_t *ch = &res->channels[i];
+        if (ch->cell_id.valid) {
+            ESP_LOGI(TAG, "  ARFCN %3d: MCC=%d MNC=%d LAC=%d CellID=%d BSIC=%d",
+                     ch->arfcn, ch->cell_id.mcc, ch->cell_id.mnc,
+                     ch->cell_id.lac, ch->cell_id.cell_id, ch->cell_id.bsic);
+        }
+    }
 
 cleanup:
     free(candidates);
@@ -1095,6 +1216,13 @@ static esp_err_t http_get_results(httpd_req_t *req)
             cJSON_AddNumberToObject(jch, "freq_error_hz", ch->freq_error_hz);
             cJSON_AddNumberToObject(jch, "ppm", ch->ppm);
             cJSON_AddNumberToObject(jch, "bursts", ch->burst_count);
+        }
+        if (ch->cell_id.valid) {
+            cJSON_AddNumberToObject(jch, "mcc", ch->cell_id.mcc);
+            cJSON_AddNumberToObject(jch, "mnc", ch->cell_id.mnc);
+            cJSON_AddNumberToObject(jch, "lac", ch->cell_id.lac);
+            cJSON_AddNumberToObject(jch, "cell_id", ch->cell_id.cell_id);
+            cJSON_AddNumberToObject(jch, "bsic", ch->cell_id.bsic);
         }
         cJSON_AddItemToArray(channels, jch);
     }

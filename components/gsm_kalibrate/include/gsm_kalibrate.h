@@ -19,6 +19,7 @@
 #include "esp_err.h"
 #include "esp_http_server.h"
 #include "rtlsdr.h"
+#include "gsm_decode.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -63,6 +64,7 @@ typedef struct {
     uint8_t  n_id_2;           /* LTE: PSS root index (0-2), GSM: unused */
     uint16_t pci;              /* LTE: Physical Cell ID (0-503), GSM: unused */
     float    confidence;        /* LTE: correlation confidence 0-1, GSM: unused */
+    gsm_cell_id_t cell_id;     /* GSM: decoded cell identity (MCC/MNC/LAC/CellID) */
 } kal_channel_t;
 
 typedef enum {
