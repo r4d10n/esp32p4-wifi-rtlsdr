@@ -1,7 +1,10 @@
 /*
- * ESP32-P4 RTL-SDR WiFi Bridge — Main Application
+ * ESP32-P4 GSM Kalibrate — RTL-SDR PPM Calibration
  *
- * USB Host → RTL-SDR → Ring Buffer → RTL-TCP Server → WiFi/Ethernet → Client
+ * USB Host → RTL-SDR → IQ Samples → GSM FCCH Detection → PPM Offset
+ *
+ * Scans GSM bands for active BCCH channels, detects FCCH bursts,
+ * and computes the RTL-SDR frequency correction in PPM.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -22,9 +25,7 @@
 #include "esp_eth_driver.h"
 #include "driver/gpio.h"
 #include "rtlsdr.h"
-#include "rtltcp.h"
-#include "rtludp.h"
-#include "websdr.h"
+#include "gsm_kalibrate.h"
 
 static const char *TAG = "main";
 
@@ -32,14 +33,10 @@ static const char *TAG = "main";
 #define WIFI_SSID       CONFIG_WIFI_SSID
 #define WIFI_PASS       CONFIG_WIFI_PASSWORD
 
-/* RTL-SDR default configuration */
-#define DEFAULT_FREQ        100000000   /* 100 MHz */
-#define DEFAULT_SAMPLE_RATE 1024000     /* 1.024 MSPS */
+/* Default scan band */
+#define DEFAULT_BAND    KAL_BAND_GSM900
 
-static rtlsdr_dev_t    *sdr_dev = NULL;
-static rtltcp_server_t *tcp_srv = NULL;
-static rtludp_server_t *udp_srv = NULL;
-static websdr_server_t *websdr_srv = NULL;
+static rtlsdr_dev_t *sdr_dev = NULL;
 
 /* ──────────────────────── WiFi Event Handler ──────────────────────── */
 
@@ -114,12 +111,6 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
     case ETHERNET_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "Ethernet Link Down");
         break;
-    case ETHERNET_EVENT_START:
-        ESP_LOGI(TAG, "Ethernet Started");
-        break;
-    case ETHERNET_EVENT_STOP:
-        ESP_LOGI(TAG, "Ethernet Stopped");
-        break;
     default:
         break;
     }
@@ -136,7 +127,6 @@ static esp_err_t ethernet_init(void)
 {
     ESP_LOGI(TAG, "Initializing Ethernet (IP101 PHY, RMII)...");
 
-    /* EMAC config */
     eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
     eth_esp32_emac_config_t esp32_emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
     esp32_emac_config.smi_gpio.mdc_num = CONFIG_RTLSDR_ETH_MDC_GPIO;
@@ -145,7 +135,6 @@ static esp_err_t ethernet_init(void)
     esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&esp32_emac_config, &mac_config);
     ESP_RETURN_ON_FALSE(mac, ESP_FAIL, TAG, "MAC create failed");
 
-    /* PHY config (IP101) */
     eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
     phy_config.phy_addr = CONFIG_RTLSDR_ETH_PHY_ADDR;
     phy_config.reset_gpio_num = CONFIG_RTLSDR_ETH_PHY_RST_GPIO;
@@ -153,13 +142,11 @@ static esp_err_t ethernet_init(void)
     esp_eth_phy_t *phy = esp_eth_phy_new_ip101(&phy_config);
     ESP_RETURN_ON_FALSE(phy, ESP_FAIL, TAG, "PHY create failed");
 
-    /* Ethernet driver */
     esp_eth_config_t eth_config = ETH_DEFAULT_CONFIG(mac, phy);
     esp_eth_handle_t eth_handle = NULL;
     ESP_RETURN_ON_ERROR(esp_eth_driver_install(&eth_config, &eth_handle),
                         TAG, "ETH driver install failed");
 
-    /* Attach to TCP/IP stack */
     esp_netif_config_t netif_config = ESP_NETIF_DEFAULT_ETH();
     esp_netif_t *eth_netif = esp_netif_new(&netif_config);
 
@@ -167,11 +154,9 @@ static esp_err_t ethernet_init(void)
     ESP_RETURN_ON_ERROR(esp_netif_attach(eth_netif, eth_glue),
                         TAG, "Netif attach failed");
 
-    /* Register event handlers */
     esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL);
     esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &eth_got_ip_handler, NULL);
 
-    /* Start Ethernet */
     ESP_RETURN_ON_ERROR(esp_eth_start(eth_handle), TAG, "ETH start failed");
 
     ESP_LOGI(TAG, "Ethernet initialized (MDC=%d MDIO=%d PHY_ADDR=%d)",
@@ -180,59 +165,6 @@ static esp_err_t ethernet_init(void)
     return ESP_OK;
 }
 #endif /* CONFIG_RTLSDR_ETHERNET_ENABLE */
-
-/* ──────────────────────── Multicast Setup ──────────────────────── */
-
-#ifdef CONFIG_RTLSDR_MULTICAST_ENABLE
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-
-static int multicast_fd = -1;
-static struct sockaddr_in multicast_addr;
-
-static esp_err_t multicast_init(void)
-{
-    ESP_LOGI(TAG, "Initializing Multicast UDP to %s:%d",
-             CONFIG_RTLSDR_MULTICAST_GROUP, CONFIG_RTLSDR_MULTICAST_PORT);
-
-    multicast_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    ESP_RETURN_ON_FALSE(multicast_fd >= 0, ESP_FAIL, TAG, "Multicast socket failed");
-
-    /* Set TTL for multicast */
-    int ttl = 4;
-    setsockopt(multicast_fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
-
-    /* Enable loopback so local listeners can receive too */
-    int loop = 1;
-    setsockopt(multicast_fd, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop));
-
-    /* Destination */
-    memset(&multicast_addr, 0, sizeof(multicast_addr));
-    multicast_addr.sin_family = AF_INET;
-    multicast_addr.sin_port = htons(CONFIG_RTLSDR_MULTICAST_PORT);
-    inet_aton(CONFIG_RTLSDR_MULTICAST_GROUP, &multicast_addr.sin_addr);
-
-    ESP_LOGI(TAG, "Multicast ready: %s:%d (TTL=%d)",
-             CONFIG_RTLSDR_MULTICAST_GROUP, CONFIG_RTLSDR_MULTICAST_PORT, ttl);
-    return ESP_OK;
-}
-
-/* Called from IQ callback to send multicast */
-static void multicast_push_samples(const uint8_t *data, uint32_t len)
-{
-    if (multicast_fd < 0) return;
-
-    /* Send raw IQ in 1024-byte chunks */
-    uint32_t offset = 0;
-    while (offset < len) {
-        uint32_t chunk = (len - offset > 1024) ? 1024 : (len - offset);
-        sendto(multicast_fd, data + offset, chunk, MSG_DONTWAIT,
-               (struct sockaddr *)&multicast_addr, sizeof(multicast_addr));
-        offset += chunk;
-    }
-}
-#endif /* CONFIG_RTLSDR_MULTICAST_ENABLE */
 
 /* ──────────────────────── mDNS Service ──────────────────────── */
 
@@ -244,11 +176,11 @@ static void mdns_init_service(void)
         return;
     }
 
-    mdns_hostname_set("esp32p4-rtlsdr");
-    mdns_instance_name_set("ESP32-P4 RTL-SDR");
+    mdns_hostname_set("esp32p4-kalibrate");
+    mdns_instance_name_set("ESP32-P4 GSM Kalibrate");
 
-    mdns_service_add(NULL, "_rtl_tcp", "_tcp", RTLTCP_DEFAULT_PORT, NULL, 0);
-    ESP_LOGI(TAG, "mDNS: esp32p4-rtlsdr._rtl_tcp._tcp:%d", RTLTCP_DEFAULT_PORT);
+    mdns_service_add(NULL, "_http", "_tcp", 8085, NULL, 0);
+    ESP_LOGI(TAG, "mDNS: esp32p4-kalibrate._http._tcp:8085");
 }
 
 /* ──────────────────────── USB Host Task ──────────────────────── */
@@ -260,26 +192,12 @@ static void usb_host_task(void *arg)
     }
 }
 
-/* ──────────────────────── IQ Callback (USB → Ring Buffer) ──────────────────────── */
+/* ──────────────────────── IQ Callback → Kalibrate ──────────────────────── */
 
 static void iq_data_cb(uint8_t *buf, uint32_t len, void *ctx)
 {
     (void)ctx;
-    /* Push to TCP server if running */
-    if (tcp_srv) {
-        rtltcp_push_samples(tcp_srv, buf, len);
-    }
-    /* Push to UDP server if running */
-    if (udp_srv) {
-        rtludp_push_samples(udp_srv, buf, len);
-    }
-    /* Push to WebSDR server if running */
-    if (websdr_srv) {
-        websdr_push_samples(websdr_srv, buf, len);
-    }
-#ifdef CONFIG_RTLSDR_MULTICAST_ENABLE
-    multicast_push_samples(buf, len);
-#endif
+    kal_push_samples(buf, len);
 }
 
 /* ──────────────────────── SDR Streaming Task ──────────────────────── */
@@ -290,8 +208,7 @@ static void sdr_stream_task(void *arg)
              (unsigned long)rtlsdr_get_sample_rate(sdr_dev),
              (unsigned long)rtlsdr_get_center_freq(sdr_dev));
 
-    /* This blocks until rtlsdr_stop_async() is called */
-    esp_err_t ret = rtlsdr_read_async(sdr_dev, iq_data_cb, tcp_srv, 0, 0); /* use defaults: 12 x 64KB */
+    esp_err_t ret = rtlsdr_read_async(sdr_dev, iq_data_cb, NULL, 0, 0);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Async read ended with error: %s", esp_err_to_name(ret));
     }
@@ -304,13 +221,10 @@ static void sdr_stream_task(void *arg)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "ESP32-P4 RTL-SDR WiFi Bridge starting...");
-
-    /* Run FFT benchmark at startup (set to 1 to enable) */
-#if 0
-    extern void bench_fft_all(void);
-    bench_fft_all();
-#endif
+    ESP_LOGI(TAG, "╔══════════════════════════════════════════╗");
+    ESP_LOGI(TAG, "║   ESP32-P4 GSM Kalibrate                ║");
+    ESP_LOGI(TAG, "║   RTL-SDR PPM Calibration via FCCH      ║");
+    ESP_LOGI(TAG, "╚══════════════════════════════════════════╝");
 
     /* Initialize NVS (required by WiFi) */
     esp_err_t ret = nvs_flash_init();
@@ -324,21 +238,15 @@ void app_main(void)
     ESP_ERROR_CHECK(wifi_init_sta());
 
 #ifdef CONFIG_RTLSDR_ETHERNET_ENABLE
-    /* Initialize Ethernet (runs alongside WiFi) */
     ret = ethernet_init();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Ethernet init failed: %s (WiFi still active)", esp_err_to_name(ret));
     }
 #endif
 
-    /* Wait for IP address (WiFi or Ethernet) */
+    /* Wait for network */
     ESP_LOGI(TAG, "Waiting for network connection...");
     vTaskDelay(pdMS_TO_TICKS(5000));
-
-#ifdef CONFIG_RTLSDR_MULTICAST_ENABLE
-    /* Initialize Multicast (best on Ethernet) */
-    multicast_init();
-#endif
 
     /* Start mDNS */
     mdns_init_service();
@@ -361,44 +269,63 @@ void app_main(void)
         return;
     }
 
-    /* Configure SDR */
+    /* Configure SDR — initial frequency doesn't matter, scan will retune */
     rtlsdr_config_t sdr_config = RTLSDR_CONFIG_DEFAULT();
-    sdr_config.center_freq = DEFAULT_FREQ;
-    sdr_config.sample_rate = DEFAULT_SAMPLE_RATE;
+    sdr_config.sample_rate = 1024000;
+    sdr_config.center_freq = 935000000;  /* Start in GSM900 range */
     ESP_ERROR_CHECK(rtlsdr_configure(sdr_dev, &sdr_config));
 
-    /* Start RTL-TCP server */
-    rtltcp_config_t tcp_config = RTLTCP_CONFIG_DEFAULT();
-    tcp_config.dev = sdr_dev;
-    ESP_ERROR_CHECK(rtltcp_server_start(&tcp_srv, &tcp_config));
-
-    /* Start RTL-UDP server */
-    rtludp_config_t udp_config = RTLUDP_CONFIG_DEFAULT();
-    udp_config.dev = sdr_dev;
-    ESP_ERROR_CHECK(rtludp_server_start(&udp_srv, &udp_config));
-
-    /* Start WebSDR server */
-    websdr_config_t websdr_config = WEBSDR_CONFIG_DEFAULT();
-    websdr_config.dev = sdr_dev;
-    ESP_ERROR_CHECK(websdr_server_start(&websdr_srv, &websdr_config));
+    /* Initialize GSM Kalibrate engine */
+    kal_config_t kal_config = KAL_CONFIG_DEFAULT();
+    kal_config.dev = sdr_dev;
+    kal_config.band = DEFAULT_BAND;
+    kal_config.threshold_db = 6.0f;
+    kal_config.gain = 0;        /* AGC for scanning */
+    kal_config.dwell_ms = 200;
+    kal_config.fcch_bursts = 8;
+    ESP_ERROR_CHECK(kal_init(&kal_config));
 
     /* Start SDR streaming task on Core 0 (with USB) */
     xTaskCreatePinnedToCore(sdr_stream_task, "sdr_stream", 8192, NULL, 8, NULL, 0);
 
-    ESP_LOGI(TAG, "=== RTL-TCP server ready on port %d ===", RTLTCP_DEFAULT_PORT);
-    ESP_LOGI(TAG, "=== RTL-UDP server ready on port %d ===", RTLUDP_DEFAULT_PORT);
-    ESP_LOGI(TAG, "=== WebSDR server ready on port %d ===", WEBSDR_DEFAULT_PORT);
-    ESP_LOGI(TAG, "Connect TCP: SDR++ / GQRX → rtl_tcp at port %d", RTLTCP_DEFAULT_PORT);
-    ESP_LOGI(TAG, "Connect UDP: send any packet to port %d to subscribe", RTLUDP_DEFAULT_PORT);
+    /* Allow streaming to stabilize */
+    vTaskDelay(pdMS_TO_TICKS(1000));
 
-    /* Main task just monitors status */
+    /* Auto-start scan */
+    ESP_LOGI(TAG, "Starting automatic scan of %s...",
+             kal_get_band_info(DEFAULT_BAND)->name);
+    ESP_ERROR_CHECK(kal_scan_start(DEFAULT_BAND));
+
+    ESP_LOGI(TAG, "=== Kalibrate HTTP API on port 8085 ===");
+    ESP_LOGI(TAG, "  GET  /api/kalibrate         — results");
+    ESP_LOGI(TAG, "  GET  /api/kalibrate/status   — progress");
+    ESP_LOGI(TAG, "  POST /api/kalibrate/scan     — trigger scan");
+
+    /* Monitor scan progress */
     while (1) {
-        bool tcp_conn = rtltcp_is_client_connected(tcp_srv);
-        bool udp_conn = rtludp_is_client_active(udp_srv);
-        ESP_LOGI(TAG, "Status: tcp=%s udp=%s freq=%luHz rate=%luHz",
-                 tcp_conn ? "YES" : "no", udp_conn ? "YES" : "no",
-                 (unsigned long)rtlsdr_get_center_freq(sdr_dev),
-                 (unsigned long)rtlsdr_get_sample_rate(sdr_dev));
+        const kal_result_t *res = kal_get_result();
+
+        switch (res->state) {
+        case KAL_STATE_SCANNING:
+            ESP_LOGI(TAG, "Scanning... step %d/%d, %d channels found",
+                     res->current_step, res->total_steps, res->channel_count);
+            break;
+        case KAL_STATE_COMPLETE:
+            if (res->fcch_count > 0) {
+                ESP_LOGI(TAG, "Calibration: PPM = %+.2f (stddev %.2f, %d channels)",
+                         res->avg_ppm, res->stddev_ppm, res->fcch_count);
+            } else {
+                ESP_LOGI(TAG, "Scan complete — %d channels found, no FCCH detected",
+                         res->channel_count);
+            }
+            break;
+        case KAL_STATE_ERROR:
+            ESP_LOGE(TAG, "Scan error: %s", res->status_msg);
+            break;
+        default:
+            break;
+        }
+
         vTaskDelay(pdMS_TO_TICKS(10000));
     }
 }
