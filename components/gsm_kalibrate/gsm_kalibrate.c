@@ -384,23 +384,56 @@ static int fcch_detect(const float *nb_re, const float *nb_im, int nb_len,
         inst_freq[i] = phase * nb_rate / TWO_PI;
     }
 
-    /* Sliding window FCCH detection */
-    int window = 50;  /* ~0.24 ms at 204.8 kSPS — about half an FCCH burst */
+    /* Noise-adaptive two-pass FCCH detection.
+     *
+     * Pass 1: Compute overall variance of FM discriminator output.
+     *         This captures the noise floor — AWGN produces high variance,
+     *         while FCCH (pure tone) produces very low variance.
+     *
+     * Pass 2: Find windows where variance < 10% of overall variance
+     *         AND mean frequency is near 67708 Hz.
+     *
+     * This is noise-adaptive: works at any SNR because FCCH windows
+     * always have much lower variance than noise/modulated windows. */
+    int window = 80;  /* ~0.39 ms at 204.8 kSPS — captures most of FCCH burst */
     float expected_freq = FCCH_FREQ_HZ;
-    float freq_tolerance = expected_freq * 0.5f;  /* 50% tolerance */
-    /* Variance threshold in Hz²: stddev < ~3 kHz for a near-pure FCCH tone.
-     * RTL-SDR phase noise produces ~1-3 kHz jitter on instantaneous frequency.
-     * 9e6 Hz² = (3000 Hz)² — empirically appropriate for consumer SDRs. */
-    float var_threshold = 9e6f;
+    float freq_tolerance = expected_freq * 0.6f;  /* 60% tolerance for freq check */
 
+    if (phase_len < window) {
+        free(inst_freq);
+        return 0;
+    }
+
+    /* Pass 1: Compute overall variance across the entire capture */
+    float global_sum = 0, global_sum2 = 0;
+    for (int i = 0; i < phase_len; i++) {
+        global_sum += inst_freq[i];
+        global_sum2 += inst_freq[i] * inst_freq[i];
+    }
+    float global_var = global_sum2 / (float)phase_len -
+                       (global_sum / (float)phase_len) * (global_sum / (float)phase_len);
+
+    /* Adaptive threshold: FCCH windows should have < 10% of overall variance.
+     * Also enforce a minimum floor to avoid false positives on dead air. */
+    float var_threshold = global_var * 0.10f;
+    float var_floor = 1e4f;  /* Minimum variance (100 Hz stddev) — below this is DC/dead */
+    if (var_threshold < var_floor) var_threshold = var_floor;
+
+    /* Pass 2: Find FCCH bursts — low variance + correct mean frequency */
     int burst_count = 0;
     float freq_sum = 0;
-    int cooldown = 0;  /* Prevent double-counting same burst */
+    int cooldown = 0;
+
+    /* Diagnostics: track best candidate window */
+    float best_var = 1e30f;
+    float best_mean = 0;
+    float best_var_near = 1e30f;  /* Best variance among windows with mean near FCCH freq */
+    float best_mean_near = 0;
+    int windows_checked = 0;
 
     for (int i = 0; i <= phase_len - window; i++) {
         if (cooldown > 0) { cooldown--; continue; }
 
-        /* Compute mean and variance in window */
         float sum = 0, sum2 = 0;
         for (int j = 0; j < window; j++) {
             float f = inst_freq[i + j];
@@ -409,15 +442,28 @@ static int fcch_detect(const float *nb_re, const float *nb_im, int nb_len,
         }
         float mean = sum / (float)window;
         float variance = sum2 / (float)window - mean * mean;
+        windows_checked++;
 
-        /* Check: low variance + mean near expected FCCH frequency */
-        if (variance < var_threshold &&
+        /* Track best overall window */
+        if (variance < best_var) { best_var = variance; best_mean = mean; }
+
+        /* Track best window near expected FCCH frequency */
+        if (fabsf(mean - expected_freq) < freq_tolerance && variance < best_var_near) {
+            best_var_near = variance;
+            best_mean_near = mean;
+        }
+
+        if (variance > var_floor && variance < var_threshold &&
             fabsf(mean - expected_freq) < freq_tolerance) {
             burst_count++;
             freq_sum += mean;
-            cooldown = window * 2;  /* Skip past this burst */
+            cooldown = window * 3;  /* Skip past this burst + guard */
         }
     }
+
+    ESP_LOGD(TAG, "FCCH: gvar=%.0f thr=%.0f best=%.0f@%.0fHz near=%.0f@%.0fHz w=%d",
+             global_var, var_threshold, best_var, best_mean,
+             best_var_near, best_mean_near, windows_checked);
 
     free(inst_freq);
 
