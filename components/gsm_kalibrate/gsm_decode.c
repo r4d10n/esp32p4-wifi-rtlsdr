@@ -383,42 +383,569 @@ bool gsm_sch_decode(const int8_t *burst_bits, gsm_sch_info_t *info)
 }
 
 /* ════════════════════════════════════════════════════════════════
- *  GMSK Differential Demodulation
+ *  GMSK-MLSE Demodulation (airprobe / gr-gsm algorithm)
+ *
+ *  Pipeline:
+ *    1. Map known training sequence to GMSK IQ waveform
+ *    2. Correlate received IQ with training template → burst timing
+ *    3. Estimate channel impulse response (CIR) at training position
+ *    4. Matched filter (MAFI): convolve with conjugate CIR → symbol rate
+ *    5. 16-state Viterbi MLSE equalization → 148 hard/soft bits
  * ════════════════════════════════════════════════════════════════ */
+
+#define CHAN_IMP_RESP_LENGTH  GSM_CHAN_IMP_LEN   /* 5 symbols */
+#define MLSE_STATES           16                 /* 2^(CHAN_IMP_RESP_LENGTH-1) */
+
+/* GSM normal burst training sequences (3GPP TS 05.02, Table 5.2.3) */
+static const uint8_t gsm_train_seq[8][26] = {
+    {0,0,1,0,0,1,0,1,1,1,0,0,0,0,1,0,0,0,1,0,0,1,0,1,1,1},
+    {0,0,1,0,1,1,0,1,1,1,0,1,1,1,1,0,0,0,1,0,1,1,0,1,1,1},
+    {0,1,0,0,0,0,1,1,1,0,1,1,1,0,1,0,0,1,0,0,0,0,1,1,1,0},
+    {0,1,0,0,0,1,1,1,1,0,1,1,0,1,0,0,0,1,0,0,0,1,1,1,1,0},
+    {0,0,0,1,1,0,1,0,1,1,1,0,0,1,0,0,0,0,0,1,1,0,1,0,1,1},
+    {0,1,0,0,1,1,1,0,1,0,1,1,0,0,0,0,0,1,0,0,1,1,1,0,1,0},
+    {1,0,1,0,0,1,1,1,1,1,0,1,1,0,0,0,1,0,1,0,0,1,1,1,1,1},
+    {1,1,1,0,1,1,1,1,0,0,0,1,0,0,1,0,1,1,1,0,1,1,1,1,0,0},
+};
+
+/* Training sequence used for correlation: middle 16 of 26 bits (indices 5..20)
+ * to avoid edge effects from the channel impulse response */
+#define TRAIN_CORR_START    5
+#define TRAIN_CORR_LEN      16
+
+/* SCH training: 64 bits, use middle 48 for correlation (indices 8..55) */
+#define SCH_TRAIN_CORR_START  8
+#define SCH_TRAIN_CORR_LEN    48
+
+/* ── A. GMSK Mapper ── */
+
+/* Generate GMSK-mapped complex IQ waveform for a known bit sequence.
+ * Uses Laurent principal pulse approximation (90-degree rotation per symbol).
+ *
+ * bits: input bit sequence (0/1)
+ * n_bits: number of bits
+ * osr: oversampling ratio (4 typical)
+ * out_re, out_im: output complex waveform (n_bits * osr samples)
+ */
+static void gsm_gmsk_mapper(const uint8_t *bits, int n_bits, int osr,
+                            float *out_re, float *out_im)
+{
+    float phase = 0;
+    int prev_nrz = 1;  /* assume previous bit was 1 */
+
+    for (int i = 0; i < n_bits; i++) {
+        int nrz = 2 * bits[i] - 1;
+        int diff = nrz * prev_nrz;
+        /* GMSK: each symbol rotates +/-pi/2 */
+        float delta_phase = diff * (float)(M_PI / 2.0);
+        phase += delta_phase;
+
+        for (int k = 0; k < osr; k++) {
+            int idx = i * osr + k;
+            out_re[idx] = cosf(phase);
+            out_im[idx] = sinf(phase);
+        }
+        prev_nrz = nrz;
+    }
+}
+
+/* ── B. Training Sequence Correlator ── */
+
+/* Correlate received IQ signal with GMSK-mapped training sequence.
+ * Returns the sample offset of the best correlation peak.
+ *
+ * iq_re, iq_im: received IQ at OSR samples/symbol
+ * n_samples: total received samples
+ * train_re, train_im: GMSK-mapped training template
+ * template_len: length of training template in samples
+ * search_start, search_end: range to search (sample indices)
+ * peak_power: output - correlation power at peak
+ *
+ * Returns: sample offset of peak, or -1 if no significant peak found
+ */
+static int gsm_correlate_training(const float *iq_re, const float *iq_im,
+                                  int n_samples,
+                                  const float *train_re, const float *train_im,
+                                  int template_len,
+                                  int search_start, int search_end,
+                                  float *peak_power)
+{
+    float best_pwr = 0;
+    int best_off = -1;
+
+    if (search_end > n_samples - template_len)
+        search_end = n_samples - template_len;
+    if (search_start < 0)
+        search_start = 0;
+
+    for (int off = search_start; off <= search_end; off++) {
+        float acc_re = 0, acc_im = 0;
+        for (int k = 0; k < template_len; k++) {
+            /* conj(template) * received */
+            float tr = train_re[k];
+            float ti = train_im[k];
+            float rr = iq_re[off + k];
+            float ri = iq_im[off + k];
+            acc_re += tr * rr + ti * ri;
+            acc_im += tr * ri - ti * rr;
+        }
+        float pwr = acc_re * acc_re + acc_im * acc_im;
+        if (pwr > best_pwr) {
+            best_pwr = pwr;
+            best_off = off;
+        }
+    }
+
+    if (peak_power) *peak_power = best_pwr;
+    return best_off;
+}
+
+/* ── C. Channel Estimator ── */
+
+/* Estimate channel impulse response from training sequence position.
+ *
+ * rx_re, rx_im: received IQ at training position (TRAIN_LEN * OSR samples)
+ * train_re, train_im: known GMSK training waveform
+ * train_samps: number of training template samples
+ * osr: oversampling ratio
+ * chan_re, chan_im: output CIR (CHAN_IMP_RESP_LENGTH * osr taps)
+ * rhh_re, rhh_im: output CIR autocorrelation (CHAN_IMP_RESP_LENGTH values,
+ *                  sampled at symbol rate, i.e. every osr-th lag)
+ */
+static void gsm_channel_estimate(const float *rx_re, const float *rx_im,
+                                 const float *train_re, const float *train_im,
+                                 int train_samps, int osr,
+                                 float *chan_re, float *chan_im,
+                                 float *rhh_re, float *rhh_im)
+{
+    int cir_len = CHAN_IMP_RESP_LENGTH * osr;
+
+    /* Compute CIR: chan[l] = sum_k conj(train[k]) * rx[k+l] */
+    float energy = 0;
+    for (int k = 0; k < train_samps; k++) {
+        energy += train_re[k] * train_re[k] + train_im[k] * train_im[k];
+    }
+    if (energy < 1e-10f) energy = 1.0f;
+
+    for (int l = 0; l < cir_len; l++) {
+        float acc_re = 0, acc_im = 0;
+        int limit = train_samps;
+        if (limit > train_samps - l) limit = train_samps - l;
+        for (int k = 0; k < limit; k++) {
+            float tr = train_re[k];
+            float ti = train_im[k];
+            float rr = rx_re[k + l];
+            float ri = rx_im[k + l];
+            acc_re += tr * rr + ti * ri;   /* conj(train) * rx */
+            acc_im += tr * ri - ti * rr;
+        }
+        chan_re[l] = acc_re / energy;
+        chan_im[l] = acc_im / energy;
+    }
+
+    /* Compute autocorrelation: rhh[i] = sum_k conj(chan[k]) * chan[k + i*osr]
+     * for i = 0..CHAN_IMP_RESP_LENGTH-1 */
+    for (int i = 0; i < CHAN_IMP_RESP_LENGTH; i++) {
+        float acc_re = 0, acc_im = 0;
+        for (int k = 0; k + i * osr < cir_len; k++) {
+            float cr = chan_re[k];
+            float ci = chan_im[k];
+            float dr = chan_re[k + i * osr];
+            float di = chan_im[k + i * osr];
+            acc_re += cr * dr + ci * di;   /* conj(chan[k]) * chan[k+i*osr] */
+            acc_im += cr * di - ci * dr;
+        }
+        rhh_re[i] = acc_re;
+        rhh_im[i] = acc_im;
+    }
+}
+
+/* ── D. Matched Filter (MAFI) ── */
+
+/* Convolve received signal with time-reversed conjugate CIR.
+ * Input: oversampled received IQ (n_symbols * OSR samples)
+ * Output: 1 complex sample per symbol (n_symbols samples)
+ * filter: channel impulse response (CHAN_IMP_RESP_LENGTH * OSR taps)
+ */
+static void gsm_mafi(const float *rx_re, const float *rx_im, int n_symbols,
+                     int osr,
+                     const float *filt_re, const float *filt_im, int filt_len,
+                     float *out_re, float *out_im)
+{
+    for (int n = 0; n < n_symbols; n++) {
+        float acc_re = 0, acc_im = 0;
+        int base = n * osr;
+        for (int k = 0; k < filt_len && (base + k) < n_symbols * osr; k++) {
+            /* conj(filter) * received */
+            acc_re += filt_re[k] * rx_re[base + k] + filt_im[k] * rx_im[base + k];
+            acc_im += filt_re[k] * rx_im[base + k] - filt_im[k] * rx_re[base + k];
+        }
+        out_re[n] = acc_re;
+        out_im[n] = acc_im;
+    }
+}
+
+/* ── E. 16-state Viterbi MLSE Equalizer ── */
+
+/* 16-state Viterbi MLSE equalizer for GMSK.
+ *
+ * Input: matched-filtered symbol-rate complex samples (n_sym symbols)
+ * rhh: channel autocorrelation (CHAN_IMP_RESP_LENGTH complex values)
+ * Output: n_sym detected bits as hard decisions in out_bits[]
+ *
+ * States represent the last (CHAN_IMP_RESP_LENGTH-1)=4 transmitted bits.
+ * 16 states = 2^4.
+ */
+static void gsm_viterbi_mlse(const float *mf_re, const float *mf_im,
+                             int n_sym,
+                             const float *rhh_re, const float *rhh_im,
+                             uint8_t *out_bits)
+{
+    /* Pre-compute expected output for each (state, input_bit) pair.
+     * State encodes bits [n-1, n-2, n-3, n-4] (most recent in LSB).
+     * With input bit b at position n, the full 5-bit pattern is:
+     *   [b, state_bit3, state_bit2, state_bit1, state_bit0]
+     * Expected output = sum(rhh[k] * nrz[k]) for k=0..CHAN_IMP_RESP_LENGTH-1
+     * where nrz[0] = 2*b-1, nrz[1] = 2*state_bit(K-2)-1, etc.
+     */
+    float exp_re[MLSE_STATES][2];
+    float exp_im[MLSE_STATES][2];
+    int next_state_tbl[MLSE_STATES][2];
+
+    for (int s = 0; s < MLSE_STATES; s++) {
+        for (int b = 0; b < 2; b++) {
+            /* Build NRZ sequence: position 0 = input bit b,
+             * positions 1..4 = state bits (LSB = most recent) */
+            float er = 0, ei = 0;
+            int nrz_bits[CHAN_IMP_RESP_LENGTH];
+            nrz_bits[0] = 2 * b - 1;
+            for (int k = 1; k < CHAN_IMP_RESP_LENGTH; k++) {
+                int bit = (s >> (k - 1)) & 1;
+                nrz_bits[k] = 2 * bit - 1;
+            }
+            for (int k = 0; k < CHAN_IMP_RESP_LENGTH; k++) {
+                er += rhh_re[k] * nrz_bits[k];
+                ei += rhh_im[k] * nrz_bits[k];
+            }
+            exp_re[s][b] = er;
+            exp_im[s][b] = ei;
+
+            /* Next state: shift in bit b, drop oldest bit
+             * next = (s >> 1) | (b << (CHAN_IMP_RESP_LENGTH-2)) */
+            next_state_tbl[s][b] = (s >> 1) | (b << (CHAN_IMP_RESP_LENGTH - 2));
+        }
+    }
+
+    /* Path metrics and survivor memory.
+     * Use malloc for survivor array since 148 * 16 = 2368 bytes on stack is fine,
+     * but be safe for larger bursts. */
+    float pm_prev[MLSE_STATES];
+    float pm_cur[MLSE_STATES];
+    uint8_t survivor[GSM_BURST_LEN][MLSE_STATES];
+
+    for (int s = 0; s < MLSE_STATES; s++) {
+        pm_prev[s] = -1e30f;  /* negative infinity */
+    }
+    pm_prev[0] = 0;  /* start from known state 0 */
+
+    /* ACS (Add-Compare-Select) */
+    for (int t = 0; t < n_sym; t++) {
+        float rx_r = mf_re[t];
+        float rx_i = mf_im[t];
+
+        for (int s = 0; s < MLSE_STATES; s++) {
+            pm_cur[s] = -1e30f;
+        }
+
+        for (int s = 0; s < MLSE_STATES; s++) {
+            if (pm_prev[s] < -1e29f) continue;
+
+            for (int b = 0; b < 2; b++) {
+                int ns = next_state_tbl[s][b];
+                /* Branch metric: Re(received * conj(expected))
+                 * This is the real correlation — higher is better */
+                float bm = rx_r * exp_re[s][b] + rx_i * exp_im[s][b];
+                float new_pm = pm_prev[s] + bm;
+                if (new_pm > pm_cur[ns]) {
+                    pm_cur[ns] = new_pm;
+                    survivor[t][ns] = (uint8_t)b;
+                }
+            }
+        }
+
+        memcpy(pm_prev, pm_cur, sizeof(pm_prev));
+    }
+
+    /* Find best final state */
+    int best_state = 0;
+    float best_pm = pm_prev[0];
+    for (int s = 1; s < MLSE_STATES; s++) {
+        if (pm_prev[s] > best_pm) {
+            best_pm = pm_prev[s];
+            best_state = s;
+        }
+    }
+
+    /* Traceback */
+    uint8_t decoded[GSM_BURST_LEN];
+    int state = best_state;
+    for (int t = n_sym - 1; t >= 0; t--) {
+        int bit = survivor[t][state];
+        decoded[t] = (uint8_t)bit;
+        /* Reverse state transition: find predecessor
+         * next_state = (prev >> 1) | (bit << (K-2))
+         * => prev = (next << 1) & mask, but we need to recover the dropped bit.
+         * prev = (state & ((1 << (K-2)) - 1)) << 1 | ??? -- use the table */
+        /* From next_state_tbl: if next_state_tbl[prev][bit] == state,
+         * then prev = (state << 1 | lsb) & mask for some lsb.
+         * Since next = (prev >> 1) | (bit << (K-2)),
+         * prev = ((state & ~(1 << (K-2))) << 1) | unknown_lsb
+         * But more directly: prev had bit 'bit' shifted in to make state,
+         * so prev = ((state ^ (bit << (K-2))) << 1) | X for unknown X.
+         * Actually: next = (s >> 1) | (b << (K-2))
+         * so state = (prev >> 1) | (bit << (K-2))
+         * => prev >> 1 = state - (bit << (K-2)), but that's not right for bit ops.
+         * => prev = ((state - (bit << (K-2))) << 1) | prev_lsb  -- wrong
+         * Simpler: state = (prev >> 1) | (bit << (K-2))
+         * => prev & ~1 = (state & ((1 << (K-2)) - 1)) << 1   [upper bits]
+         * => prev_msb = bit  [since it was shifted out from prev bit (K-2)]
+         * Actually just search: */
+        for (int p = 0; p < MLSE_STATES; p++) {
+            if (next_state_tbl[p][bit] == state) {
+                state = p;
+                break;
+            }
+        }
+    }
+
+    memcpy(out_bits, decoded, n_sym);
+}
+
+/* ── F. Public API: Full GMSK-MLSE demodulation pipeline ── */
+
+/* Static buffers for pre-computed GMSK training templates.
+ * SCH: 64 bits * OSR = 256 samples
+ * Normal: 26 bits * OSR = 104 samples */
+#define SCH_TRAIN_LEN       64
+#define NORM_TRAIN_LEN      26
+#define MAX_TRAIN_SAMPS     (SCH_TRAIN_LEN * GSM_OSR)  /* 256 */
+
+static float sch_tmpl_re[MAX_TRAIN_SAMPS];
+static float sch_tmpl_im[MAX_TRAIN_SAMPS];
+static float norm_tmpl_re[8][NORM_TRAIN_LEN * GSM_OSR];
+static float norm_tmpl_im[8][NORM_TRAIN_LEN * GSM_OSR];
+static bool mlse_templates_ready = false;
+
+static void mlse_init_templates(void)
+{
+    if (mlse_templates_ready) return;
+
+    /* Map SCH training sequence */
+    gsm_gmsk_mapper(sch_train, SCH_TRAIN_LEN, GSM_OSR,
+                    sch_tmpl_re, sch_tmpl_im);
+
+    /* Map all 8 normal burst training sequences */
+    for (int i = 0; i < 8; i++) {
+        gsm_gmsk_mapper(gsm_train_seq[i], NORM_TRAIN_LEN, GSM_OSR,
+                        norm_tmpl_re[i], norm_tmpl_im[i]);
+    }
+
+    mlse_templates_ready = true;
+    ESP_LOGI(TAG, "MLSE training templates initialized (OSR=%d)", GSM_OSR);
+}
 
 int gsm_gmsk_demod(const float *iq_re, const float *iq_im, int n_samples,
                    int8_t *soft_out, int max_out)
 {
-    if (!iq_re || !iq_im || !soft_out || n_samples < 2) return 0;
+    if (!iq_re || !iq_im || !soft_out || n_samples < GSM_BURST_LEN * GSM_OSR)
+        return 0;
 
-    int n_bits = 0;
-    float scale = 127.0f / (float)(M_PI / 2.0);
+    mlse_init_templates();
 
-    for (int i = 1; i < n_samples && n_bits < max_out; i++) {
-        /* Compute z[i] * conj(z[i-1]) */
-        float re_cur = iq_re[i];
-        float im_cur = iq_im[i];
-        float re_prev = iq_re[i - 1];
-        float im_prev = iq_im[i - 1];
+    const int osr = GSM_OSR;
+    const int burst_samps = GSM_BURST_LEN * osr;  /* 148 * 4 = 592 */
+    int total_bits = 0;
 
-        /* Product: (re_cur + j*im_cur) * (re_prev - j*im_prev) */
-        float prod_re = re_cur * re_prev + im_cur * im_prev;
-        float prod_im = im_cur * re_prev - re_cur * im_prev;
+    /* Use middle portion of SCH training for correlation template */
+    int sch_corr_start_samp = SCH_TRAIN_CORR_START * osr;
+    int sch_corr_len_samp = SCH_TRAIN_CORR_LEN * osr;
 
-        /* Phase difference */
-        float phase_diff = atan2f(prod_im, prod_re);
+    /* In the SCH burst, training starts at symbol 42 (sample 42*osr = 168).
+     * The correlation uses the middle of training, so the template offset
+     * from burst start is (42 + SCH_TRAIN_CORR_START) * osr. */
+    int sch_train_offset_samp = (42 + SCH_TRAIN_CORR_START) * osr;
 
-        /* Scale to soft bit range: positive phase -> bit 1, negative -> bit 0 */
-        float soft_val = phase_diff * scale;
+    /* Search for SCH bursts across the entire capture */
+    float peak_pwr = 0;
+    int peak_off = gsm_correlate_training(
+        iq_re, iq_im, n_samples,
+        &sch_tmpl_re[sch_corr_start_samp], &sch_tmpl_im[sch_corr_start_samp],
+        sch_corr_len_samp,
+        0, n_samples - sch_corr_len_samp,
+        &peak_pwr);
 
-        /* Clamp to [-127, +127] */
-        if (soft_val > 127.0f) soft_val = 127.0f;
-        if (soft_val < -127.0f) soft_val = -127.0f;
-
-        soft_out[n_bits++] = (int8_t)soft_val;
+    if (peak_off < 0) {
+        ESP_LOGD(TAG, "MLSE: no SCH correlation peak found");
+        return 0;
     }
 
-    return n_bits;
+    /* Compute average signal power for threshold */
+    float avg_pwr = 0;
+    int pwr_count = (n_samples < 4000) ? n_samples : 4000;
+    for (int i = 0; i < pwr_count; i++) {
+        avg_pwr += iq_re[i] * iq_re[i] + iq_im[i] * iq_im[i];
+    }
+    avg_pwr /= pwr_count;
+
+    /* Threshold: peak correlation power should be significantly above noise.
+     * The normalized peak_pwr is proportional to template_len^2 * signal_power.
+     * Use a threshold relative to avg_pwr * template_len. */
+    float threshold = avg_pwr * sch_corr_len_samp * 0.5f;
+    if (peak_pwr < threshold) {
+        ESP_LOGD(TAG, "MLSE: SCH peak power %.1f below threshold %.1f",
+                 peak_pwr, threshold);
+        return 0;
+    }
+
+    /* Burst start = correlation peak position - training offset within burst */
+    int burst_start = peak_off - sch_train_offset_samp;
+    if (burst_start < 0) burst_start = 0;
+    if (burst_start + burst_samps > n_samples) {
+        ESP_LOGD(TAG, "MLSE: burst extends past buffer");
+        return 0;
+    }
+
+    ESP_LOGI(TAG, "MLSE: SCH peak at sample %d (pwr=%.0f, thresh=%.0f), burst_start=%d",
+             peak_off, peak_pwr, threshold, burst_start);
+
+    /* Point to the burst IQ data */
+    const float *burst_re = &iq_re[burst_start];
+    const float *burst_im = &iq_im[burst_start];
+
+    /* Training position within burst: symbol 42, length 64 */
+    int train_pos_samp = 42 * osr;
+    int train_full_samps = SCH_TRAIN_LEN * osr;
+
+    /* Channel estimation using the full SCH training sequence */
+    int cir_len = CHAN_IMP_RESP_LENGTH * osr;  /* 20 taps */
+    float chan_re[CHAN_IMP_RESP_LENGTH * GSM_OSR];
+    float chan_im[CHAN_IMP_RESP_LENGTH * GSM_OSR];
+    float rhh_re[CHAN_IMP_RESP_LENGTH];
+    float rhh_im[CHAN_IMP_RESP_LENGTH];
+
+    gsm_channel_estimate(&burst_re[train_pos_samp], &burst_im[train_pos_samp],
+                         sch_tmpl_re, sch_tmpl_im,
+                         train_full_samps, osr,
+                         chan_re, chan_im, rhh_re, rhh_im);
+
+    /* Matched filter: collapse oversampled burst to symbol rate */
+    float mf_re[GSM_BURST_LEN];
+    float mf_im[GSM_BURST_LEN];
+    gsm_mafi(burst_re, burst_im, GSM_BURST_LEN, osr,
+             chan_re, chan_im, cir_len, mf_re, mf_im);
+
+    /* Viterbi MLSE equalization */
+    uint8_t hard_bits[GSM_BURST_LEN];
+    gsm_viterbi_mlse(mf_re, mf_im, GSM_BURST_LEN, rhh_re, rhh_im, hard_bits);
+
+    /* Convert hard bits to soft bits (+127 / -127) */
+    int n_out = GSM_BURST_LEN;
+    if (n_out > max_out) n_out = max_out;
+    for (int i = 0; i < n_out; i++) {
+        soft_out[total_bits++] = hard_bits[i] ? 127 : -127;
+    }
+
+    ESP_LOGI(TAG, "MLSE: decoded %d SCH bits", total_bits);
+
+    /* Now search for normal bursts.
+     * GSM frame: bursts repeat every 156.25 symbols.
+     * Scan forward from the SCH burst position for additional bursts. */
+    int norm_burst_period_samp = (int)(156.25f * osr + 0.5f);  /* 625 samples */
+
+    /* Try to decode bursts forward and backward from SCH position */
+    for (int dir = -1; dir <= 1; dir += 2) {
+        for (int step = 1; step <= 20; step++) {
+            if (total_bits + GSM_BURST_LEN > max_out) break;
+
+            int nb_start = burst_start + dir * step * norm_burst_period_samp;
+            if (nb_start < 0 || nb_start + burst_samps > n_samples) continue;
+
+            const float *nb_re = &iq_re[nb_start];
+            const float *nb_im = &iq_im[nb_start];
+
+            /* Try all 8 training sequences to find the best match */
+            float best_norm_pwr = 0;
+            int best_tsc = -1;
+            int best_norm_off = -1;
+
+            /* Normal burst: training at symbol 61, length 26 bits.
+             * Correlate middle 16 bits (indices 5..20). */
+            int nb_train_offset = (61 + TRAIN_CORR_START) * osr;
+            int nb_corr_len = TRAIN_CORR_LEN * osr;
+
+            for (int tsc = 0; tsc < 8; tsc++) {
+                float tsc_pwr = 0;
+                int tsc_off = gsm_correlate_training(
+                    nb_re, nb_im, burst_samps,
+                    &norm_tmpl_re[tsc][TRAIN_CORR_START * osr],
+                    &norm_tmpl_im[tsc][TRAIN_CORR_START * osr],
+                    nb_corr_len,
+                    nb_train_offset - 4 * osr,  /* search window */
+                    nb_train_offset + 4 * osr,
+                    &tsc_pwr);
+                if (tsc_pwr > best_norm_pwr) {
+                    best_norm_pwr = tsc_pwr;
+                    best_tsc = tsc;
+                    best_norm_off = tsc_off;
+                }
+            }
+
+            float norm_thresh = avg_pwr * nb_corr_len * 0.3f;
+            if (best_tsc < 0 || best_norm_pwr < norm_thresh) continue;
+
+            /* Refine burst start based on correlation peak */
+            int refined_start_samp = nb_start + best_norm_off - (61 + TRAIN_CORR_START) * osr;
+            if (refined_start_samp < 0 || refined_start_samp + burst_samps > n_samples)
+                continue;
+
+            const float *rnb_re = &iq_re[refined_start_samp];
+            const float *rnb_im = &iq_im[refined_start_samp];
+
+            /* Channel estimate from normal burst training (26 bits at symbol 61) */
+            int nb_train_pos = 61 * osr;
+            int nb_train_full = NORM_TRAIN_LEN * osr;
+
+            float nb_chan_re[CHAN_IMP_RESP_LENGTH * GSM_OSR];
+            float nb_chan_im[CHAN_IMP_RESP_LENGTH * GSM_OSR];
+            float nb_rhh_re[CHAN_IMP_RESP_LENGTH];
+            float nb_rhh_im[CHAN_IMP_RESP_LENGTH];
+
+            gsm_channel_estimate(&rnb_re[nb_train_pos], &rnb_im[nb_train_pos],
+                                 norm_tmpl_re[best_tsc], norm_tmpl_im[best_tsc],
+                                 nb_train_full, osr,
+                                 nb_chan_re, nb_chan_im,
+                                 nb_rhh_re, nb_rhh_im);
+
+            /* MAFI + MLSE */
+            float nb_mf_re[GSM_BURST_LEN];
+            float nb_mf_im[GSM_BURST_LEN];
+            gsm_mafi(rnb_re, rnb_im, GSM_BURST_LEN, osr,
+                     nb_chan_re, nb_chan_im, cir_len, nb_mf_re, nb_mf_im);
+
+            uint8_t nb_hard[GSM_BURST_LEN];
+            gsm_viterbi_mlse(nb_mf_re, nb_mf_im, GSM_BURST_LEN,
+                             nb_rhh_re, nb_rhh_im, nb_hard);
+
+            int n_out2 = GSM_BURST_LEN;
+            if (total_bits + n_out2 > max_out) n_out2 = max_out - total_bits;
+            for (int i = 0; i < n_out2; i++) {
+                soft_out[total_bits++] = nb_hard[i] ? 127 : -127;
+            }
+        }
+    }
+
+    ESP_LOGI(TAG, "MLSE: total %d bits decoded", total_bits);
+    return total_bits;
 }
 
 /* ════════════════════════════════════════════════════════════════

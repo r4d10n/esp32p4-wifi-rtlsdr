@@ -929,20 +929,16 @@ static void scan_task(void *arg)
         /* ── Stage 3: Cell Identity Decode (GSM only) ── */
         ESP_LOGI(TAG, "── Stage 3: Cell identity decode (%d FCCH channels) ──", res->fcch_count);
 
-        /* DDC at decim=3 → 341.3 kSPS (1.26 samples per GSM symbol at 270.833 kbaud).
-         * This is close enough for differential GMSK demod with soft decisions.
-         * The GSM symbol rate is 13e6/48 = 270833.33 Hz. */
-        /* Stage 3 uses 2.048 MSPS for high-quality GMSK demod (7.56 samp/sym).
-         * DDC decim=8 → 256 kSPS (0.945 samp/sym) — close to 1 samp/sym.
-         * The higher input rate gives the DDC/demod much better signal quality. */
-        /* Use 2.048 MSPS with NO DDC decimation (decim=1) for maximum GMSK quality.
-         * At 2.048 MSPS: 7.56 samples per GSM symbol (270.833 kbaud).
-         * The GMSK demod picks the best sample per symbol via interpolation. */
-        #define GSM_S3_SAMPLE_RATE  2048000
-        #define GSM_DDC_DECIM       1       /* No decimation — full 2.048 MSPS */
+        /* GMSK-MLSE demod requires exactly OSR=4 samples per symbol.
+         * GSM symbol rate = 13e6/48 = 270833.33 Hz.
+         * Target sample rate = 270833.33 * 4 = 1,083,333 Hz.
+         * RTL-SDR supports arbitrary rates 900001-3200000, so 1083334 works.
+         * DDC decim=1: frequency shift only, no decimation. */
+        #define GSM_S3_SAMPLE_RATE  1083334   /* ≈ 4 × 270833.33 = OSR=4 */
+        #define GSM_DDC_DECIM       1         /* No decimation — freq shift only */
         #define GSM_DDC_RATE        GSM_S3_SAMPLE_RATE
         #define GSM_SYMBOL_RATE     270833
-        /* samp_per_sym = 2048000 / 270833 = 7.56 */
+        /* samp_per_sym = 1083334 / 270833 ≈ 4.0 (exact OSR for MLSE) */
 
         int s3_buf_size = GSM_DDC_RATE / 5;  /* ~410k samples for 200ms */
         float *s3_re = heap_caps_malloc(s3_buf_size * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -952,12 +948,6 @@ static void scan_task(void *arg)
             free(s3_re); free(s3_im);
             goto skip_stage3;
         }
-
-        /* SCH training sequence for burst timing correlation */
-        static const int8_t sch_train_bipolar[64] = {
-            1,-1,1,1,1,-1,-1,1,-1,1,1,-1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,1,-1,-1,
-            1,-1,1,-1,-1,-1,1,-1,1,-1,-1,-1,1,1,-1,1,-1,-1,1,1,-1,1,-1,-1,1,-1,1,-1,-1,1,-1,-1
-        };
 
         for (int i = 0; i < res->channel_count && !s_kal.scan_abort; i++) {
             kal_channel_t *ch = &res->channels[i];
@@ -974,7 +964,7 @@ static void scan_task(void *arg)
                      (unsigned long)(ch->freq_hz / 1000000),
                      (unsigned long)((ch->freq_hz % 1000000) / 100000));
 
-            /* Switch to 2.048 MSPS for better GMSK demod quality */
+            /* Switch to OSR=4 sample rate for GMSK-MLSE demod */
             rtlsdr_set_sample_rate(cfg->dev, GSM_S3_SAMPLE_RATE);
             rtlsdr_set_center_freq(cfg->dev, cand->step_center);
             vTaskDelay(pdMS_TO_TICKS(SETTLE_MS));
@@ -982,109 +972,64 @@ static void scan_task(void *arg)
             esp_err_t ret = capture_iq(cfg->dwell_ms + 500);
             if (ret != ESP_OK) { ESP_LOGW(TAG, "  Capture timeout"); continue; }
 
-            /* DDC at 2.048 MSPS with decim=8 → 256 kSPS (~0.945 samp/sym) */
+            /* DDC at 1.083 MSPS with decim=1 → freq shift only, OSR=4 */
             int nb_len = ddc_extract_rs(s_kal.capture_buf, s_kal.capture_pos / 2,
                                         cand->ddc_offset_hz, GSM_DDC_DECIM,
                                         GSM_S3_SAMPLE_RATE, s3_re, s3_im, s3_buf_size);
             if (nb_len < 1000) { ESP_LOGW(TAG, "  DDC too short"); continue; }
 
-            /* GMSK differential demod → soft bits (PSRAM for large buffers) */
-            int8_t *soft_bits = heap_caps_malloc(nb_len * sizeof(int8_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            ESP_LOGI(TAG, "  DDC: %d samples at %d sps (OSR=%d)",
+                     nb_len, GSM_DDC_RATE, GSM_OSR);
+
+            /* GMSK-MLSE demod: produces 148 soft bits per detected burst.
+             * The demod internally handles training correlation, channel
+             * estimation, matched filtering, and Viterbi MLSE. */
+            int max_soft = nb_len;  /* upper bound on output bits */
+            int8_t *soft_bits = heap_caps_malloc(max_soft * sizeof(int8_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
             if (!soft_bits) continue;
-            int n_bits = gsm_gmsk_demod(s3_re, s3_im, nb_len, soft_bits, nb_len);
 
-            /* At 341.3 kSPS and 270.833 kbaud, we get ~1.26 samples per symbol.
-             * The GMSK demod produces one soft bit per sample, so n_bits ≈ nb_len.
-             * One GSM burst = 148 symbols ≈ 187 samples at 1.26 samp/sym.
-             * For burst searching, use the oversampled bit stream directly. */
-            float samp_per_sym = (float)GSM_DDC_RATE / (float)GSM_SYMBOL_RATE;  /* ~1.26 */
-            int burst_samples = (int)(148.0f * samp_per_sym + 0.5f);  /* ~187 */
+            int n_bits = gsm_gmsk_demod(s3_re, s3_im, nb_len, soft_bits, max_soft);
 
-            ESP_LOGI(TAG, "  DDC: %d samp → %d bits, %.2f samp/sym, burst=%d samp",
-                     nb_len, n_bits, samp_per_sym, burst_samples);
+            ESP_LOGI(TAG, "  MLSE demod: %d soft bits", n_bits);
 
-            /* ── SCH burst timing: correlate training sequence ──
-             * The SCH training sequence is at offset 42 symbols into the burst.
-             * At ~1.26 samp/sym, that's sample offset ~53.
-             * Search the entire capture for the best match. */
-            int train_offset_sym = 42;  /* Training seq starts at symbol 42 in SCH burst */
-            int train_len = 64;         /* Training sequence length in symbols */
-            float best_corr = 0;
-            int best_pos = -1;
-
-            for (int pos = 0; pos + (int)(train_len * samp_per_sym) < n_bits; pos += 10) {
-                float corr = 0;
-                for (int k = 0; k < train_len; k++) {
-                    int samp_idx = pos + (int)(k * samp_per_sym + 0.5f);
-                    if (samp_idx >= n_bits) break;
-                    corr += (float)soft_bits[samp_idx] * (float)sch_train_bipolar[k];
-                }
-                float abs_corr = (corr > 0) ? corr : -corr;
-                if (abs_corr > best_corr) {
-                    best_corr = abs_corr;
-                    best_pos = pos;
-                }
-            }
-
-            /* The training starts at symbol 42, so burst start is pos - 42*samp_per_sym */
+            /* ── SCH decode ──
+             * The first 148 bits from gsm_gmsk_demod are the SCH burst
+             * (it searches for SCH training first). */
             gsm_sch_info_t sch_info;
             memset(&sch_info, 0, sizeof(sch_info));
             bool sch_found = false;
 
-            if (best_pos >= 0 && best_corr > 500.0f) {
-                int burst_start = best_pos - (int)(train_offset_sym * samp_per_sym + 0.5f);
-                if (burst_start < 0) burst_start = 0;
-
-                ESP_LOGI(TAG, "  SCH train corr: %.0f at pos %d (burst_start=%d)",
-                         best_corr, best_pos, burst_start);
-
-                /* Resample burst to exactly 148 symbols */
-                int8_t burst_148[148];
-                for (int s = 0; s < 148; s++) {
-                    int idx = burst_start + (int)(s * samp_per_sym + 0.5f);
-                    burst_148[s] = (idx < n_bits) ? soft_bits[idx] : 0;
-                }
-
-                /* Try SCH decode on the resampled burst */
-                if (gsm_sch_decode(burst_148, &sch_info)) {
+            if (n_bits >= GSM_BURST_LEN) {
+                if (gsm_sch_decode(soft_bits, &sch_info)) {
                     ch->cell_id.bsic = sch_info.bsic;
                     sch_found = true;
                     ESP_LOGI(TAG, "  SCH: BSIC=%d (NCC=%d BCC=%d) FN=%lu",
                              sch_info.bsic, sch_info.ncc, sch_info.bcc,
                              (unsigned long)sch_info.fn);
                 }
-            } else {
-                ESP_LOGD(TAG, "  SCH training corr too low (%.0f)", best_corr);
             }
 
             /* ── BCCH normal burst decode ──
-             * Normal bursts repeat every 156.25 symbols ≈ 197 samples.
-             * Search from each detected burst timing. */
+             * Subsequent 148-bit blocks are normal bursts decoded by MLSE.
+             * Group into sets of 4 for BCCH block decode. */
             bool si3_found = false;
-            int norm_burst_period = (int)(156.25f * samp_per_sym + 0.5f);  /* ~197 samp */
+            int burst_idx = 1;  /* skip first burst (SCH) */
+            int remaining_bursts = (n_bits - GSM_BURST_LEN) / GSM_BURST_LEN;
 
-            /* Try at multiple starting offsets around the first strong burst */
-            for (int start = 0; start + norm_burst_period * 4 < n_bits && !si3_found; start += norm_burst_period) {
+            while (remaining_bursts >= 4 && !si3_found) {
                 int8_t bcch_bursts[4][116];
                 bool valid = true;
 
                 for (int b = 0; b < 4 && valid; b++) {
-                    int bstart = start + b * norm_burst_period;
-
-                    /* Resample 148 symbols from this burst position */
-                    int8_t burst_148[148];
-                    for (int s = 0; s < 148; s++) {
-                        int idx = bstart + (int)(s * samp_per_sym + 0.5f);
-                        if (idx >= n_bits) { valid = false; break; }
-                        burst_148[s] = soft_bits[idx];
-                    }
-                    if (!valid) break;
+                    int offset = (burst_idx + b) * GSM_BURST_LEN;
+                    if (offset + GSM_BURST_LEN > n_bits) { valid = false; break; }
+                    const int8_t *burst_148 = &soft_bits[offset];
 
                     /* Extract 116 data bits: [3 tail][57 data][26 train][57 data][3 tail][guard] */
                     memcpy(&bcch_bursts[b][0], &burst_148[3], 57);
                     memcpy(&bcch_bursts[b][57], &burst_148[3 + 57 + 26], 57);
                 }
-                if (!valid) continue;
+                if (!valid) break;
 
                 uint8_t l2_frame[GSM_BCCH_BLOCK_LEN];
                 if (gsm_bcch_decode(bcch_bursts, l2_frame)) {
@@ -1098,6 +1043,9 @@ static void scan_task(void *arg)
                                  cid.mcc, cid.mnc, cid.lac, cid.cell_id, sch_info.bsic);
                     }
                 }
+
+                burst_idx += 4;
+                remaining_bursts -= 4;
             }
 
             if (!sch_found && !si3_found) {
@@ -1111,7 +1059,7 @@ static void scan_task(void *arg)
         free(s3_re);
         free(s3_im);
 
-        /* Restore sample rate back to GSM for any further operations */
+        /* Restore sample rate back to original for any further operations */
         rtlsdr_set_sample_rate(cfg->dev, sample_rate);
 skip_stage3:
 

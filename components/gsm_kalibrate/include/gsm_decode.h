@@ -18,6 +18,10 @@ extern "C" {
 #define GSM_SCH_K           5       /* SCH uses rate 1/2, K=5 (16 states) */
 #define GSM_FIRE_CRC_LEN    40      /* Fire code CRC polynomial length */
 
+/* GMSK-MLSE demodulation constants */
+#define GSM_OSR             4       /* Oversampling ratio for GMSK decode */
+#define GSM_CHAN_IMP_LEN    5       /* Channel impulse response length (symbols) */
+
 /* SCH decoded info */
 typedef struct {
     uint8_t  bsic;          /* Base Station Identity Code (6 bits: NCC + BCC) */
@@ -70,18 +74,21 @@ int gsm_viterbi_k5_decode(const int8_t *soft_bits, int n_enc_bits,
  */
 bool gsm_sch_decode(const int8_t *burst_bits, gsm_sch_info_t *info);
 
-/* ── GMSK differential demodulation ── */
+/* ── GMSK-MLSE demodulation ── */
 
 /**
- * Differential GMSK demodulation of narrowband IQ samples.
- * Produces soft bits from complex IQ input.
+ * Full GMSK-MLSE demodulation pipeline (airprobe/gr-gsm algorithm).
+ * Correlates training sequence, estimates channel, matched-filters,
+ * then runs 16-state Viterbi MLSE equalization.
  *
- * @param iq_re, iq_im  Float IQ samples at ~270.833 kbaud (1 sample per symbol)
- *                       or oversampled and needs decimation
+ * Input IQ must be at exactly GSM_OSR (4) samples per symbol.
+ * Set RTL-SDR to 1,083,334 sps for this rate.
+ *
+ * @param iq_re, iq_im  Float IQ samples at OSR=4 samples/symbol
  * @param n_samples     Number of IQ samples
- * @param soft_out      Output soft bits (int8, +/-127 range)
+ * @param soft_out      Output soft bits (int8, +/-127 range), 148 per burst
  * @param max_out       Maximum output soft bits
- * @return Number of soft bits produced
+ * @return Number of soft bits produced (148 per detected burst, 0 if none)
  */
 int gsm_gmsk_demod(const float *iq_re, const float *iq_im, int n_samples,
                    int8_t *soft_out, int max_out);
