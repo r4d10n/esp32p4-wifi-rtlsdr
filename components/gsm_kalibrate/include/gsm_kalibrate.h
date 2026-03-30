@@ -33,8 +33,9 @@ typedef enum {
     KAL_BAND_PCS1900,
     KAL_BAND_LTE_B1,     /* 2110-2170 MHz (FDD Band 1) */
     KAL_BAND_LTE_B3,     /* 1805-1880 MHz (FDD Band 3) */
+    KAL_BAND_LTE_B5,     /* 869-894 MHz (FDD Band 5, India/US) */
     KAL_BAND_LTE_B7,     /* 2620-2690 MHz (FDD Band 7) */
-    KAL_BAND_LTE_B20,    /* 791-821 MHz (FDD Band 20) */
+    KAL_BAND_LTE_B20,    /* 791-821 MHz (FDD Band 20, Europe) */
     KAL_BAND_LTE_B28,    /* 758-803 MHz (FDD Band 28, APAC) */
     KAL_BAND_COUNT
 } kal_band_t;

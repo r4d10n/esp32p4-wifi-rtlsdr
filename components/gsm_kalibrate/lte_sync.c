@@ -672,9 +672,11 @@ lte_sync_t *lte_sync_init(void)
     /* Allocate work buffers in PSRAM */
     ctx->fft_buf = heap_caps_malloc(LTE_N_FFT * 2 * sizeof(float),
                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    ctx->iq_float_re = heap_caps_malloc(LTE_FRAME_SAMPLES * sizeof(float),
+    /* Allocate for 200ms of IQ = 20 frames = 384,000 samples (~3 MB in PSRAM) */
+    #define LTE_MAX_SAMPLES (LTE_FRAME_SAMPLES * 20)
+    ctx->iq_float_re = heap_caps_malloc(LTE_MAX_SAMPLES * sizeof(float),
                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    ctx->iq_float_im = heap_caps_malloc(LTE_FRAME_SAMPLES * sizeof(float),
+    ctx->iq_float_im = heap_caps_malloc(LTE_MAX_SAMPLES * sizeof(float),
                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
     if (!ctx->fft_buf || !ctx->iq_float_re || !ctx->iq_float_im) {
@@ -707,6 +709,105 @@ void lte_sync_deinit(lte_sync_t *ctx)
     ESP_LOGI(TAG, "LTE sync engine deinitialized");
 }
 
+/* ──────────────────────── Multi-Pair MMSE FOE ──────────────────────── */
+
+/**
+ * Multi-pair PSS-SSS FOE with MMSE weighting (LTE-Cell-Scanner approach).
+ *
+ * Finds ALL PSS peaks at 5ms intervals, extracts PSS+SSS channel estimates,
+ * accumulates cross-correlation with per-subcarrier power weighting.
+ * With 200ms capture: ~40 PSS pairs → √40 = 6.3× SNR gain over single pair.
+ */
+static float multi_pair_foe(lte_sync_t *ctx, int pss_offset, int n_id_2,
+                            int ifo_shift, const float *sss_ref,
+                            int num_samples)
+{
+    int half_frame = LTE_FRAME_SAMPLES / 2;  /* 9600 samples = 5ms */
+    float delta_t = (float)(LTE_CPN + LTE_N_FFT) / (float)LTE_SAMPLE_RATE_HZ;
+
+    float m_re_total = 0.0f, m_im_total = 0.0f;
+    int pair_count = 0;
+
+    const float *ref_re = ctx->pss_fd_re[n_id_2];
+    const float *ref_im = ctx->pss_fd_im[n_id_2];
+
+    /* Iterate all PSS positions at 5ms intervals, anchored to first detection */
+    int start_pos = pss_offset % half_frame;
+
+    for (int pss_pos = start_pos; pss_pos + LTE_N_FFT <= num_samples;
+         pss_pos += half_frame) {
+
+        int sss_pos = pss_pos - LTE_CPN - LTE_N_FFT;
+        if (sss_pos < 0 || sss_pos + LTE_N_FFT > num_samples) continue;
+
+        /* FFT PSS symbol */
+        for (int k = 0; k < LTE_N_FFT; k++) {
+            ctx->fft_buf[2 * k]     = ctx->iq_float_re[pss_pos + k];
+            ctx->fft_buf[2 * k + 1] = ctx->iq_float_im[pss_pos + k];
+        }
+        dsps_fft2r_fc32(ctx->fft_buf, LTE_N_FFT);
+        dsps_bit_rev_fc32(ctx->fft_buf, LTE_N_FFT);
+
+        float pss_rx_re[LTE_N_SC_PSS], pss_rx_im[LTE_N_SC_PSS];
+        extract_pss_bins_shifted(ctx->fft_buf, ifo_shift, pss_rx_re, pss_rx_im);
+
+        /* H_pss = rx_pss * conj(pss_ref_original) */
+        float h_re[LTE_N_SC_PSS], h_im[LTE_N_SC_PSS];
+        for (int k = 0; k < LTE_N_SC_PSS; k++) {
+            float rr = ref_re[k], ri_c = -ref_im[k];  /* undo pre-conjugation */
+            h_re[k] = pss_rx_re[k] * rr - pss_rx_im[k] * ri_c;
+            h_im[k] = pss_rx_re[k] * ri_c + pss_rx_im[k] * rr;
+        }
+
+        /* FFT SSS symbol */
+        for (int k = 0; k < LTE_N_FFT; k++) {
+            ctx->fft_buf[2 * k]     = ctx->iq_float_re[sss_pos + k];
+            ctx->fft_buf[2 * k + 1] = ctx->iq_float_im[sss_pos + k];
+        }
+        dsps_fft2r_fc32(ctx->fft_buf, LTE_N_FFT);
+        dsps_bit_rev_fc32(ctx->fft_buf, LTE_N_FFT);
+
+        float sss_rx_re[LTE_N_SC_PSS], sss_rx_im[LTE_N_SC_PSS];
+        extract_pss_bins_shifted(ctx->fft_buf, ifo_shift, sss_rx_re, sss_rx_im);
+
+        /* H_sss: if ref known, h_sss = sss_rx * sss_ref; else use raw */
+        float h_sss_re[LTE_N_SC_PSS], h_sss_im[LTE_N_SC_PSS];
+        if (sss_ref) {
+            for (int k = 0; k < LTE_N_SC_PSS; k++) {
+                h_sss_re[k] = sss_rx_re[k] * sss_ref[k];
+                h_sss_im[k] = sss_rx_im[k] * sss_ref[k];
+            }
+        } else {
+            memcpy(h_sss_re, sss_rx_re, sizeof(h_sss_re));
+            memcpy(h_sss_im, sss_rx_im, sizeof(h_sss_im));
+        }
+
+        /* Accumulate: M += conj(h_sss) * h_pss * |h_pss|² (MMSE weight) */
+        for (int k = 0; k < LTE_N_SC_PSS; k++) {
+            float w = h_re[k] * h_re[k] + h_im[k] * h_im[k];  /* |h_pss|² */
+            float cr = h_sss_re[k] * h_re[k] + h_sss_im[k] * h_im[k];
+            float ci = h_sss_re[k] * h_im[k] - h_sss_im[k] * h_re[k];
+            m_re_total += cr * w;
+            m_im_total += ci * w;
+        }
+
+        pair_count++;
+        if (pair_count % 10 == 0) vTaskDelay(1);
+    }
+
+    if (pair_count == 0) return 0.0f;
+
+    float phase = atan2f(m_im_total, m_re_total);
+    float freq_err = phase / (2.0f * (float)M_PI * delta_t);
+
+    ESP_LOGI(TAG, "Multi-pair FOE: %+.1f Hz from %d pairs (phase=%.4f, nsamp=%d, start=%d, hf=%d)",
+             freq_err, pair_count, phase, num_samples,
+             pss_offset % half_frame, half_frame);
+    return freq_err;
+}
+
+/* ──────────────────────── Main Detection ──────────────────────── */
+
 int lte_sync_detect(lte_sync_t *ctx,
                     const uint8_t *iq_data, uint32_t iq_len,
                     uint32_t carrier_hz,
@@ -717,10 +818,10 @@ int lte_sync_detect(lte_sync_t *ctx,
     }
 
     /* Convert uint8 IQ to float.
-     * Limit to one frame worth of samples to fit work buffers. */
+     * Limit to work buffer capacity (200ms = 20 frames). */
     int num_samples = (int)(iq_len / 2);
-    if (num_samples > LTE_FRAME_SAMPLES) {
-        num_samples = LTE_FRAME_SAMPLES;
+    if (num_samples > LTE_MAX_SAMPLES) {
+        num_samples = LTE_MAX_SAMPLES;
     }
     if (num_samples < LTE_N_FFT) {
         ESP_LOGW(TAG, "IQ buffer too short: %d samples (need >= %d)", num_samples, LTE_N_FFT);
@@ -734,12 +835,11 @@ int lte_sync_detect(lte_sync_t *ctx,
 
     int cell_count = 0;
 
-    /* CP autocorrelation is disabled: at 1.92 MSPS the CP is only 9 samples,
-     * which is too short for reliable timing/CFO estimation at indoor SNR.
-     * The PSS-based IFO + split-phase CFO gives better results. */
+    /* CP autocorrelation disabled at 1.92 MSPS (9-sample CP too short).
+     * Using multi-pair PSS-SSS FOE instead (the LTE-Cell-Scanner approach). */
     bool cp_valid = false;
     float cp_cfo_hz = 0.0f;
-    (void)cp_sync;           /* Suppress unused warning */
+    (void)cp_sync;
     (void)apply_cfo_correction;
 
     /* PSS detection: find strongest peak */
@@ -763,14 +863,17 @@ int lte_sync_detect(lte_sync_t *ctx,
     sss_result_t sss;
     sss_detect(ctx, pss.offset, pss.n_id_2, ifo, num_samples, &sss);
 
-    /* If SSS decoded, prefer PSS-SSS phase rotation CFO (immune to multipath) */
-    if (sss.valid) {
-        freq_err = (float)ifo * 15000.0f + sss.freq_err_hz;
+    /* Multi-pair MMSE FOE: accumulate PSS-SSS phase across ALL half-frames.
+     * This is the LTE-Cell-Scanner approach — far more accurate than single pair.
+     * Uses decoded SSS ref if available for better channel estimation. */
+    float mp_foe = multi_pair_foe(ctx, pss.offset, pss.n_id_2, ifo,
+                                   sss.valid ? sss.sss_ref : NULL,
+                                   num_samples);
+    if (mp_foe != 0.0f) {
+        freq_err = (float)ifo * 15000.0f + mp_foe;
     }
 
-    /* Add back the CP-based fractional CFO that was corrected before PSS search.
-     * The IFO+split-phase/SSS measures residual after CP correction.
-     * Total = CP_CFO + residual. */
+    /* Add back CP-based correction if it was applied */
     if (cp_valid) {
         freq_err += cp_cfo_hz;
     }
@@ -846,8 +949,11 @@ int lte_sync_detect(lte_sync_t *ctx,
                 sss_result_t sss2;
                 sss_detect(ctx, pss2.offset, pss2.n_id_2, ifo2, num_samples, &sss2);
 
-                if (sss2.valid) {
-                    freq_err2 = (float)ifo2 * 15000.0f + sss2.freq_err_hz;
+                float mp_foe2 = multi_pair_foe(ctx, pss2.offset, pss2.n_id_2, ifo2,
+                                               sss2.valid ? sss2.sss_ref : NULL,
+                                               num_samples);
+                if (mp_foe2 != 0.0f) {
+                    freq_err2 = (float)ifo2 * 15000.0f + mp_foe2;
                 }
                 if (cp_valid) freq_err2 += cp_cfo_hz;
 

@@ -78,6 +78,11 @@ static const kal_band_info_t bands[KAL_BAND_COUNT] = {
         .arfcn_start = 0, .arfcn_end = 0,
         .dl_freq_start = 2620000000, .dl_freq_end = 2690000000,
     },
+    [KAL_BAND_LTE_B5] = {
+        .name = "LTE-B5",
+        .arfcn_start = 0, .arfcn_end = 0,
+        .dl_freq_start = 869000000, .dl_freq_end = 894000000,
+    },
     [KAL_BAND_LTE_B20] = {
         .name = "LTE-B20",
         .arfcn_start = 0, .arfcn_end = 0,
@@ -213,6 +218,8 @@ uint32_t kal_earfcn_to_freq(uint32_t earfcn)
     /* 3GPP TS 36.101 Table 5.7.3-1: F_DL = F_DL_low + 0.1 * (N_DL - N_offs_DL) */
     if (earfcn <= 599)                        /* Band 1 */
         return 2110000000u + earfcn * 100000u;
+    if (earfcn >= 600 && earfcn <= 1199)      /* Band 5 (DL: 869-894 MHz) */
+        return 869000000u + (earfcn - 600) * 100000u;
     if (earfcn >= 1200 && earfcn <= 1949)     /* Band 3 */
         return 1805000000u + (earfcn - 1200) * 100000u;
     if (earfcn >= 2750 && earfcn <= 3449)     /* Band 7 */
