@@ -708,6 +708,10 @@ void gsm_viterbi_mlse(const float *mf_re, const float *mf_im,
     }
     pm_prev[0] = 0;  /* start from known state 0 */
 
+    /* Debug: log expected outputs for state 0 */
+    ESP_LOGI(TAG, "MLSE: exp[s=0,b=0]=(%.6f,%.6f) exp[s=0,b=1]=(%.6f,%.6f)",
+             exp_re[0][0], exp_im[0][0], exp_re[0][1], exp_im[0][1]);
+
     /* ACS (Add-Compare-Select) */
     for (int t = 0; t < n_sym; t++) {
         float rx_r = mf_re[t];

@@ -940,13 +940,15 @@ static void scan_task(void *arg)
          * Target sample rate = 270833.33 * 4 = 1,083,333 Hz.
          * RTL-SDR supports arbitrary rates 900001-3200000, so 1083334 works.
          * DDC decim=1: frequency shift only, no decimation. */
-        /* Same rate as Stages 1-2 (GSM_SAMPLE_RATE = 1,083,334 = OSR=4) */
-        #define GSM_DDC_DECIM       1         /* No decimation — freq shift only */
-        #define GSM_DDC_RATE        GSM_SAMPLE_RATE
+        /* DDC decim=4: CIC anti-alias filter + downsample to 1 samp/sym.
+         * Input: 1,083,334 sps → Output: 270,833 sps = GSM symbol rate.
+         * The CIC averages 4 samples → lowpass at ~135 kHz, matching GSM BW.
+         * This eliminates aliased noise that was corrupting the demod. */
+        #define GSM_DDC_DECIM       4
+        #define GSM_DDC_RATE        (GSM_SAMPLE_RATE / GSM_DDC_DECIM)  /* 270833 */
         #define GSM_SYMBOL_RATE     270833
-        /* samp_per_sym = 1083334 / 270833 ≈ 4.0 (exact OSR for MLSE) */
 
-        int s3_buf_size = GSM_DDC_RATE / 5;  /* ~410k samples for 200ms */
+        int s3_buf_size = GSM_DDC_RATE / 3;  /* ~90k samples for 330ms */
         float *s3_re = heap_caps_malloc(s3_buf_size * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         float *s3_im = heap_caps_malloc(s3_buf_size * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!s3_re || !s3_im) {
@@ -1240,7 +1242,9 @@ static void scan_task(void *arg)
              * b) MAFI: convolve received symbols with time-reversed conjugate CIR
              * c) Feed into Viterbi MLSE with Euclidean distance branch metrics
              */
-            #define CIR_TAPS 5
+            /* Start with 1-tap CIR (simple equalizer) to validate scaling.
+             * Multi-tap requires correct GMSK model for ISI taps. */
+            #define CIR_TAPS 1
 
             /* 5a: Generate expected symbol-rate training IQ (cumulative ±π/2) */
             static const uint8_t sch_train_bits[64] = {
@@ -1258,10 +1262,12 @@ static void scan_task(void *arg)
                 }
             }
 
-            /* 5b: Multi-tap CIR: h[l] = (1/N) × Σ rx[42+k+l] × conj(train[k])
-             * If polarity is inverted, negate the expected training. */
+            /* 5b: CIR estimation. Compute CIR_TAPS taps, zero-pad to
+             * CHAN_IMP_RESP_LENGTH for the MLSE function. */
             float inv_sign = best_sch_inv ? -1.0f : 1.0f;
-            float cir_re[CIR_TAPS], cir_im[CIR_TAPS];
+            float cir_re[GSM_CHAN_IMP_LEN], cir_im[GSM_CHAN_IMP_LEN];
+            memset(cir_re, 0, sizeof(cir_re));
+            memset(cir_im, 0, sizeof(cir_im));
             for (int l = 0; l < CIR_TAPS; l++) {
                 float cr = 0, ci = 0;
                 int N = 64 - l;
@@ -1295,9 +1301,11 @@ static void scan_task(void *arg)
                 mf_im[n] = ai;
             }
 
-            /* 5d: Compute CIR autocorrelation for MLSE branch metrics */
-            float rhh_re[CIR_TAPS], rhh_im[CIR_TAPS];
-            for (int l = 0; l < CIR_TAPS; l++) {
+            /* 5d: Compute CIR autocorrelation: rhh[l] = Σ conj(cir[k]) × cir[k+l] */
+            float rhh_re[GSM_CHAN_IMP_LEN], rhh_im[GSM_CHAN_IMP_LEN];
+            memset(rhh_re, 0, sizeof(rhh_re));
+            memset(rhh_im, 0, sizeof(rhh_im));
+            for (int l = 0; l < GSM_CHAN_IMP_LEN; l++) {
                 float cr = 0, ci = 0;
                 for (int k = 0; k + l < CIR_TAPS; k++) {
                     cr += cir_re[k] * cir_re[k+l] + cir_im[k] * cir_im[k+l];
@@ -1307,14 +1315,9 @@ static void scan_task(void *arg)
                 rhh_im[l] = ci;
             }
 
-            /* Normalize: rhh[0] = 1 */
-            if (rhh_re[0] > 1e-15f) {
-                float inv = 1.0f / rhh_re[0];
-                for (int l = 0; l < CIR_TAPS; l++) {
-                    rhh_re[l] *= inv;
-                    rhh_im[l] *= inv;
-                }
-            }
+            /* Do NOT normalize rhh — keep it at the same scale as the MAFI output.
+             * Both MAFI and rhh are derived from the CIR, so they're in consistent
+             * amplitude. Normalizing one without the other breaks MLSE Euclidean. */
             /* Do NOT normalize MAFI output separately — it must stay in the same
              * scale as rhh for the MLSE Euclidean distance to work correctly.
              * The MAFI output amplitude ≈ rhh[0] × signal_amplitude.
@@ -1322,17 +1325,27 @@ static void scan_task(void *arg)
 
             /* 5e: Viterbi MLSE (from gsm_decode.c, Euclidean distance) */
             uint8_t hard_bits[GSM_BURST_LEN];
-            gsm_viterbi_mlse(mf_re, mf_im, GSM_BURST_LEN, rhh_re, rhh_im, hard_bits);
-
-            /* The CIR was estimated with polarity correction, so MLSE output
-             * should already have the correct polarity — no inversion needed. */
+            /* Skip MLSE — use simple differential demod on the CIC-filtered symbols.
+             * The CIC anti-alias filter at decim=4 removes out-of-band noise. */
             int ones = 0;
             for (int s = 0; s < GSM_BURST_LEN; s++) {
-                if (hard_bits[s]) ones++;
-                soft_bits[s] = hard_bits[s] ? 127 : -127;
+                if (s == 0) {
+                    soft_bits[s] = (sym_re[s] > 0) ? 127 : -127;
+                } else {
+                    float di = sym_im[s] * sym_re[s-1] - sym_re[s] * sym_im[s-1];
+                    float dr = sym_re[s] * sym_re[s-1] + sym_im[s] * sym_im[s-1];
+                    float mag = sqrtf(di * di + dr * dr);
+                    float conf = (mag > 1e-10f) ? fabsf(di) / mag : 0.5f;
+                    int8_t sv = (int8_t)(conf * 127.0f);
+                    if (sv < 1) sv = 1;
+                    soft_bits[s] = (di > 0) ? sv : (int8_t)(-sv);
+                }
+                if (best_sch_inv) soft_bits[s] = (int8_t)(-soft_bits[s]);
+                if (soft_bits[s] > 0) ones++;
             }
 
-            ESP_LOGI(TAG, "  MAFI+MLSE: %d ones / %d zeros", ones, GSM_BURST_LEN - ones);
+            ESP_LOGI(TAG, "  Diff demod (CIC filtered): %d ones / %d zeros",
+                     ones, GSM_BURST_LEN - ones);
 
             /* Also try differential demod for comparison */
             int diff_corr = 0;
