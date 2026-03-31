@@ -25,7 +25,7 @@ static const char *TAG = "kal";
 
 /* ──────────────────────── Constants ──────────────────────── */
 
-#define GSM_SAMPLE_RATE     1024000     /* 1.024 MSPS for GSM */
+#define GSM_SAMPLE_RATE     1083334     /* 4 × 270833 = OSR=4 for GSM GMSK */
 /* LTE sample rate now defined in lte_sync.h as LTE_SAMPLE_RATE_HZ (1920000) */
 #define LTE_SAMPLE_RATE     LTE_SAMPLE_RATE_HZ
 #define FFT_SIZE            1024
@@ -39,6 +39,12 @@ static const char *TAG = "kal";
 
 /* Sub-channel offsets within 1 MHz bandwidth (Hz) */
 static const int32_t subchan_offsets[] = { -400000, -200000, 0, 200000, 400000 };
+
+/* SCH training sequence in bipolar (±1) form for bit-domain correlation */
+static const int8_t sch_train_bipolar[64] = {
+    1,-1,1,1,1,-1,-1,1,-1,1,1,-1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,1,-1,-1,
+    1,-1,1,-1,-1,-1,1,-1,1,-1,-1,-1,1,1,-1,1,-1,-1,1,1,-1,1,-1,-1,1,-1,1,-1,-1,1,-1,-1
+};
 #define NUM_SUBCHANS        5
 
 /* ──────────────────────── Band Definitions ──────────────────────── */
@@ -934,9 +940,9 @@ static void scan_task(void *arg)
          * Target sample rate = 270833.33 * 4 = 1,083,333 Hz.
          * RTL-SDR supports arbitrary rates 900001-3200000, so 1083334 works.
          * DDC decim=1: frequency shift only, no decimation. */
-        #define GSM_S3_SAMPLE_RATE  1083334   /* ≈ 4 × 270833.33 = OSR=4 */
+        /* Same rate as Stages 1-2 (GSM_SAMPLE_RATE = 1,083,334 = OSR=4) */
         #define GSM_DDC_DECIM       1         /* No decimation — freq shift only */
-        #define GSM_DDC_RATE        GSM_S3_SAMPLE_RATE
+        #define GSM_DDC_RATE        GSM_SAMPLE_RATE
         #define GSM_SYMBOL_RATE     270833
         /* samp_per_sym = 1083334 / 270833 ≈ 4.0 (exact OSR for MLSE) */
 
@@ -965,7 +971,6 @@ static void scan_task(void *arg)
                      (unsigned long)((ch->freq_hz % 1000000) / 100000));
 
             /* Switch to OSR=4 sample rate for GMSK-MLSE demod */
-            rtlsdr_set_sample_rate(cfg->dev, GSM_S3_SAMPLE_RATE);
             rtlsdr_set_center_freq(cfg->dev, cand->step_center);
             vTaskDelay(pdMS_TO_TICKS(SETTLE_MS));
 
@@ -975,22 +980,133 @@ static void scan_task(void *arg)
             /* DDC at 1.083 MSPS with decim=1 → freq shift only, OSR=4 */
             int nb_len = ddc_extract_rs(s_kal.capture_buf, s_kal.capture_pos / 2,
                                         cand->ddc_offset_hz, GSM_DDC_DECIM,
-                                        GSM_S3_SAMPLE_RATE, s3_re, s3_im, s3_buf_size);
+                                        GSM_SAMPLE_RATE, s3_re, s3_im, s3_buf_size);
             if (nb_len < 1000) { ESP_LOGW(TAG, "  DDC too short"); continue; }
 
-            ESP_LOGI(TAG, "  DDC: %d samples at %d sps (OSR=%d)",
-                     nb_len, GSM_DDC_RATE, GSM_OSR);
+            ESP_LOGI(TAG, "  DDC: %d samples at %d sps (OSR=1, demod direct)",
+                     nb_len, GSM_DDC_RATE);
 
-            /* GMSK-MLSE demod: produces 148 soft bits per detected burst.
-             * The demod internally handles training correlation, channel
-             * estimation, matched filtering, and Viterbi MLSE. */
-            int max_soft = nb_len;  /* upper bound on output bits */
-            int8_t *soft_bits = heap_caps_malloc(max_soft * sizeof(int8_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-            if (!soft_bits) continue;
+            /* ── Airprobe approach: FCCH → SCH timing ──
+             * Step 1: Find FCCH in the DDC output (pure tone = constant phase diff)
+             * Step 2: SCH is 11 timeslots later = 11 × 156.25 × samp_per_sym samples
+             * Step 3: Differential demod at the SCH position
+             */
+            float samp_per_sym = (float)GSM_DDC_RATE / (float)GSM_SYMBOL_RATE;
+            int timeslot_samps = (int)(156.25f * samp_per_sym + 0.5f);
+            /* FCCH is in TS0 of frame N, SCH is in TS0 of frame N+1.
+             * Distance = 8 timeslots (TS1..TS7 of frame N + TS0 of frame N+1).
+             * 8 × 156.25 = 1250 symbols. At OSR=4 = 5000 samples.
+             * But the FCCH search finds the MIDDLE of the burst, so add half
+             * the FCCH burst = 74 symbols = 296 samples to get to the end. */
+            int burst_samps = (int)(148.0f * samp_per_sym + 0.5f);
+            int sch_offset_samps = 8 * timeslot_samps + burst_samps / 2;
 
-            int n_bits = gsm_gmsk_demod(s3_re, s3_im, nb_len, soft_bits, max_soft);
+            /* Find FCCH: the FCCH is a pure tone at +67,708 Hz.
+             * After DDC to baseband, it appears at +67.7 kHz.
+             * At 1,083,334 sps, the expected phase increment per sample is:
+             *   2π × 67708 / 1083334 = 0.3927 rad/sample
+             * Look for a region where phase diff has low variance (constant freq). */
+            float expected_phase_inc = TWO_PI * 67708.0f / (float)GSM_SAMPLE_RATE;
+            int fcch_pos = -1;
+            int fcch_window = (int)(148.0f * samp_per_sym);  /* ~592 samples */
+            float best_fcch_var = 1e30f;
 
-            ESP_LOGI(TAG, "  MLSE demod: %d soft bits", n_bits);
+            for (int start = 1; start + fcch_window < nb_len; start += (int)(samp_per_sym * 10)) {
+                float sum = 0, sum2 = 0;
+                for (int i = 0; i < fcch_window; i++) {
+                    int idx = start + i;
+                    float di = atan2f(
+                        s3_im[idx] * s3_re[idx-1] - s3_re[idx] * s3_im[idx-1],
+                        s3_re[idx] * s3_re[idx-1] + s3_im[idx] * s3_im[idx-1]);
+                    sum += di;
+                    sum2 += di * di;
+                }
+                float mean = sum / fcch_window;
+                float var = sum2 / fcch_window - mean * mean;
+                /* FCCH: low variance AND mean near expected phase increment */
+                if (var < best_fcch_var &&
+                    fabsf(mean - expected_phase_inc) < expected_phase_inc * 0.5f) {
+                    best_fcch_var = var;
+                    fcch_pos = start;
+                }
+            }
+
+            if (fcch_pos < 0) {
+                ESP_LOGI(TAG, "  No FCCH found in DDC output");
+                vTaskDelay(1);
+                continue;
+            }
+
+            ESP_LOGI(TAG, "  FCCH at sample %d, SCH at +%d = %d (%.1f samp/sym)",
+                     fcch_pos, sch_offset_samps, fcch_pos + sch_offset_samps,
+                     samp_per_sym);
+
+            /* Search for SCH around expected position (±3 timeslots).
+             * Try multiple offsets and pick the one with best training correlation. */
+            int sch_nominal = fcch_pos + sch_offset_samps;
+            int search_start = sch_nominal - 5 * timeslot_samps;
+            int search_end = sch_nominal + 5 * timeslot_samps;
+            if (search_start < (int)samp_per_sym) search_start = (int)samp_per_sym;
+            if (search_end + burst_samps >= nb_len) search_end = nb_len - burst_samps - 1;
+
+            int best_sch_corr = 0;
+            int best_sch_pos = -1;
+            bool best_sch_inv = false;
+
+            /* Search at sub-symbol resolution (every samp_per_sym/2 samples) */
+            int step = (int)(samp_per_sym / 2.0f);
+            if (step < 1) step = 1;
+
+            int sym_spacing = (int)(samp_per_sym + 0.5f);  /* 4 samples per symbol */
+            for (int pos = search_start; pos <= search_end; pos += step) {
+                /* Training correlation using symbol-spaced differential phase.
+                 * Phase diff between samples 1 symbol apart = ±π/2 for GMSK. */
+                int corr = 0;
+                for (int k = 0; k < 64; k++) {
+                    int idx = pos + (int)((42 + k) * samp_per_sym + 0.5f);
+                    if (idx < sym_spacing || idx >= nb_len) break;
+                    /* Symbol-spaced differential: z[n] * conj(z[n - sym_spacing]) */
+                    int prev = idx - sym_spacing;
+                    float di = s3_im[idx] * s3_re[prev] - s3_re[idx] * s3_im[prev];
+                    int rx_bit = (di > 0) ? 1 : -1;
+                    corr += rx_bit * sch_train_bipolar[k];
+                }
+                int abs_corr = (corr >= 0) ? corr : -corr;
+                if (abs_corr > best_sch_corr) {
+                    best_sch_corr = abs_corr;
+                    best_sch_pos = pos;
+                    best_sch_inv = (corr < 0);
+                }
+            }
+
+            ESP_LOGI(TAG, "  SCH search: best_corr=%d/64 at pos=%d%s (nominal=%d)",
+                     best_sch_corr, best_sch_pos,
+                     best_sch_inv ? " (inv)" : "", sch_nominal);
+
+            if (best_sch_pos < 0 || best_sch_corr < 20) {
+                ESP_LOGI(TAG, "  SCH training too weak (%d/64)", best_sch_corr);
+                vTaskDelay(1);
+                continue;
+            }
+
+            /* Demod the full burst at the best position */
+            int max_soft = GSM_BURST_LEN;
+            int8_t soft_bits_buf[GSM_BURST_LEN];
+            int8_t *soft_bits = soft_bits_buf;
+
+            for (int s = 0; s < GSM_BURST_LEN; s++) {
+                int idx = best_sch_pos + (int)(s * samp_per_sym + 0.5f);
+                int prev = idx - sym_spacing;
+                if (prev < 0 || idx >= nb_len) { soft_bits[s] = 0; continue; }
+                /* Symbol-spaced differential: phase change over 1 symbol period */
+                float di = s3_im[idx] * s3_re[prev] - s3_re[idx] * s3_im[prev];
+                int8_t bit = (di > 0) ? 127 : -127;
+                soft_bits[s] = best_sch_inv ? (int8_t)(-bit) : bit;
+            }
+
+            int train_corr = best_sch_corr;
+
+            int n_bits = GSM_BURST_LEN;
 
             /* ── SCH decode ──
              * The first 148 bits from gsm_gmsk_demod are the SCH burst
@@ -1079,15 +1195,14 @@ static void scan_task(void *arg)
                 ESP_LOGI(TAG, "  No SCH/BCCH decoded");
             }
 
-            free(soft_bits);
+            /* soft_bits is stack-allocated, no free needed */
             vTaskDelay(1);
         }
 
         free(s3_re);
         free(s3_im);
 
-        /* Restore sample rate back to original for any further operations */
-        rtlsdr_set_sample_rate(cfg->dev, sample_rate);
+        /* All stages use the same sample rate — no restore needed */
 skip_stage3:
 
         free(nb_re);

@@ -293,7 +293,7 @@ bool gsm_sch_decode(const int8_t *burst_bits, gsm_sch_info_t *info)
     /* Accept both positive and negative correlation (phase inversion) */
     int abs_corr = (train_corr >= 0) ? train_corr : -train_corr;
     ESP_LOGI(TAG, "SCH: train_corr=%d/64 (abs=%d)", train_corr, abs_corr);
-    if (abs_corr < 32) {
+    if (abs_corr < 20) {
         return false;
     }
     /* If negative correlation, invert all burst bits */
@@ -437,25 +437,67 @@ static const uint8_t gsm_train_seq[8][26] = {
  * osr: oversampling ratio (4 typical)
  * out_re, out_im: output complex waveform (n_bits * osr samples)
  */
+/**
+ * Generate GMSK-modulated IQ with proper Gaussian pulse shaping (BT=0.3).
+ *
+ * The phase: phi(t) = (pi/2) * sum_k nrz_k * integral of gaussian_pulse(t - kT)
+ * where BT=0.3 creates smooth transitions over ~3 symbol periods.
+ *
+ * At OSR=4, this produces the actual transmitted waveform shape —
+ * critical for IQ-domain training sequence correlation.
+ */
+#define GMSK_BT         0.3f
+#define GMSK_PULSE_SPAN 4       /* Pulse truncation: ±2 symbols */
+
 static void gsm_gmsk_mapper(const uint8_t *bits, int n_bits, int osr,
                             float *out_re, float *out_im)
 {
-    float phase = 0;
-    int prev_nrz = 1;  /* assume previous bit was 1 */
+    int total_samps = n_bits * osr;
+    int half_span = (GMSK_PULSE_SPAN * osr) / 2;
 
-    for (int i = 0; i < n_bits; i++) {
-        int nrz = 2 * bits[i] - 1;
-        int diff = nrz * prev_nrz;
-        /* GMSK: each symbol rotates +/-pi/2 */
-        float delta_phase = diff * (float)(M_PI / 2.0);
-        phase += delta_phase;
+    /* Pre-compute phase pulse: integrated Gaussian filter response.
+     * g(t) = (BT*sqrt(2*pi)/T) * exp(-2*(pi*BT*t/T)^2 / ln(2))
+     * q(t) = integral of g from -inf to t = 0.5*(1 + erf(sqrt(2)*pi*BT*t / (T*sqrt(ln2))))
+     * Phase contribution per bit = q(t+T/2) - q(t-T/2) */
+    float sqrt_ln2 = 0.8325546f;
+    float coeff = 1.4142136f * (float)M_PI * GMSK_BT / sqrt_ln2;  /* sqrt(2)*pi*BT/sqrt(ln2) */
 
-        for (int k = 0; k < osr; k++) {
-            int idx = i * osr + k;
-            out_re[idx] = cosf(phase);
-            out_im[idx] = sinf(phase);
+    /* Build phase-frequency pulse h(t) at OSR resolution, then integrate */
+    int pulse_samps = GMSK_PULSE_SPAN * osr;  /* 16 at OSR=4 */
+    float freq_pulse[GMSK_PULSE_SPAN * GSM_OSR];
+
+    for (int k = 0; k < pulse_samps; k++) {
+        float t = ((float)k - (float)pulse_samps / 2.0f + 0.5f) / (float)osr;
+        /* q(t) = 0.5*(1 + erf(coeff * t)) — use tanh approximation */
+        float q_pos = 0.5f * (1.0f + tanhf(coeff * (t + 0.5f)));
+        float q_neg = 0.5f * (1.0f + tanhf(coeff * (t - 0.5f)));
+        freq_pulse[k] = (q_pos - q_neg);  /* Instantaneous frequency contribution */
+    }
+
+    /* Accumulate phase from all bits */
+    float phase_acc[GSM_BURST_LEN * GSM_OSR + GMSK_PULSE_SPAN * GSM_OSR];
+    int phase_len = total_samps + pulse_samps;
+    if (phase_len > (int)sizeof(phase_acc) / (int)sizeof(float))
+        phase_len = sizeof(phase_acc) / sizeof(float);
+    memset(phase_acc, 0, phase_len * sizeof(float));
+
+    for (int b = 0; b < n_bits; b++) {
+        float nrz = 2.0f * bits[b] - 1.0f;
+        int center = b * osr + half_span;
+        for (int k = 0; k < pulse_samps; k++) {
+            int idx = center - half_span + k;
+            if (idx >= 0 && idx < phase_len) {
+                phase_acc[idx] += nrz * freq_pulse[k] * ((float)M_PI / (2.0f * (float)osr));
+            }
         }
-        prev_nrz = nrz;
+    }
+
+    /* Integrate (cumulative sum) to get instantaneous phase */
+    float cum_phase = 0;
+    for (int i = 0; i < total_samps; i++) {
+        cum_phase += phase_acc[i + half_span];  /* offset to align to first bit */
+        out_re[i] = cosf(cum_phase);
+        out_im[i] = sinf(cum_phase);
     }
 }
 
