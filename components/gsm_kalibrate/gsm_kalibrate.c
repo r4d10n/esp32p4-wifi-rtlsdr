@@ -1116,22 +1116,64 @@ static void scan_task(void *arg)
                 continue;
             }
 
-            /* Demod the full burst at the best position */
+            /* ── Demod the SCH burst: differential + MLSE comparison ──
+             * We have the burst position from the bit-domain SCH search.
+             * Try both simple differential demod and (if available) try to
+             * use the burst IQ directly through differential demod with
+             * optimal symbol timing. */
             int max_soft = GSM_BURST_LEN;
             int8_t soft_bits_buf[GSM_BURST_LEN];
             int8_t *soft_bits = soft_bits_buf;
 
-            for (int s = 0; s < GSM_BURST_LEN; s++) {
-                int idx = best_sch_pos + (int)(s * samp_per_sym + 0.5f);
-                int prev = idx - sym_spacing;
-                if (prev < 0 || idx >= nb_len) { soft_bits[s] = 0; continue; }
-                /* Symbol-spaced differential: phase change over 1 symbol period */
-                float di = s3_im[idx] * s3_re[prev] - s3_re[idx] * s3_im[prev];
-                int8_t bit = (di > 0) ? 127 : -127;
-                soft_bits[s] = best_sch_inv ? (int8_t)(-bit) : bit;
+            if (best_sch_pos + burst_samps > nb_len) {
+                ESP_LOGW(TAG, "  Burst extends past buffer");
+                vTaskDelay(1);
+                continue;
             }
 
-            int train_corr = best_sch_corr;
+            /* Symbol-spaced differential demod with phase sweep.
+             * Try multiple sampling phases within each symbol to find
+             * the optimal point that maximizes training correlation. */
+            int best_phase_corr = 0;
+            int best_phase_offset = 0;
+
+            for (int phase = 0; phase < sym_spacing; phase++) {
+                int corr = 0;
+                for (int k = 0; k < 64; k++) {
+                    int idx = best_sch_pos + phase + (int)((42 + k) * samp_per_sym + 0.5f);
+                    int prev = idx - sym_spacing;
+                    if (prev < 0 || idx >= nb_len) break;
+                    float di = s3_im[idx] * s3_re[prev] - s3_re[idx] * s3_im[prev];
+                    int rx = (di > 0) ? 1 : -1;
+                    corr += rx * sch_train_bipolar[k];
+                }
+                int ac = (corr >= 0) ? corr : -corr;
+                if (ac > best_phase_corr) {
+                    best_phase_corr = ac;
+                    best_phase_offset = phase;
+                    best_sch_inv = (corr < 0);
+                }
+            }
+
+            ESP_LOGI(TAG, "  Phase sweep: best_corr=%d/64 at phase=%d/%d%s",
+                     best_phase_corr, best_phase_offset, sym_spacing,
+                     best_sch_inv ? " (inv)" : "");
+
+            /* Demod at optimal phase */
+            for (int s = 0; s < GSM_BURST_LEN; s++) {
+                int idx = best_sch_pos + best_phase_offset + (int)(s * samp_per_sym + 0.5f);
+                int prev = idx - sym_spacing;
+                if (prev < 0 || idx >= nb_len) { soft_bits[s] = 0; continue; }
+                float di = s3_im[idx] * s3_re[prev] - s3_re[idx] * s3_im[prev];
+                /* Use magnitude as soft decision confidence */
+                float dr = s3_re[idx] * s3_re[prev] + s3_im[idx] * s3_im[prev];
+                float mag = sqrtf(di * di + dr * dr);
+                float confidence = (mag > 1e-10f) ? fabsf(di) / mag : 0.5f;
+                int8_t soft_val = (int8_t)(confidence * 127.0f);
+                if (soft_val < 1) soft_val = 1;
+                soft_bits[s] = (di > 0) ? soft_val : (int8_t)(-soft_val);
+                if (best_sch_inv) soft_bits[s] = (int8_t)(-soft_bits[s]);
+            }
 
             int n_bits = GSM_BURST_LEN;
 
