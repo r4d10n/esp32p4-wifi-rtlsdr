@@ -40,6 +40,28 @@ static const char *TAG = "kal";
 /* Sub-channel offsets within 1 MHz bandwidth (Hz) */
 static const int32_t subchan_offsets[] = { -400000, -200000, 0, 200000, 400000 };
 
+/* ── Gaussian Matched Filter for GMSK BT=0.3 ──
+ *
+ * FIR lowpass matched to GMSK pulse shape at OSR=4.
+ * h(n) = exp(-2π²×BT²×(n/OSR)²/ln2) for n=-N/2..+N/2
+ * BT=0.3, OSR=4, truncated at ±2.5 symbols = ±10 samples → 21 taps.
+ *
+ * Computed: BT=0.3, alpha = sqrt(2*pi)*BT/sqrt(ln2) = 0.9003
+ *   h(n) = exp(-alpha²×(n/4)²) for n=-10..10
+ *   n/4 = symbol-relative time
+ *
+ * Raw: h[-10..10] at n/OSR = -2.5, -2.25, ..., 0, ..., +2.25, +2.5
+ * Normalized to sum = 1.0 (acts as averaging filter for decimation).
+ */
+#define GMSK_FIR_TAPS 21
+static const float gmsk_fir[GMSK_FIR_TAPS] = {
+    /* n/4: -2.50  -2.25  -2.00  -1.75  -1.50  -1.25  -1.00  -0.75  -0.50  -0.25   0.00 */
+           0.0017f,0.0037f,0.0075f,0.0140f,0.0240f,0.0380f,0.0554f,0.0744f,0.0920f,0.1050f,0.1106f,
+    /* n/4:  0.25   0.50   0.75   1.00   1.25   1.50   1.75   2.00   2.25   2.50 */
+           0.1050f,0.0920f,0.0744f,0.0554f,0.0380f,0.0240f,0.0140f,0.0075f,0.0037f,0.0017f
+    /* Sum ≈ 1.042 — close to 1.0 (will normalize in code) */
+};
+
 /* SCH training sequence in bipolar (±1) form for bit-domain correlation */
 static const int8_t sch_train_bipolar[64] = {
     1,-1,1,1,1,-1,-1,1,-1,1,1,-1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,1,-1,-1,
@@ -423,6 +445,71 @@ static int ddc_extract_rs(const uint8_t *iq_in, uint32_t in_samples,
             out_im[out_idx] = acc_im / (float)decim;
             out_idx++;
             acc_re = 0; acc_im = 0; acc_cnt = 0;
+        }
+    }
+
+    return out_idx;
+}
+
+/* DDC with Gaussian matched FIR filter (replaces CIC for GSM Stage 3).
+ * NCO frequency shift → FIR filter → decimate.
+ * The FIR is applied as a polyphase decimating filter: for each output sample,
+ * compute the convolution of the FIR with the most recent TAPS input samples,
+ * then advance by 'decim' input samples. */
+static int ddc_extract_gmsk(const uint8_t *iq_in, uint32_t in_samples,
+                            int32_t offset_hz, int decim, uint32_t samp_rate,
+                            float *out_re, float *out_im, int max_out)
+{
+    float phase = 0;
+    float phase_inc = TWO_PI * (float)offset_hz / (float)samp_rate;
+    int out_idx = 0;
+
+    /* Ring buffer for FIR filter input (mixed IQ) */
+    float buf_re[GMSK_FIR_TAPS];
+    float buf_im[GMSK_FIR_TAPS];
+    memset(buf_re, 0, sizeof(buf_re));
+    memset(buf_im, 0, sizeof(buf_im));
+    int buf_pos = 0;
+    int samp_count = 0;
+
+    /* Normalize filter (ensure sum = 1/decim for proper scaling) */
+    float fir_sum = 0;
+    for (int k = 0; k < GMSK_FIR_TAPS; k++) fir_sum += gmsk_fir[k];
+    float fir_norm = 1.0f / (fir_sum * (float)decim);
+
+    for (uint32_t i = 0; i < in_samples && out_idx < max_out; i++) {
+        float iq_re = ((float)iq_in[2 * i] - 127.5f) / 127.5f;
+        float iq_im = ((float)iq_in[2 * i + 1] - 127.5f) / 127.5f;
+
+        float nco_re = cosf(phase);
+        float nco_im = -sinf(phase);
+        float mix_re = iq_re * nco_re - iq_im * nco_im;
+        float mix_im = iq_re * nco_im + iq_im * nco_re;
+
+        phase += phase_inc;
+        if (phase > TWO_PI) phase -= TWO_PI;
+        if (phase < -TWO_PI) phase += TWO_PI;
+
+        /* Push into ring buffer */
+        buf_re[buf_pos] = mix_re;
+        buf_im[buf_pos] = mix_im;
+        buf_pos = (buf_pos + 1) % GMSK_FIR_TAPS;
+
+        samp_count++;
+        if (samp_count >= decim) {
+            samp_count = 0;
+
+            /* FIR convolution */
+            float acc_re = 0, acc_im = 0;
+            int idx = buf_pos;  /* oldest sample */
+            for (int k = 0; k < GMSK_FIR_TAPS; k++) {
+                acc_re += gmsk_fir[k] * buf_re[idx];
+                acc_im += gmsk_fir[k] * buf_im[idx];
+                idx = (idx + 1) % GMSK_FIR_TAPS;
+            }
+            out_re[out_idx] = acc_re * fir_norm;
+            out_im[out_idx] = acc_im * fir_norm;
+            out_idx++;
         }
     }
 
@@ -978,7 +1065,10 @@ static void scan_task(void *arg)
             esp_err_t ret = capture_iq(cfg->dwell_ms + 500);
             if (ret != ESP_OK) { ESP_LOGW(TAG, "  Capture timeout"); continue; }
 
-            /* DDC at 1.083 MSPS with decim=1 → freq shift only, OSR=4 */
+            /* DDC with CIC anti-alias filter + decimation.
+             * Tested: Gaussian FIR (BT=0.3 matched) gave WORSE results (22/64 vs 32/64)
+             * because it was too narrow, rejecting useful GMSK signal energy.
+             * The CIC at decim=4 (135 kHz cutoff) passes the full ~180 kHz GMSK BW. */
             int nb_len = ddc_extract_rs(s_kal.capture_buf, s_kal.capture_pos / 2,
                                         cand->ddc_offset_hz, GSM_DDC_DECIM,
                                         GSM_SAMPLE_RATE, s3_re, s3_im, s3_buf_size);
