@@ -1234,24 +1234,115 @@ static void scan_task(void *arg)
                 continue;
             }
 
-            /* Step 5: Symbol-spaced differential demod (best result so far: 28-30/64).
-             * Direct phase tracking and 1-tap equalization both failed to improve
-             * beyond differential demod. The 72% accuracy ceiling is from GMSK ISI
-             * (BT=0.3). Breaking this requires multi-tap MAFI equalization. */
-            for (int s = 0; s < GSM_BURST_LEN; s++) {
-                if (s == 0) {
-                    soft_bits[s] = (sym_re[s] > 0) ? 127 : -127;
-                } else {
-                    float di = sym_im[s] * sym_re[s-1] - sym_re[s] * sym_im[s-1];
-                    float dr = sym_re[s] * sym_re[s-1] + sym_im[s] * sym_im[s-1];
-                    float mag = sqrtf(di * di + dr * dr);
-                    float conf = (mag > 1e-10f) ? fabsf(di) / mag : 0.5f;
-                    int8_t sv = (int8_t)(conf * 127.0f);
-                    if (sv < 1) sv = 1;
-                    soft_bits[s] = (di > 0) ? sv : (int8_t)(-sv);
+            /* Step 5: Multi-tap MAFI equalization + MLSE at symbol rate.
+             *
+             * a) Estimate 5-tap CIR from training (cross-correlation at lags 0-4)
+             * b) MAFI: convolve received symbols with time-reversed conjugate CIR
+             * c) Feed into Viterbi MLSE with Euclidean distance branch metrics
+             */
+            #define CIR_TAPS 5
+
+            /* 5a: Generate expected symbol-rate training IQ (cumulative ±π/2) */
+            static const uint8_t sch_train_bits[64] = {
+                1,0,1,1,1,0,0,1,0,1,1,0,0,0,1,0,0,0,0,0,0,1,0,0,0,0,0,0,1,1,0,0,
+                1,0,1,0,0,0,1,0,1,0,0,0,1,1,0,1,0,0,1,1,0,1,0,0,1,0,1,0,0,1,0,0
+            };
+            float tr_re[64], tr_im[64];
+            {
+                float ph = 0;
+                for (int k = 0; k < 64; k++) {
+                    float nrz = 2.0f * sch_train_bits[k] - 1.0f;
+                    ph += nrz * ((float)M_PI / 2.0f);
+                    tr_re[k] = cosf(ph);
+                    tr_im[k] = sinf(ph);
                 }
-                if (best_sch_inv) soft_bits[s] = (int8_t)(-soft_bits[s]);
             }
+
+            /* 5b: Multi-tap CIR: h[l] = (1/N) × Σ rx[42+k+l] × conj(train[k])
+             * If polarity is inverted, negate the expected training. */
+            float inv_sign = best_sch_inv ? -1.0f : 1.0f;
+            float cir_re[CIR_TAPS], cir_im[CIR_TAPS];
+            for (int l = 0; l < CIR_TAPS; l++) {
+                float cr = 0, ci = 0;
+                int N = 64 - l;
+                for (int k = 0; k < N; k++) {
+                    float rr = sym_re[42 + k + l];
+                    float ri = sym_im[42 + k + l];
+                    float t_re = tr_re[k] * inv_sign;
+                    float t_im = tr_im[k] * inv_sign;
+                    cr += rr * t_re + ri * t_im;  /* rx × conj(train) */
+                    ci += ri * t_re - rr * t_im;
+                }
+                cir_re[l] = cr / (float)N;
+                cir_im[l] = ci / (float)N;
+            }
+
+            ESP_LOGI(TAG, "  CIR: [0]=(%.4f,%.4f) [1]=(%.4f,%.4f) [2]=(%.4f,%.4f)",
+                     cir_re[0], cir_im[0], cir_re[1], cir_im[1], cir_re[2], cir_im[2]);
+
+            /* 5c: MAFI at symbol rate: out[n] = Σ conj(h[k]) × rx[n+k] */
+            float mf_re[GSM_BURST_LEN], mf_im[GSM_BURST_LEN];
+            for (int n = 0; n < GSM_BURST_LEN; n++) {
+                float ar = 0, ai = 0;
+                for (int k = 0; k < CIR_TAPS; k++) {
+                    int idx = n + k;
+                    if (idx >= GSM_BURST_LEN) break;
+                    /* conj(cir) × rx */
+                    ar += cir_re[k] * sym_re[idx] + cir_im[k] * sym_im[idx];
+                    ai += cir_re[k] * sym_im[idx] - cir_im[k] * sym_re[idx];
+                }
+                mf_re[n] = ar;
+                mf_im[n] = ai;
+            }
+
+            /* 5d: Compute CIR autocorrelation for MLSE branch metrics */
+            float rhh_re[CIR_TAPS], rhh_im[CIR_TAPS];
+            for (int l = 0; l < CIR_TAPS; l++) {
+                float cr = 0, ci = 0;
+                for (int k = 0; k + l < CIR_TAPS; k++) {
+                    cr += cir_re[k] * cir_re[k+l] + cir_im[k] * cir_im[k+l];
+                    ci += cir_re[k] * cir_im[k+l] - cir_im[k] * cir_re[k+l];
+                }
+                rhh_re[l] = cr;
+                rhh_im[l] = ci;
+            }
+
+            /* Normalize: rhh[0] = 1 */
+            if (rhh_re[0] > 1e-15f) {
+                float inv = 1.0f / rhh_re[0];
+                for (int l = 0; l < CIR_TAPS; l++) {
+                    rhh_re[l] *= inv;
+                    rhh_im[l] *= inv;
+                }
+            }
+            /* Do NOT normalize MAFI output separately — it must stay in the same
+             * scale as rhh for the MLSE Euclidean distance to work correctly.
+             * The MAFI output amplitude ≈ rhh[0] × signal_amplitude.
+             * With rhh[0] normalized to 1, MAFI output ≈ signal_amplitude. */
+
+            /* 5e: Viterbi MLSE (from gsm_decode.c, Euclidean distance) */
+            uint8_t hard_bits[GSM_BURST_LEN];
+            gsm_viterbi_mlse(mf_re, mf_im, GSM_BURST_LEN, rhh_re, rhh_im, hard_bits);
+
+            /* The CIR was estimated with polarity correction, so MLSE output
+             * should already have the correct polarity — no inversion needed. */
+            int ones = 0;
+            for (int s = 0; s < GSM_BURST_LEN; s++) {
+                if (hard_bits[s]) ones++;
+                soft_bits[s] = hard_bits[s] ? 127 : -127;
+            }
+
+            ESP_LOGI(TAG, "  MAFI+MLSE: %d ones / %d zeros", ones, GSM_BURST_LEN - ones);
+
+            /* Also try differential demod for comparison */
+            int diff_corr = 0;
+            for (int k = 0; k < 64; k++) {
+                int s = 42 + k;
+                float di = sym_im[s] * sym_re[s-1] - sym_re[s] * sym_im[s-1];
+                int rx = (di > 0) ? 1 : -1;
+                diff_corr += rx * sch_train_bipolar[k];
+            }
+            int diff_abs = (diff_corr >= 0) ? diff_corr : -diff_corr;
 
             /* Verify training correlation after equalization */
             int eq_corr = 0;

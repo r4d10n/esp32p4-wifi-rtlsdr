@@ -658,8 +658,9 @@ static void gsm_mafi(const float *rx_re, const float *rx_im, int n_symbols,
  * States represent the last (CHAN_IMP_RESP_LENGTH-1)=4 transmitted bits.
  * 16 states = 2^4.
  */
-static void gsm_viterbi_mlse(const float *mf_re, const float *mf_im,
-                             int n_sym,
+/* Non-static: also used from gsm_kalibrate.c Stage 3 */
+void gsm_viterbi_mlse(const float *mf_re, const float *mf_im,
+                      int n_sym,
                              const float *cir_ds_re, const float *cir_ds_im,
                              uint8_t *out_bits)
 {

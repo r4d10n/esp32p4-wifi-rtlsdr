@@ -106,6 +106,22 @@ int gsm_gmsk_demod(const float *iq_re, const float *iq_im, int n_samples,
  */
 bool gsm_bcch_decode(const int8_t burst_bits[4][116], uint8_t l2_frame[GSM_BCCH_BLOCK_LEN]);
 
+/* ── Viterbi MLSE equalizer (16-state, Euclidean distance) ── */
+
+/**
+ * 16-state Viterbi MLSE equalizer for GMSK channel equalization.
+ * Operates on symbol-rate matched-filter output.
+ *
+ * @param mf_re, mf_im  Matched filter output (n_sym complex samples)
+ * @param n_sym          Number of symbols (148 for a burst)
+ * @param cir_re, cir_im CIR or rhh (GSM_CHAN_IMP_LEN taps, normalized)
+ * @param out_bits       Output hard bits (0 or 1)
+ */
+void gsm_viterbi_mlse(const float *mf_re, const float *mf_im,
+                      int n_sym,
+                      const float *cir_re, const float *cir_im,
+                      uint8_t *out_bits);
+
 /* ── System Information parsing ── */
 
 /**
