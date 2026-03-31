@@ -721,9 +721,11 @@ static void gsm_viterbi_mlse(const float *mf_re, const float *mf_im,
 
             for (int b = 0; b < 2; b++) {
                 int ns = next_state_tbl[s][b];
-                /* Branch metric: Re(received * conj(expected))
-                 * This is the real correlation — higher is better */
-                float bm = rx_r * exp_re[s][b] + rx_i * exp_im[s][b];
+                /* Branch metric: negative Euclidean distance (airprobe formulation)
+                 * Smaller distance = better, so negate for max-search */
+                float dr = rx_r - exp_re[s][b];
+                float di = rx_i - exp_im[s][b];
+                float bm = -(dr * dr + di * di);
                 float new_pm = pm_prev[s] + bm;
                 if (new_pm > pm_cur[ns]) {
                     pm_cur[ns] = new_pm;

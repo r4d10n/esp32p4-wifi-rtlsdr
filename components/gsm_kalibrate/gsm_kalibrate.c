@@ -1001,33 +1001,60 @@ static void scan_task(void *arg)
             int burst_samps = (int)(148.0f * samp_per_sym + 0.5f);
             int sch_offset_samps = 8 * timeslot_samps + burst_samps / 2;
 
-            /* Find FCCH: the FCCH is a pure tone at +67,708 Hz.
-             * After DDC to baseband, it appears at +67.7 kHz.
-             * At 1,083,334 sps, the expected phase increment per sample is:
-             *   2π × 67708 / 1083334 = 0.3927 rad/sample
-             * Look for a region where phase diff has low variance (constant freq). */
-            float expected_phase_inc = TWO_PI * 67708.0f / (float)GSM_SAMPLE_RATE;
+            /* Find FCCH using airprobe accumulator approach (fast, no atan2f).
+             * FCCH is a pure tone → positive phase_diff for every sample.
+             * Count consecutive positive phase_diffs; if we get 148*OSR hits
+             * with few misses, that's the FCCH burst. */
             int fcch_pos = -1;
-            int fcch_window = (int)(148.0f * samp_per_sym);  /* ~592 samples */
-            float best_fcch_var = 1e30f;
+            {
+                int osr = (int)(samp_per_sym + 0.5f);
+                int max_misses = osr;               /* 4 at OSR=4 */
+                int fcch_hits_needed = 148 * osr;   /* 592 at OSR=4 */
+                int hit_count = 0;
+                int miss_count = 0;
 
-            for (int start = 1; start + fcch_window < nb_len; start += (int)(samp_per_sym * 10)) {
-                float sum = 0, sum2 = 0;
-                for (int i = 0; i < fcch_window; i++) {
-                    int idx = start + i;
-                    float di = atan2f(
-                        s3_im[idx] * s3_re[idx-1] - s3_re[idx] * s3_im[idx-1],
-                        s3_re[idx] * s3_re[idx-1] + s3_im[idx] * s3_im[idx-1]);
-                    sum += di;
-                    sum2 += di * di;
+                for (int i = 1; i < nb_len; i++) {
+                    /* phase_diff = Im(z[n] * conj(z[n-1])) — just the sign */
+                    float pd = s3_im[i] * s3_re[i-1] - s3_re[i] * s3_im[i-1];
+                    if (pd > 0) {
+                        hit_count++;
+                        miss_count = 0;
+                    } else {
+                        miss_count++;
+                        if (miss_count > max_misses) {
+                            hit_count = 0;
+                        }
+                    }
+                    if (hit_count >= fcch_hits_needed) {
+                        fcch_pos = i - hit_count;
+                        break;
+                    }
                 }
-                float mean = sum / fcch_window;
-                float var = sum2 / fcch_window - mean * mean;
-                /* FCCH: low variance AND mean near expected phase increment */
-                if (var < best_fcch_var &&
-                    fabsf(mean - expected_phase_inc) < expected_phase_inc * 0.5f) {
-                    best_fcch_var = var;
-                    fcch_pos = start;
+            }
+
+            /* Fallback: variance-based FCCH search if accumulator didn't find it */
+            if (fcch_pos < 0) {
+                float expected_phase_inc = TWO_PI * 67708.0f / (float)GSM_SAMPLE_RATE;
+                int fcch_window = (int)(148.0f * samp_per_sym);
+                float best_fcch_var = 1e30f;
+
+                for (int start = 1; start + fcch_window < nb_len; start += (int)(samp_per_sym * 10)) {
+                    float sum = 0, sum2 = 0;
+                    for (int i = 0; i < fcch_window; i++) {
+                        int idx = start + i;
+                        float di = atan2f(
+                            s3_im[idx] * s3_re[idx-1] - s3_re[idx] * s3_im[idx-1],
+                            s3_re[idx] * s3_re[idx-1] + s3_im[idx] * s3_im[idx-1]);
+                        sum += di;
+                        sum2 += di * di;
+                    }
+                    float mean = sum / fcch_window;
+                    float var = sum2 / fcch_window - mean * mean;
+                    if (var < best_fcch_var &&
+                        fabsf(mean - expected_phase_inc) < expected_phase_inc * 0.5f) {
+                        best_fcch_var = var;
+                        fcch_pos = start;
+                    }
                 }
             }
 
