@@ -290,9 +290,19 @@ bool gsm_sch_decode(const int8_t *burst_bits, gsm_sch_info_t *info)
         int received = (burst_bits[42 + i] > 0) ? 1 : -1;
         train_corr += expected * received;
     }
-    if (train_corr < 32) {
-        ESP_LOGD(TAG, "SCH: training correlation too low (%d/64)", train_corr);
+    /* Accept both positive and negative correlation (phase inversion) */
+    int abs_corr = (train_corr >= 0) ? train_corr : -train_corr;
+    ESP_LOGI(TAG, "SCH: train_corr=%d/64 (abs=%d)", train_corr, abs_corr);
+    if (abs_corr < 32) {
         return false;
+    }
+    /* If negative correlation, invert all burst bits */
+    if (train_corr < 0) {
+        /* Make a local inverted copy for decoding */
+        int8_t inv_burst[GSM_BURST_LEN];
+        for (int i = 0; i < GSM_BURST_LEN; i++) inv_burst[i] = -burst_bits[i];
+        /* Recurse with inverted bits (train_corr will be positive) */
+        return gsm_sch_decode(inv_burst, info);
     }
 
     int8_t enc_soft[GSM_SCH_ENC_BITS]; /* 78 encoded soft bits */
@@ -915,18 +925,35 @@ int gsm_gmsk_demod(const float *iq_re, const float *iq_im, int n_samples,
     /* Approach A: Direct phase decision from MAFI output.
      * In GMSK with differential encoding, the phase of the MAFI output
      * rotates by ±π/2 per symbol. Use differential phase to decide bits. */
+    /* Differential phase decode from MAFI output.
+     * GMSK encoding: nrz = 2*bit-1, diff_nrz = nrz[n]*nrz[n-1], phase += diff_nrz*π/2
+     * Demod recovers diff_nrz (the differential encoded NRZ).
+     * To recover original bits: nrz[n] = product of all diff_nrz[0..n]
+     *   (cumulative product), then bit = (nrz+1)/2.
+     *
+     * Actually, in GSM the data bits go through: data → diff_encode → GMSK.
+     * Diff demod gives back diff_nrz. To get data: XOR consecutive diff bits.
+     *
+     * Try BOTH interpretations and see which gives valid SCH. */
     uint8_t hard_bits[GSM_BURST_LEN];
+    uint8_t diff_bits[GSM_BURST_LEN];  /* raw differential phase decisions */
     int ones_diff = 0;
+
+    /* Step 1: Get raw differential phase decisions */
     for (int i = 0; i < GSM_BURST_LEN; i++) {
         if (i == 0) {
-            hard_bits[i] = (mf_re[i] > 0) ? 1 : 0;
+            diff_bits[i] = (mf_re[i] > 0) ? 1 : 0;
         } else {
-            /* Differential decode: phase_diff = arg(mf[i] * conj(mf[i-1])) */
-            float dr = mf_re[i] * mf_re[i-1] + mf_im[i] * mf_im[i-1];
             float di = mf_im[i] * mf_re[i-1] - mf_re[i] * mf_im[i-1];
-            /* GMSK: positive phase rotation = bit 1, negative = bit 0 */
-            hard_bits[i] = (di > 0) ? 1 : 0;
+            diff_bits[i] = (di > 0) ? 1 : 0;
         }
+    }
+
+    /* In GSM, the transmitted burst bits ARE the phase rotations.
+     * No cumulative differential decode needed — diff_bits are the bits.
+     * Copy diff_bits as the primary output. */
+    for (int i = 0; i < GSM_BURST_LEN; i++) {
+        hard_bits[i] = diff_bits[i];
         if (hard_bits[i]) ones_diff++;
     }
 
@@ -935,6 +962,16 @@ int gsm_gmsk_demod(const float *iq_re, const float *iq_im, int n_samples,
 
     /* If diff-phase gives ~50% ones (looks like data), use it.
      * If mostly zeros (<20 ones), fall back to MLSE. */
+    ESP_LOGI(TAG, "MLSE: cumul-diff bits: %d ones, %d zeros out of %d",
+             ones_diff, GSM_BURST_LEN - ones_diff, GSM_BURST_LEN);
+
+    /* Also try raw diff_bits (without cumulative decode) — GSM may use
+     * a different encoding convention */
+    int ones_raw = 0;
+    for (int i = 0; i < GSM_BURST_LEN; i++) if (diff_bits[i]) ones_raw++;
+    ESP_LOGI(TAG, "MLSE: raw-diff bits: %d ones, %d zeros out of %d",
+             ones_raw, GSM_BURST_LEN - ones_raw, GSM_BURST_LEN);
+
     if (ones_diff < 20 || ones_diff > 128) {
         /* Approach B: Viterbi MLSE */
         gsm_viterbi_mlse(mf_re, mf_im, GSM_BURST_LEN, cir_ds_re, cir_ds_im, hard_bits);
