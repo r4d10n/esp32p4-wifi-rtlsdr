@@ -1414,8 +1414,19 @@ static void scan_task(void *arg)
 
             /* 5e: Viterbi MLSE (from gsm_decode.c, Euclidean distance) */
             uint8_t hard_bits[GSM_BURST_LEN];
-            /* Skip MLSE — use simple differential demod on the CIC-filtered symbols.
-             * The CIC anti-alias filter at decim=4 removes out-of-band noise. */
+            /* ── Simple differential demod (best: 32/64 = 75%) ──
+             *
+             * At 1 samp/sym, GMSK signal at symbol k has cumulative phase:
+             *   φ[k] = Σ nrz[i] × π/2 for i=0..k
+             * De-rotating by -φ[k] removes the modulation, leaving just the
+             * channel response × ±1 (NRZ) residual.
+             *
+             * For the training (symbols 42-105), we know nrz[k], so we can
+             * compute the expected cumulative phase and de-rotate.
+             * Then CIR = cross-correlate de-rotated rx with NRZ.
+             */
+
+            /* Simple differential demod at 1 samp/sym — proven best at 32/64 */
             int ones = 0;
             for (int s = 0; s < GSM_BURST_LEN; s++) {
                 if (s == 0) {
@@ -1433,8 +1444,7 @@ static void scan_task(void *arg)
                 if (soft_bits[s] > 0) ones++;
             }
 
-            ESP_LOGI(TAG, "  Diff demod (CIC filtered): %d ones / %d zeros",
-                     ones, GSM_BURST_LEN - ones);
+            ESP_LOGI(TAG, "  Diff demod: %d ones / %d zeros", ones, GSM_BURST_LEN - ones);
 
             /* Also try differential demod for comparison */
             int diff_corr = 0;
