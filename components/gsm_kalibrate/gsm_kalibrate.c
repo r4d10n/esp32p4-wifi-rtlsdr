@@ -53,13 +53,16 @@ static const int32_t subchan_offsets[] = { -400000, -200000, 0, 200000, 400000 }
  * Raw: h[-10..10] at n/OSR = -2.5, -2.25, ..., 0, ..., +2.25, +2.5
  * Normalized to sum = 1.0 (acts as averaging filter for decimation).
  */
-#define GMSK_FIR_TAPS 21
+/* Wider Gaussian FIR for GMSK signal (not pulse) bandwidth.
+ * Designed for decim=2: cutoff at ~200 kHz (GMSK signal BW).
+ * h(n) = exp(-n²/(2σ²)) where σ = OSR/(2π×BW_ratio)
+ * With OSR=4 and target 3dB at ~250 kHz (half of 541 kHz output): σ ≈ 1.5 samples */
+#define GMSK_FIR_TAPS 9
 static const float gmsk_fir[GMSK_FIR_TAPS] = {
-    /* n/4: -2.50  -2.25  -2.00  -1.75  -1.50  -1.25  -1.00  -0.75  -0.50  -0.25   0.00 */
-           0.0017f,0.0037f,0.0075f,0.0140f,0.0240f,0.0380f,0.0554f,0.0744f,0.0920f,0.1050f,0.1106f,
-    /* n/4:  0.25   0.50   0.75   1.00   1.25   1.50   1.75   2.00   2.25   2.50 */
-           0.1050f,0.0920f,0.0744f,0.0554f,0.0380f,0.0240f,0.0140f,0.0075f,0.0037f,0.0017f
-    /* Sum ≈ 1.042 — close to 1.0 (will normalize in code) */
+    /* Gaussian with σ=1.5 samples, wider passband for GMSK modulated signal */
+    0.0111f, 0.0439f, 0.1170f, 0.2105f, 0.2560f,
+    0.2105f, 0.1170f, 0.0439f, 0.0111f
+    /* Sum ≈ 1.021, 3dB BW ≈ 240 kHz at 1,083,334 sps */
 };
 
 /* SCH training sequence in bipolar (±1) form for bit-domain correlation */
@@ -1027,14 +1030,14 @@ static void scan_task(void *arg)
          * Target sample rate = 270833.33 * 4 = 1,083,333 Hz.
          * RTL-SDR supports arbitrary rates 900001-3200000, so 1083334 works.
          * DDC decim=1: frequency shift only, no decimation. */
-        /* DDC decim=4: CIC anti-alias filter at ~135 kHz + downsample to 1 samp/sym.
-         * This is the optimal setting: narrowest filter = best noise rejection.
-         * Tested decim=1 (72%), decim=2 (74%), decim=4 (75%) — decim=4 wins. */
+        /* CIC at decim=4 is the best tested configuration (32/64 = 75%).
+         * Tested: Gaussian FIR decim=4 (22/64), CIC decim=2 (30/64),
+         *         Gaussian FIR decim=2 (30/64), CIC decim=4 (32/64). */
         #define GSM_DDC_DECIM       4
         #define GSM_DDC_RATE        (GSM_SAMPLE_RATE / GSM_DDC_DECIM)  /* 270833 */
         #define GSM_SYMBOL_RATE     270833
 
-        int s3_buf_size = GSM_DDC_RATE / 3;  /* ~90k samples for 330ms */
+        int s3_buf_size = GSM_DDC_RATE / 3;  /* ~180k samples for 330ms at 2 samp/sym */
         float *s3_re = heap_caps_malloc(s3_buf_size * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         float *s3_im = heap_caps_malloc(s3_buf_size * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!s3_re || !s3_im) {
@@ -1065,10 +1068,7 @@ static void scan_task(void *arg)
             esp_err_t ret = capture_iq(cfg->dwell_ms + 500);
             if (ret != ESP_OK) { ESP_LOGW(TAG, "  Capture timeout"); continue; }
 
-            /* DDC with CIC anti-alias filter + decimation.
-             * Tested: Gaussian FIR (BT=0.3 matched) gave WORSE results (22/64 vs 32/64)
-             * because it was too narrow, rejecting useful GMSK signal energy.
-             * The CIC at decim=4 (135 kHz cutoff) passes the full ~180 kHz GMSK BW. */
+            /* CIC anti-alias + decimation (best tested: 32/64 = 75%) */
             int nb_len = ddc_extract_rs(s_kal.capture_buf, s_kal.capture_pos / 2,
                                         cand->ddc_offset_hz, GSM_DDC_DECIM,
                                         GSM_SAMPLE_RATE, s3_re, s3_im, s3_buf_size);
