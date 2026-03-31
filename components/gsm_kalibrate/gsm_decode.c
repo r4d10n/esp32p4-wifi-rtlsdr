@@ -608,15 +608,13 @@ static void gsm_mafi(const float *rx_re, const float *rx_im, int n_symbols,
  */
 static void gsm_viterbi_mlse(const float *mf_re, const float *mf_im,
                              int n_sym,
-                             const float *rhh_re, const float *rhh_im,
+                             const float *cir_ds_re, const float *cir_ds_im,
                              uint8_t *out_bits)
 {
-    /* Pre-compute expected output for each (state, input_bit) pair.
-     * State encodes bits [n-1, n-2, n-3, n-4] (most recent in LSB).
-     * With input bit b at position n, the full 5-bit pattern is:
-     *   [b, state_bit3, state_bit2, state_bit1, state_bit0]
-     * Expected output = sum(rhh[k] * nrz[k]) for k=0..CHAN_IMP_RESP_LENGTH-1
-     * where nrz[0] = 2*b-1, nrz[1] = 2*state_bit(K-2)-1, etc.
+    /* Pre-compute expected received signal for each (state, input_bit) pair.
+     * Expected = Σ h[k] * nrz[k] where h is the downsampled CIR.
+     * State encodes bits [n-1, n-2, ..., n-K+1] (most recent in LSB).
+     * The input bit b is at position n (index 0 in the convolution).
      */
     float exp_re[MLSE_STATES][2];
     float exp_im[MLSE_STATES][2];
@@ -624,8 +622,6 @@ static void gsm_viterbi_mlse(const float *mf_re, const float *mf_im,
 
     for (int s = 0; s < MLSE_STATES; s++) {
         for (int b = 0; b < 2; b++) {
-            /* Build NRZ sequence: position 0 = input bit b,
-             * positions 1..4 = state bits (LSB = most recent) */
             float er = 0, ei = 0;
             int nrz_bits[CHAN_IMP_RESP_LENGTH];
             nrz_bits[0] = 2 * b - 1;
@@ -633,9 +629,10 @@ static void gsm_viterbi_mlse(const float *mf_re, const float *mf_im,
                 int bit = (s >> (k - 1)) & 1;
                 nrz_bits[k] = 2 * bit - 1;
             }
+            /* Use CIR (not rhh) for expected signal */
             for (int k = 0; k < CHAN_IMP_RESP_LENGTH; k++) {
-                er += rhh_re[k] * nrz_bits[k];
-                ei += rhh_im[k] * nrz_bits[k];
+                er += cir_ds_re[k] * nrz_bits[k];
+                ei += cir_ds_im[k] * nrz_bits[k];
             }
             exp_re[s][b] = er;
             exp_im[s][b] = ei;
@@ -861,19 +858,91 @@ int gsm_gmsk_demod(const float *iq_re, const float *iq_im, int n_samples,
     gsm_mafi(burst_re, burst_im, GSM_BURST_LEN, osr,
              chan_re, chan_im, cir_len, mf_re, mf_im);
 
-    /* Debug: log first few MAFI output samples */
-    ESP_LOGI(TAG, "MLSE: mafi[0]=(%.4f,%.4f) [10]=(%.4f,%.4f) [42]=(%.4f,%.4f)",
-             mf_re[0], mf_im[0], mf_re[10], mf_im[10], mf_re[42], mf_im[42]);
+    /* Normalize MAFI output and rhh together:
+     * MAFI output amplitude depends on channel power (rhh[0] before normalization).
+     * Scale both so that the MLSE branch metrics have meaningful magnitude.
+     * MAFI_normalized = MAFI / sqrt(rhh0), rhh_normalized = rhh / rhh0
+     * Then branch_metric = MAFI_norm * rhh_norm ≈ O(1) per symbol. */
+    float mf_power = 0;
+    for (int i = 0; i < GSM_BURST_LEN; i++) {
+        mf_power += mf_re[i] * mf_re[i] + mf_im[i] * mf_im[i];
+    }
+    mf_power /= (float)GSM_BURST_LEN;
+    float mf_scale = (mf_power > 1e-15f) ? (1.0f / sqrtf(mf_power)) : 1.0f;
 
-    /* Viterbi MLSE equalization */
+    for (int i = 0; i < GSM_BURST_LEN; i++) {
+        mf_re[i] *= mf_scale;
+        mf_im[i] *= mf_scale;
+    }
+    /* Also normalize rhh by rhh[0] */
+    if (rhh_re[0] > 1e-15f) {
+        float inv_rhh0 = 1.0f / rhh_re[0];
+        for (int i = 0; i < CHAN_IMP_RESP_LENGTH; i++) {
+            rhh_re[i] *= inv_rhh0;
+            rhh_im[i] *= inv_rhh0;
+        }
+    }
+
+    ESP_LOGI(TAG, "MLSE: mf_scale=%.2f mafi[0]=(%.3f,%.3f) rhh[0]=(%.3f,%.3f)",
+             mf_scale, mf_re[0], mf_im[0], rhh_re[0], rhh_im[0]);
+
+    /* Downsample CIR: take every OSR-th sample to get symbol-rate CIR */
+    float cir_ds_re[CHAN_IMP_RESP_LENGTH];
+    float cir_ds_im[CHAN_IMP_RESP_LENGTH];
+    for (int k = 0; k < CHAN_IMP_RESP_LENGTH; k++) {
+        cir_ds_re[k] = chan_re[k * osr];
+        cir_ds_im[k] = chan_im[k * osr];
+    }
+    /* Normalize downsampled CIR */
+    float cir_power = 0;
+    for (int k = 0; k < CHAN_IMP_RESP_LENGTH; k++)
+        cir_power += cir_ds_re[k] * cir_ds_re[k] + cir_ds_im[k] * cir_ds_im[k];
+    if (cir_power > 1e-15f) {
+        float cir_scale = 1.0f / sqrtf(cir_power);
+        for (int k = 0; k < CHAN_IMP_RESP_LENGTH; k++) {
+            cir_ds_re[k] *= cir_scale;
+            cir_ds_im[k] *= cir_scale;
+        }
+    }
+
+    ESP_LOGI(TAG, "MLSE: cir_ds[0]=(%.3f,%.3f) [1]=(%.3f,%.3f) [2]=(%.3f,%.3f)",
+             cir_ds_re[0], cir_ds_im[0], cir_ds_re[1], cir_ds_im[1],
+             cir_ds_re[2], cir_ds_im[2]);
+
+    /* Two approaches: MLSE and simple differential phase slicer.
+     * Try both and see which produces valid data. */
+
+    /* Approach A: Direct phase decision from MAFI output.
+     * In GMSK with differential encoding, the phase of the MAFI output
+     * rotates by ±π/2 per symbol. Use differential phase to decide bits. */
     uint8_t hard_bits[GSM_BURST_LEN];
-    gsm_viterbi_mlse(mf_re, mf_im, GSM_BURST_LEN, rhh_re, rhh_im, hard_bits);
+    int ones_diff = 0;
+    for (int i = 0; i < GSM_BURST_LEN; i++) {
+        if (i == 0) {
+            hard_bits[i] = (mf_re[i] > 0) ? 1 : 0;
+        } else {
+            /* Differential decode: phase_diff = arg(mf[i] * conj(mf[i-1])) */
+            float dr = mf_re[i] * mf_re[i-1] + mf_im[i] * mf_im[i-1];
+            float di = mf_im[i] * mf_re[i-1] - mf_re[i] * mf_im[i-1];
+            /* GMSK: positive phase rotation = bit 1, negative = bit 0 */
+            hard_bits[i] = (di > 0) ? 1 : 0;
+        }
+        if (hard_bits[i]) ones_diff++;
+    }
 
-    /* Debug: count ones vs zeros in output */
-    int ones = 0;
-    for (int i = 0; i < GSM_BURST_LEN; i++) if (hard_bits[i]) ones++;
-    ESP_LOGI(TAG, "MLSE: hard bits: %d ones, %d zeros out of %d",
-             ones, GSM_BURST_LEN - ones, GSM_BURST_LEN);
+    ESP_LOGI(TAG, "MLSE: diff-phase bits: %d ones, %d zeros out of %d",
+             ones_diff, GSM_BURST_LEN - ones_diff, GSM_BURST_LEN);
+
+    /* If diff-phase gives ~50% ones (looks like data), use it.
+     * If mostly zeros (<20 ones), fall back to MLSE. */
+    if (ones_diff < 20 || ones_diff > 128) {
+        /* Approach B: Viterbi MLSE */
+        gsm_viterbi_mlse(mf_re, mf_im, GSM_BURST_LEN, cir_ds_re, cir_ds_im, hard_bits);
+        int ones_mlse = 0;
+        for (int i = 0; i < GSM_BURST_LEN; i++) if (hard_bits[i]) ones_mlse++;
+        ESP_LOGI(TAG, "MLSE: viterbi bits: %d ones, %d zeros out of %d",
+                 ones_mlse, GSM_BURST_LEN - ones_mlse, GSM_BURST_LEN);
+    }
 
     /* Convert hard bits to soft bits (+127 / -127) */
     int n_out = GSM_BURST_LEN;
