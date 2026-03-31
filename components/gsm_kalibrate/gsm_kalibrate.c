@@ -1008,8 +1008,8 @@ static void scan_task(void *arg)
             int fcch_pos = -1;
             {
                 int osr = (int)(samp_per_sym + 0.5f);
-                int max_misses = osr;               /* 4 at OSR=4 */
-                int fcch_hits_needed = 148 * osr;   /* 592 at OSR=4 */
+                int max_misses = osr * 4;            /* 16 at OSR=4 — tolerant of noise */
+                int fcch_hits_needed = 100 * osr;    /* 400 at OSR=4 — ~100 symbols */
                 int hit_count = 0;
                 int miss_count = 0;
 
