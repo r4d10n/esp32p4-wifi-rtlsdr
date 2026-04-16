@@ -1,16 +1,40 @@
-# ESP32-P4 RTL-SDR WiFi Bridge
+# ESP32-P4 RTL-SDR WiFi Platform
 
-Transform a Waveshare ESP32-P4 board + RTL-SDR dongle into a wireless Software-Defined Radio receiver. Stream IQ samples over WiFi or Ethernet using the standard **rtl_tcp** protocol, compatible with GQRX, SDR++, SDR#, and other clients.
+Transform a Waveshare ESP32-P4 board + RTL-SDR dongle into a wireless, multi-protocol Software-Defined Radio platform. Stream IQ samples over WiFi or Ethernet using `rtl_tcp`, **SpyServer**, or **SoapyRemote** — compatible with GQRX, SDR++, SDR#, CubicSDR, and other standard clients. Or run the built-in **WebSDR** browser UI with real-time FFT, waterfall, and WBFM audio.
 
 ```
-[RTL-SDR Dongle] --USB 2.0 HS--> [ESP32-P4] --WiFi 6/Ethernet--> [SDR Client]
+[RTL-SDR Dongle] --USB 2.0 HS--> [ESP32-P4] --WiFi 6/Ethernet--> [SDR Client / Browser]
 ```
 
 ## Overview
 
 This project provides a complete **USB Host driver for RTL2832U-based DVB-T tuners** on the ESP32-P4 — the first ESP32 variant with USB 2.0 High-Speed support. Previous variants (S2, S3) only supported Full-Speed USB, causing babble errors and limiting sample rates to ~240 kHz. The ESP32-P4 with HS enables **1+ MSPS streaming over WiFi**.
 
+Beyond raw IQ streaming, the platform hosts a **browser-based WebSDR** (real-time spectrum + waterfall + WBFM/NFM audio, DTMF and AFSK1200 decoders), a **WiFi Manager** captive portal for provisioning, and a growing family of **protocol-specific receiver branches** (APRS iGate, AIS maritime, ADS-B aircraft) that share the common driver/DSP core.
+
 **Key achievement**: 96.4% spectral correlation with direct USB reference captures, proving fidelity across the WiFi bridge.
+
+## Current Status
+
+| Capability | Branch | Status |
+|------------|--------|--------|
+| `rtl_tcp` protocol (1 MSPS WiFi) | `main` | Production |
+| SpyServer protocol (SDR++ native) | `main` | Production |
+| SoapyRemote protocol | `main` | Production |
+| WebSDR browser UI + waterfall | `main` | Production |
+| WiFi Manager (captive portal) | `main` | Production |
+| UDP streaming + `udp2tcp` bridge | `main` | Production |
+| rtl_power FFT scanner | `main` | Beta |
+| rtl_433 ISM band decoder | `main` | Beta |
+| NB / NR / Notch DSP + WBFM player | `feature/websdr` → merging | Ready |
+| APRS (144.39 MHz, AFSK1200, iGate) | `feature/aprs` → merging | Ready |
+| AIS (161.975/162.025 MHz, GMSK 9600) | `feature/ais` → merging | Ready |
+| ADS-B (1090 MHz, dump1090-style) | `feature/adsb` → merging | Ready |
+| WSPR / FT8 weak-signal decode | `feature/wspr-ft8` | Experimental |
+| GSM FCCH PPM calibration | `feature/gsm-kalibrate` | Research |
+| Cell carrier detection / spectrum survey | `feature/gsm-lte` | Research |
+
+A separate **[Standalone FM Receiver firmware](../esp32p4-standalone/)** (local USB audio output, stereo + RDS decode, headless operation) lives in its own worktree — see *Related Projects* below.
 
 ## Hardware
 
@@ -46,20 +70,58 @@ Waveshare ESP32-P4-WIFI6:
 
 ## Features
 
+### Driver & Transport Core
+
 - **USB 2.0 High-Speed**: 480 Mbps raw link, ~30+ MB/s practical throughput
 - **RTL2832U Demodulator**: Complete register-level driver port from librtlsdr
 - **R828D Tuner**: 24-1700 MHz coverage with R828D multi-band support + Blog V4 HF/VHF/UHF switching
 - **WiFi 6 (802.11ax)**: Via ESP32-C6 companion chip on SDIO, ~4-5 MB/s TCP sustained
 - **Ethernet (100 Mbps)**: RMII interface for fixed installations, ~11 MB/s TCP
-- **RTL-TCP Protocol**: Standard wire protocol, multi-client capable
-- **UDP Streaming**: Lower-overhead alternative with sequence tracking + udp2tcp bridge
 - **mDNS Service Discovery**: Auto-advertise as `esp32p4-rtlsdr._rtl_tcp._tcp`
 - **Ring Buffer (PSRAM)**: Configurable 2-8 MB absorbs WiFi jitter
 - **Full Gain Control**: LNA + Mixer + VGA stages, manual or auto-gain
+- **Direct Sampling / Offset Tuning / IF Gain**: Advanced RTL2832U modes for HF and weak-signal work
 - **Bias-T Power**: GPIO-controlled antenna power (default GPIO4)
-- **Frequency Correction**: PPM-level accuracy via crystal calibration
+- **Frequency Correction**: PPM-level accuracy via crystal calibration (FCCH-assisted tool on `feature/gsm-kalibrate`)
 - **Test Mode**: IQ pattern generator for validation
 - **Real-time IQ Streaming**: 1 MSPS comfortable, 2+ MSPS possible
+
+### Streaming Protocols
+
+- **RTL-TCP**: Standard wire protocol, multi-client capable
+- **UDP**: Lower-overhead alternative with sequence tracking + `udp2tcp` bridge for legacy clients
+- **SpyServer**: Native SDR++ / SDR# compatibility (DeviceInfo HELLO, gain-table mapping, configurable decimation)
+- **SoapyRemote**: Cross-platform Pothos / CubicSDR compatibility
+
+### Built-in WebSDR (Browser UI)
+
+- Real-time FFT spectrum (256-8192 pt, **int16 PIE SIMD**, 4.3× faster than float)
+- WebGL2 waterfall with drag-pan tuning and filter overlay
+- WBFM streaming player (75 µs de-emphasis, 15 kHz LPF, soft limiter, AudioWorklet output)
+- NFM / USB / LSB / CW demodulation with configurable filter bandwidth
+- NB (narrow-band) / NR (noise reduction) / Notch DSP
+- Decoders: DTMF (Goertzel), AFSK1200 (AX.25-style framing)
+- Exponential reconnect, amber-theme UI, SVG S-meter, DSEG7 frequency readout
+- Works on phones, tablets, and desktops without installing any client
+
+### Network & Provisioning
+
+- **WiFi Manager**: Captive-portal provisioning (no hard-coded credentials needed)
+- **mDNS**: Discoverable hostname on local network
+- **Optional Ethernet + Multicast** (Kconfig-gated)
+
+## Protocol Receiver Branches
+
+The platform's driver and DSP core is shared across a family of **protocol-specific firmware variants**, each maintained in its own feature branch with a purpose-built decoder and web UI. These build on the common WebSDR foundation but tune the receiver for a specific band and demodulation chain.
+
+| Branch | Frequency | Modulation | Decoder | HTTP Port | Status |
+|--------|-----------|------------|---------|-----------|--------|
+| `feature/aprs` | 144.390 MHz | AFSK 1200 | AX.25 frame sync, APRS-IS iGate forwarder | 8081 | Merge-ready |
+| `feature/ais`  | 161.975 / 162.025 MHz | GMSK 9600 (dual-channel) | AIS NMEA decoder | 8082 | Merge-ready |
+| `feature/adsb` | 1090 MHz | PPM (Mode S) | dump1090-style message extractor, live aircraft map | 8083 | Merge-ready |
+| `feature/wspr-ft8` | HF / 6m / 2m (per config) | 8-GFSK | WSPR + FT8 (`ft8_lib`, LDPC, Costas sync), optional PSKreporter upload | configurable | Experimental |
+
+Each branch is **independent** — pick the protocol you want, flash that branch. Merging the four "merge-ready" branches into `main` is a near-term milestone so they can coexist as runtime-selectable modules.
 
 ## Performance
 
@@ -565,22 +627,29 @@ esp32p4-wifi-rtlsdr/
 │   ├── Kconfig.projbuild              # WiFi/sample rate configuration
 │   └── CMakeLists.txt
 │
-├── components/
+├── components/                        # (on `main`; `feature/websdr` is a subset)
 │   ├── rtlsdr/                        # RTL2832U USB host driver
-│   │   ├── include/
-│   │   │   ├── rtlsdr.h               # Public API
-│   │   │   └── rtlsdr_internal.h      # Internal structs
-│   │   ├── rtlsdr.c                   # Demod + USB host
+│   │   ├── include/                   #   - rtlsdr.h, rtlsdr_internal.h
+│   │   ├── rtlsdr.c                   # Demod + USB host + EP0x81 bulk reader
 │   │   ├── tuner_r82xx.c              # R828D/R820T tuner driver
 │   │   └── CMakeLists.txt
 │   │
-│   └── rtltcp/                        # RTL-TCP + UDP servers
-│       ├── include/
-│       │   ├── rtltcp.h               # RTL-TCP server API
-│       │   └── rtludp.h               # UDP server API
-│       ├── rtltcp.c                   # TCP implementation
-│       ├── rtludp.c                   # UDP implementation
-│       └── CMakeLists.txt
+│   ├── rtltcp/                        # rtl_tcp + UDP servers
+│   │   ├── rtltcp.c                   # TCP implementation
+│   │   └── rtludp.c                   # UDP implementation
+│   │
+│   ├── spyserver/                     # SpyServer protocol (SDR++ native)
+│   ├── soapyremote/                   # SoapyRemote protocol
+│   ├── websdr/                        # Browser UI + embedded web assets
+│   │   ├── www/                       #   HTML/JS/CSS (spectrum, waterfall, WBFM)
+│   │   ├── certs/                     #   TLS certificates (optional HTTPS)
+│   │   └── websdr.c                   #   HTTP + WebSocket server, DSP glue
+│   │
+│   ├── dsp/                           # FFT, DDC, filters (int16 PIE SIMD)
+│   ├── decoders/                      # DTMF, AFSK1200, shared decoder helpers
+│   ├── rtl433/                        # rtl_433 ISM-band decoder bridge
+│   ├── rtlpower/                      # rtl_power FFT scanner
+│   └── wifimgr/                       # Captive-portal WiFi provisioning
 │
 ├── c6-ota-flasher/                    # ESP32-C6 WiFi firmware
 │   ├── main/app_main.c                # C6 firmware entry
@@ -604,6 +673,33 @@ esp32p4-wifi-rtlsdr/
 └── test/
     └── analyze_spectrum.py            # IQ spectral analysis
 ```
+
+## Roadmap
+
+### Near-term (pending merge into `main`)
+
+- Merge `feature/websdr` — NB/NR/notch DSP, WBFM player, expanded decoder test matrix
+- Merge `feature/aprs` — APRS iGate as runtime-selectable module
+- Merge `feature/ais`  — AIS maritime decoder
+- Merge `feature/adsb` — ADS-B aircraft tracker with STALL-cascade USB fix
+- Cherry-pick direct-sampling / offset-tuning / IF-gain hardening from `feature/wifimgr`
+
+### Medium-term
+
+- Promote `feature/wspr-ft8` to production once field-verified with PSKreporter upload path
+- Runtime mode switch ("receiver profile") — swap between raw IQ / APRS / AIS / ADS-B / WSPR without reflashing
+- High-rate 2.4+ MSPS Ethernet primary transport
+- Expanded tuner support: **E4000**, **FC0012**, **FC0013**, **FC2580** (driver framework already probes their I2C addresses)
+
+### Research
+
+- **GSM FCCH-based PPM calibration** (`feature/gsm-kalibrate`) — a calibration-only tool that uses the known 67.7 kHz GSM frequency-correction burst as a clock reference to measure and correct the RTL-SDR crystal offset. Same principle as the classic `kalibrate-rtl` utility.
+- **Cell carrier detection / spectrum survey** (`feature/gsm-lte`) — FFT-based scanner that identifies occupied cellular channels (ARFCN / EARFCN presence) across GSM bands and LTE PSS/SSS detection for educational RF-survey use. Passive spectrum-occupancy measurements only.
+- **DVB-T reception** (tracked in the sibling `esp32p4-dvbmod` experiment) — native demodulation of DVB-T transport streams using the RTL2832U's onboard COFDM demodulator.
+
+### Standalone Track (separate product)
+
+- **Standalone FM Receiver firmware** (see [Related Projects](#related-projects)) — headless FM stereo + RDS receiver with local USB audio output. Not a merge into `main`; maintained on its own release track.
 
 ## Development History
 
@@ -676,6 +772,16 @@ esp32p4-wifi-rtlsdr/
 - [xtrsdr: RTL-SDR on ESP32-S2](https://github.com/XTR1984/xtrsdr) — Excellent code reference
 - [RTL2832U on STM32](https://fallingnate.svbtle.com/rtl2832-usb-stm32-pt1) — MCU-level USB proof-of-concept
 - [RTL2832U USB Overflow (IDFGH-10944)](https://github.com/espressif/esp-idf/issues/12137) — Why ESP32-P4 was needed
+
+## Related Projects
+
+Additional ESP32-P4 SDR experiments live in sibling worktrees under the same parent directory. They share hardware and much of the driver core, but diverge in target use case:
+
+| Project | Worktree / Branch | Purpose |
+|---------|-------------------|---------|
+| **Standalone FM Receiver** | `../esp32p4-standalone/` (`feature/standalone`) | Headless FM stereo + RDS receiver with local **USB audio output** — no WiFi client needed. Target: portable / car / bedside radio. |
+| Standalone (dev tracks) | `standalone-mono-nonopt`, `standalone-optimized` | Development experiments exploring cascaded 19 kHz notch, IQ-level squelch, and `-O3`/`-Ofast` compiler-flag trade-offs for the FM chain. |
+| WiFi Manager + Extras | `../esp32p4-wifi-rtlsdr-wifimgr/` (`feature/wifimgr`) | Super-set of `main` with PSKreporter HTTPS upload, network forwarders, Telegram notification bot, AX.25 multi-baud DSP, and production-hardened ADS-B / AIS decoders. Features trickle back into `main` once validated. |
 
 ## License
 
