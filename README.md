@@ -1,4 +1,6 @@
-# ESP32-P4 RTL-SDR WiFi Platform
+# ESP32-P4 RTL-SDR WiFi Platform (Work in Progress)
+
+> ⚠️ **Status: Work in Progress.** This project is under active development. APIs, Kconfig options, wire protocols, and web UI may change between commits without notice. Expect sharp edges; file issues for anything that looks broken.
 
 Transform a Waveshare ESP32-P4 board + RTL-SDR dongle into a wireless, multi-protocol Software-Defined Radio platform. Stream IQ samples over WiFi or Ethernet using `rtl_tcp`, **SpyServer**, or **SoapyRemote** — compatible with GQRX, SDR++, SDR#, CubicSDR, and other standard clients. Or run the built-in **WebSDR** browser UI with real-time FFT, waterfall, and WBFM audio.
 
