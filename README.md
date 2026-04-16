@@ -10,7 +10,7 @@ Transform a Waveshare ESP32-P4 board + RTL-SDR dongle into a wireless, multi-pro
 
 This project provides a complete **USB Host driver for RTL2832U-based DVB-T tuners** on the ESP32-P4 — the first ESP32 variant with USB 2.0 High-Speed support. Previous variants (S2, S3) only supported Full-Speed USB, causing babble errors and limiting sample rates to ~240 kHz. The ESP32-P4 with HS enables **1+ MSPS streaming over WiFi**.
 
-Beyond raw IQ streaming, the platform hosts a **browser-based WebSDR** (real-time spectrum + waterfall + WBFM/NFM audio, DTMF and AFSK1200 decoders), a **WiFi Manager** captive portal for provisioning, and a growing family of **protocol-specific receiver branches** (APRS iGate, AIS maritime, ADS-B aircraft) that share the common driver/DSP core.
+Beyond raw IQ streaming, the platform hosts a **browser-based WebSDR** (real-time spectrum + waterfall + WBFM/NFM audio, DTMF and AFSK1200 decoders) and a **WiFi Manager** captive portal for provisioning.
 
 **Key achievement**: 96.4% spectral correlation with direct USB reference captures, proving fidelity across the WiFi bridge.
 
@@ -27,10 +27,6 @@ Beyond raw IQ streaming, the platform hosts a **browser-based WebSDR** (real-tim
 | rtl_power FFT scanner | `main` | Beta |
 | rtl_433 ISM band decoder | `main` | Beta |
 | NB / NR / Notch DSP + WBFM player | `feature/websdr` → merging | Ready |
-| APRS (144.39 MHz, AFSK1200, iGate) | `feature/aprs` → merging | Ready |
-| AIS (161.975/162.025 MHz, GMSK 9600) | `feature/ais` → merging | Ready |
-| ADS-B (1090 MHz, dump1090-style) | `feature/adsb` → merging | Ready |
-| WSPR / FT8 weak-signal decode | `feature/wspr-ft8` | Experimental |
 | GSM FCCH PPM calibration | `feature/gsm-kalibrate` | Research |
 | Cell carrier detection / spectrum survey | `feature/gsm-lte` | Research |
 
@@ -109,19 +105,6 @@ Waveshare ESP32-P4-WIFI6:
 - **WiFi Manager**: Captive-portal provisioning (no hard-coded credentials needed)
 - **mDNS**: Discoverable hostname on local network
 - **Optional Ethernet + Multicast** (Kconfig-gated)
-
-## Protocol Receiver Branches
-
-The platform's driver and DSP core is shared across a family of **protocol-specific firmware variants**, each maintained in its own feature branch with a purpose-built decoder and web UI. These build on the common WebSDR foundation but tune the receiver for a specific band and demodulation chain.
-
-| Branch | Frequency | Modulation | Decoder | HTTP Port | Status |
-|--------|-----------|------------|---------|-----------|--------|
-| `feature/aprs` | 144.390 MHz | AFSK 1200 | AX.25 frame sync, APRS-IS iGate forwarder | 8081 | Merge-ready |
-| `feature/ais`  | 161.975 / 162.025 MHz | GMSK 9600 (dual-channel) | AIS NMEA decoder | 8082 | Merge-ready |
-| `feature/adsb` | 1090 MHz | PPM (Mode S) | dump1090-style message extractor, live aircraft map | 8083 | Merge-ready |
-| `feature/wspr-ft8` | HF / 6m / 2m (per config) | 8-GFSK | WSPR + FT8 (`ft8_lib`, LDPC, Costas sync), optional PSKreporter upload | configurable | Experimental |
-
-Each branch is **independent** — pick the protocol you want, flash that branch. Merging the four "merge-ready" branches into `main` is a near-term milestone so they can coexist as runtime-selectable modules.
 
 ## Performance
 
@@ -679,15 +662,10 @@ esp32p4-wifi-rtlsdr/
 ### Near-term (pending merge into `main`)
 
 - Merge `feature/websdr` — NB/NR/notch DSP, WBFM player, expanded decoder test matrix
-- Merge `feature/aprs` — APRS iGate as runtime-selectable module
-- Merge `feature/ais`  — AIS maritime decoder
-- Merge `feature/adsb` — ADS-B aircraft tracker with STALL-cascade USB fix
 - Cherry-pick direct-sampling / offset-tuning / IF-gain hardening from `feature/wifimgr`
 
 ### Medium-term
 
-- Promote `feature/wspr-ft8` to production once field-verified with PSKreporter upload path
-- Runtime mode switch ("receiver profile") — swap between raw IQ / APRS / AIS / ADS-B / WSPR without reflashing
 - High-rate 2.4+ MSPS Ethernet primary transport
 - Expanded tuner support: **E4000**, **FC0012**, **FC0013**, **FC2580** (driver framework already probes their I2C addresses)
 
@@ -781,7 +759,7 @@ Additional ESP32-P4 SDR experiments live in sibling worktrees under the same par
 |---------|-------------------|---------|
 | **Standalone FM Receiver** | `../esp32p4-standalone/` (`feature/standalone`) | Headless FM stereo + RDS receiver with local **USB audio output** — no WiFi client needed. Target: portable / car / bedside radio. |
 | Standalone (dev tracks) | `standalone-mono-nonopt`, `standalone-optimized` | Development experiments exploring cascaded 19 kHz notch, IQ-level squelch, and `-O3`/`-Ofast` compiler-flag trade-offs for the FM chain. |
-| WiFi Manager + Extras | `../esp32p4-wifi-rtlsdr-wifimgr/` (`feature/wifimgr`) | Super-set of `main` with PSKreporter HTTPS upload, network forwarders, Telegram notification bot, AX.25 multi-baud DSP, and production-hardened ADS-B / AIS decoders. Features trickle back into `main` once validated. |
+| WiFi Manager + Extras | `../esp32p4-wifi-rtlsdr-wifimgr/` (`feature/wifimgr`) | Super-set of `main` with extended network and notification features. Tested additions trickle back into `main` once validated. |
 
 ## License
 
