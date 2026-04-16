@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>ESP32-P4 WebSDR</title>
-<link rel="icon" href="data:,">
 <link rel="stylesheet" href="/sdr.css">
 </head>
 <body>
@@ -106,15 +105,15 @@
       <div class="ribbon-group">
         <span class="ribbon-group-label">Palette</span>
         <div class="ribbon-group-btns">
-          <select id="set-colormap"><option value="default0" selected>Default</option><option value="jet">Jet</option><option value="iron">Iron</option><option value="viridis">Viridis</option><option value="grayscale">Grayscale</option></select>
+          <select id="set-colormap"><option value="sdrc0" selected>SDR Console</option><option value="jet">Jet</option><option value="iron">Iron</option><option value="viridis">Viridis</option><option value="grayscale">Grayscale</option></select>
         </div>
       </div>
       <div class="ribbon-sep"></div>
       <div class="ribbon-group">
         <span class="ribbon-group-label">FFT</span>
         <div class="ribbon-group-btns ribbon-group-sliders">
-          <label class="ribbon-slider-lbl">Smooth<input type="range" id="set-fft-avg" min="0" max="95" value="50"><span id="set-fft-avg-val">0.50</span></label>
-          <label class="ribbon-slider-lbl">Pk Fall<input type="range" id="set-peak-decay" min="1" max="20" value="5"><span id="set-peak-decay-val">0.5</span></label>
+          <label class="ribbon-slider-lbl">Avg<input type="range" id="set-fft-avg" min="0" max="99" value="50"><span id="set-fft-avg-val">0.50</span></label>
+          <label class="ribbon-slider-lbl">Peak<input type="range" id="set-peak-decay" min="1" max="20" value="5"><span id="set-peak-decay-val">0.5</span></label>
         </div>
       </div>
       <div class="ribbon-sep"></div>
@@ -193,7 +192,7 @@
         <button class="vfo-audio-btn" id="vfo-a-audio">Audio &#9660;</button>
       </div>
       <div class="vfo-freq-row">
-        <div id="freq-display" role="group"><span class="fd" data-step="1000000000">0</span><span class="fs">.</span><span class="fd" data-step="100000000">1</span><span class="fd" data-step="10000000">4</span><span class="fd" data-step="1000000">5</span><span class="fs">.</span><span class="fd" data-step="100000">8</span><span class="fd" data-step="10000">0</span><span class="fd" data-step="1000">0</span><span class="fs">.</span><span class="fd fd-hz" data-step="100">0</span><span class="fd fd-hz" data-step="10">0</span><span class="fd fd-hz" data-step="1">0</span></div>
+        <div id="freq-display" role="group"><span class="fd" data-step="1000000000">0</span><span class="fs">.</span><span class="fd" data-step="100000000">1</span><span class="fd" data-step="10000000">4</span><span class="fd" data-step="1000000">5</span><span class="fs">.</span><span class="fd" data-step="100000">8</span><span class="fd" data-step="10000">0</span><span class="fd" data-step="1000">0</span><span class="fs">.</span><span class="fd" data-step="100">0</span><span class="fd" data-step="10">0</span><span class="fd" data-step="1">0</span><span class="freq-unit">MHz</span></div>
         <div class="vfo-info-col">
           <span class="vfo-letter" id="vfo-a-letter">A</span>
           <span class="vfo-mode-display" id="vfo-a-mode">NFM</span>
@@ -363,7 +362,7 @@
     <section id="spectrum-wrap">
       <canvas id="spectrum"></canvas>
       <div id="cursor-readout"></div>
-      <!-- Hover overlay controls (Overlay controls) -->
+      <!-- Hover overlay controls (SDR Console signature) -->
       <div id="hover-controls">
         <div class="hover-ctrl-group">
           <span class="hover-ctrl-label">HIGH</span>
@@ -440,8 +439,6 @@
   </div>
 </div>
 
-<button id="mobile-dsp-toggle" aria-label="DSP Controls">&#9776;</button>
-<div id="mobile-dsp-backdrop"></div>
 <script src="/sdr.js"></script>
 </body>
 </html>

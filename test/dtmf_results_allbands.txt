@@ -1,0 +1,834 @@
+/usr/lib/python3.11/site-packages/paramiko/pkey.py:82: CryptographyDeprecationWarning: TripleDES has been moved to cryptography.hazmat.decrepit.ciphers.algorithms.TripleDES and will be removed from cryptography.hazmat.primitives.ciphers.algorithms in 48.0.0.
+  "cipher": algorithms.TripleDES,
+/usr/lib/python3.11/site-packages/paramiko/transport.py:253: CryptographyDeprecationWarning: TripleDES has been moved to cryptography.hazmat.decrepit.ciphers.algorithms.TripleDES and will be removed from cryptography.hazmat.primitives.ciphers.algorithms in 48.0.0.
+  "class": algorithms.TripleDES,
+======================================================================
+  DTMF RF Loopback Test
+  PlutoSDR TX: 192.168.2.1
+  WebSDR  RX:  192.168.1.232:8080
+======================================================================
+
+[TX] DTMF sequence: 123A456B789C*0#D
+[TX] Audio duration: 4.20s (tone=150ms gap=100ms)
+
+[TX] Connecting to PlutoSDR at 192.168.2.1...
+[TX] PlutoSDR connected
+[RX] WebSDR connected
+
+══════════════════════════════════════════════════════════════════════
+  Testing 88.0 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] Starting PlutoSDR: freq=88.0MHz gain=-10dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Audio: 297216 samples (6.2s) RMS=0.1007 → test/dtmf_88mhz_-10db.wav
+
+──────────────────────────────────────────────────────────────────────
+  Freq: 88.0 MHz | Iteration: 1
+──────────────────────────────────────────────────────────────────────
+  Expected:  123A456B789C*0#D
+  Detected:  456B72389C*30#D1231A4256B7892C3*A09D1
+  Accuracy:  31% (5/16)
+  SNR:       min=6.0dB max=28.1dB mean=18.7dB
+  Magnitude: low=0.0424 high=0.0439
+  Timing:    tone_err=59.2ms gap_err=56.0ms (expected: tone=150ms gap=100ms)
+
+  Char     SNR   LowMag  HighMag  Hits  Dur ms   TErr
+  ───────────────────────────────────────────────────────
+  ✓   4   23.8dB   0.0625   0.0552     9    150    +0
+  ✓   5   26.5dB   0.0614   0.0609     3     60   -90
+  ✓   6   23.0dB   0.0625   0.0526    10    165   +15
+  ✓   B   26.7dB   0.0614   0.0614    10    165   +15
+  ✓   7   14.3dB   0.0455   0.0562     6    105   -45
+  ~   2    6.4dB   0.0001   0.0001     1     30  -120
+  ~   3    6.4dB   0.0001   0.0001     1     30  -120
+  ✓   8   20.8dB   0.0449   0.0625    11    180   +30
+  ✓   9   16.2dB   0.0452   0.0533     5     90   -60
+  ✓   C   18.6dB   0.0446   0.0622    11    180   +30
+  ✓   *   19.4dB   0.0585   0.0546    10    165   +15
+  ~   3    6.1dB   0.0001   0.0001     1     30  -120
+  ✓   0   21.1dB   0.0547   0.0569     4     75   -75
+  ✓   #   20.9dB   0.0578   0.0529    10    165   +15
+  ✓   D   27.5dB   0.0573   0.0618    11    180   +30
+  ✓   1   23.5dB   0.0626   0.0550    10    165   +15
+  ✓   2   28.1dB   0.0619   0.0613    12    255  +105
+  ✓   3   24.2dB   0.0617   0.0523     5     90   -60
+  ~   1    9.1dB   0.0002   0.0001     1     30  -120
+  ✓   A   27.5dB   0.0617   0.0612    11    180   +30
+  ✓   4   24.1dB   0.0625   0.0552    10    165   +15
+  ~   2    6.4dB   0.0001   0.0001     1     30  -120
+  ✓   5   24.3dB   0.0598   0.0604     3     60   -90
+  ✓   6   23.1dB   0.0622   0.0526    10    165   +15
+  ✓   B   26.7dB   0.0614   0.0616    11    180   +30
+  ✓   7   13.3dB   0.0321   0.0310     2     45  -105
+  ✓   8   18.8dB   0.0447   0.0623    11    180   +30
+  ✓   9   16.7dB   0.0452   0.0532    10    165   +15
+  ~   2    7.4dB   0.0001   0.0001     1     30  -120
+  ✓   C   23.4dB   0.0446   0.0618     6    105   -45
+  ~   3    7.6dB   0.0001   0.0001     1     30  -120
+  ✓   *   21.8dB   0.0566   0.0564    10    165   +15
+  ~   A    6.0dB   0.0002   0.0001     1     30  -120
+  ✓   0   24.3dB   0.0571   0.0623    11    180   +30
+  ~   9    9.0dB   0.0163   0.0286     1     30  -120
+  ✓   D   24.7dB   0.0572   0.0621    11    180   +30
+  ✓   1   23.6dB   0.0624   0.0549     5     90   -60
+
+[TX] Starting PlutoSDR: freq=88.0MHz gain=-5dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Audio: 288000 samples (6.0s) RMS=0.1024 → test/dtmf_88mhz_-5db.wav
+
+──────────────────────────────────────────────────────────────────────
+  Freq: 88.0 MHz | Iteration: 2
+──────────────────────────────────────────────────────────────────────
+  Expected:  123A456B789C*0#D
+  Detected:  456B7839C*0#D123A456B7891C*0#D1
+  Accuracy:  38% (6/16)
+  SNR:       min=6.3dB max=29.8dB mean=21.5dB
+  Magnitude: low=0.0505 high=0.0517
+  Timing:    tone_err=43.5ms gap_err=49.0ms (expected: tone=150ms gap=100ms)
+
+  Char     SNR   LowMag  HighMag  Hits  Dur ms   TErr
+  ───────────────────────────────────────────────────────
+  ✓   4   23.9dB   0.0621   0.0552     6    105   -45
+  ✓   5   26.6dB   0.0616   0.0612     6    105   -45
+  ✓   6   23.1dB   0.0624   0.0525    10    165   +15
+  ✓   B   27.6dB   0.0614   0.0614    11    180   +30
+  ✓   7   13.3dB   0.0325   0.0346     2     45  -105
+  ✓   8   17.7dB   0.0447   0.0622    11    180   +30
+  ~   3    6.3dB   0.0001   0.0000     1     30  -120
+  ✓   9   15.0dB   0.0449   0.0532     9    150    +0
+  ✓   C   22.7dB   0.0445   0.0620     9    150    +0
+  ✓   *   19.2dB   0.0588   0.0546    10    165   +15
+  ✓   0   21.5dB   0.0571   0.0615     7    120   -30
+  ✓   #   20.1dB   0.0582   0.0522    11    180   +30
+  ✓   D   25.6dB   0.0571   0.0621    11    180   +30
+  ✓   1   23.7dB   0.0625   0.0552    10    165   +15
+  ✓   2   28.5dB   0.0617   0.0613    11    180   +30
+  ✓   3   19.5dB   0.0469   0.0431     2     45  -105
+  ✓   A   29.8dB   0.0616   0.0613    11    180   +30
+  ✓   4   23.9dB   0.0624   0.0552    10    165   +15
+  ✓   5   27.5dB   0.0617   0.0613     7    120   -30
+  ✓   6   23.2dB   0.0621   0.0525    10    165   +15
+  ✓   B   25.9dB   0.0614   0.0614     5     90   -60
+  ✓   7   21.4dB   0.0456   0.0565    11    180   +30
+  ✓   8   23.5dB   0.0448   0.0625    11    180   +30
+  ✓   9   23.7dB   0.0401   0.0433     3     60   -90
+  ~   1    8.3dB   0.0001   0.0001     1     30  -120
+  ✓   C   18.8dB   0.0445   0.0621    11    180   +30
+  ✓   *   18.9dB   0.0591   0.0537    10    165   +15
+  ✓   0   20.0dB   0.0575   0.0607     7    120   -30
+  ✓   #   25.0dB   0.0562   0.0531    11    180   +30
+  ✓   D   17.0dB   0.0288   0.0326     2     45  -105
+  ✓   1   23.6dB   0.0622   0.0550     4     75   -75
+
+[TX] Starting PlutoSDR: freq=88.0MHz gain=-15dB
+[RX] Reconnecting WebSocket...
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Audio: 286464 samples (6.0s) RMS=0.1023 → test/dtmf_88mhz_-15db.wav
+
+──────────────────────────────────────────────────────────────────────
+  Freq: 88.0 MHz | Iteration: 3
+──────────────────────────────────────────────────────────────────────
+  Expected:  123A456B789C*0#D
+  Detected:  89C*0#D123A456B789C*0#D123A4
+  Accuracy:  100% (28/16)
+  SNR:       min=15.0dB max=33.0dB mean=23.2dB
+  Magnitude: low=0.0554 high=0.0571
+  Timing:    tone_err=35.9ms gap_err=48.0ms (expected: tone=150ms gap=100ms)
+
+  Char     SNR   LowMag  HighMag  Hits  Dur ms   TErr
+  ───────────────────────────────────────────────────────
+  ✓   8   17.9dB   0.0448   0.0622     8    135   -15
+  ✓   9   22.2dB   0.0452   0.0533    10    165   +15
+  ✓   C   15.0dB   0.0446   0.0623    10    165   +15
+  ✓   *   24.5dB   0.0489   0.0481     4     75   -75
+  ✓   0   20.4dB   0.0577   0.0624    11    180   +30
+  ✓   #   25.7dB   0.0571   0.0531    11    180   +30
+  ✓   D   23.0dB   0.0574   0.0616     6    105   -45
+  ✓   1   23.6dB   0.0625   0.0551    11    180   +30
+  ✓   2   28.5dB   0.0617   0.0611     8    135   -15
+  ✓   3   25.5dB   0.0622   0.0525    11    180   +30
+  ✓   A   27.9dB   0.0614   0.0613     5     90   -60
+  ✓   4   23.6dB   0.0627   0.0550    10    165   +15
+  ✓   5   26.9dB   0.0615   0.0612    10    165   +15
+  ✓   6   15.0dB   0.0467   0.0425     2     45  -105
+  ✓   B   26.8dB   0.0616   0.0615    11    180   +30
+  ✓   7   21.5dB   0.0456   0.0564    11    180   +30
+  ✓   8   17.0dB   0.0447   0.0621     8    135   -15
+  ✓   9   18.1dB   0.0454   0.0534    11    180   +30
+  ✓   C   20.9dB   0.0446   0.0612     4     75   -75
+  ✓   *   20.8dB   0.0570   0.0559    10    165   +15
+  ✓   0   22.6dB   0.0577   0.0613    11    180   +30
+  ✓   #   24.0dB   0.0522   0.0484     3     60   -90
+  ✓   D   25.8dB   0.0573   0.0621    11    180   +30
+  ✓   1   23.4dB   0.0626   0.0550     4     75   -75
+  ✓   2   29.0dB   0.0618   0.0612    11    180   +30
+  ✓   3   23.2dB   0.0623   0.0525     7    120   -30
+  ✓   A   33.0dB   0.0615   0.0613    11    180   +30
+  ✓   4   23.7dB   0.0627   0.0551     9    150    +0
+
+[TX] Starting PlutoSDR: freq=88.0MHz gain=-20dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Audio: 290304 samples (6.0s) RMS=0.1033 → test/dtmf_88mhz_-20db.wav
+
+──────────────────────────────────────────────────────────────────────
+  Freq: 88.0 MHz | Iteration: 4
+──────────────────────────────────────────────────────────────────────
+  Expected:  123A456B789C*0#D
+  Detected:  456BA789C*0#D123A34546B789C*0#D1
+  Accuracy:  25% (4/16)
+  SNR:       min=6.0dB max=29.4dB mean=21.0dB
+  Magnitude: low=0.0502 high=0.0516
+  Timing:    tone_err=44.5ms gap_err=50.3ms (expected: tone=150ms gap=100ms)
+
+  Char     SNR   LowMag  HighMag  Hits  Dur ms   TErr
+  ───────────────────────────────────────────────────────
+  ✓   4   24.2dB   0.0602   0.0553     2     45  -105
+  ✓   5   27.5dB   0.0620   0.0613    11    180   +30
+  ✓   6   22.2dB   0.0614   0.0526     4     75   -75
+  ✓   B   27.5dB   0.0617   0.0613    11    180   +30
+  ~   A    6.3dB   0.0002   0.0002     1     30  -120
+  ✓   7   21.5dB   0.0461   0.0567    10    165   +15
+  ✓   8   24.2dB   0.0448   0.0624     8    135   -15
+  ✓   9   16.0dB   0.0451   0.0531    10    165   +15
+  ✓   C   19.1dB   0.0446   0.0600     4     75   -75
+  ✓   *   20.0dB   0.0587   0.0548    11    180   +30
+  ✓   0   24.0dB   0.0579   0.0621    11    180   +30
+  ✓   #   25.1dB   0.0587   0.0519     6    105   -45
+  ✓   D   20.0dB   0.0575   0.0619    11    180   +30
+  ✓   1   23.6dB   0.0627   0.0548     7    120   -30
+  ✓   2   29.4dB   0.0620   0.0612    11    180   +30
+  ✓   3   22.9dB   0.0624   0.0523     5     90   -60
+  ✓   A   27.4dB   0.0618   0.0611    10    165   +15
+  ~   3    7.4dB   0.0002   0.0002     1     30  -120
+  ✓   4   23.7dB   0.0626   0.0550    10    165   +15
+  ✓   5   16.3dB   0.0410   0.0402     2     45  -105
+  ~   4    6.0dB   0.0002   0.0002     1     30  -120
+  ✓   6   24.7dB   0.0623   0.0524    11    180   +30
+  ✓   B   27.5dB   0.0617   0.0615    10    165   +15
+  ✓   7   20.7dB   0.0458   0.0566     8    135   -15
+  ✓   8   15.6dB   0.0450   0.0625    10    165   +15
+  ✓   9   21.6dB   0.0439   0.0511     5     90   -60
+  ✓   C   19.7dB   0.0448   0.0621    10    165   +15
+  ✓   *   21.0dB   0.0592   0.0537    11    180   +30
+  ✓   0   21.9dB   0.0568   0.0625     5     90   -60
+  ✓   #   22.1dB   0.0567   0.0533    11    180   +30
+  ✓   D   20.2dB   0.0575   0.0619    10    165   +15
+  ✓   1   23.7dB   0.0624   0.0549    11    180   +30
+
+[TX] Starting PlutoSDR: freq=88.0MHz gain=0dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+══════════════════════════════════════════════════════════════════════
+  Testing 108.0 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] Starting PlutoSDR: freq=108.0MHz gain=-10dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Audio: 40320 samples (0.8s) RMS=0.1057 → test/dtmf_108mhz_-10db.wav
+
+──────────────────────────────────────────────────────────────────────
+  Freq: 108.0 MHz | Iteration: 1
+──────────────────────────────────────────────────────────────────────
+  Expected:  123A456B789C*0#D
+  Detected:  12A45
+  Accuracy:  12% (2/16)
+  SNR:       min=23.7dB max=29.0dB mean=26.4dB
+  Magnitude: low=0.0618 high=0.0587
+  Timing:    tone_err=45.0ms gap_err=55.0ms (expected: tone=150ms gap=100ms)
+
+  Char     SNR   LowMag  HighMag  Hits  Dur ms   TErr
+  ───────────────────────────────────────────────────────
+  ✓   1   23.7dB   0.0624   0.0551    10    165   +15
+  ✓   2   29.0dB   0.0617   0.0613    11    180   +30
+  ✓   A   28.5dB   0.0613   0.0611     5     90   -60
+  ✓   4   23.7dB   0.0623   0.0551     7    120   -30
+  ✓   5   27.0dB   0.0611   0.0610     3     60   -90
+
+[TX] Starting PlutoSDR: freq=108.0MHz gain=-5dB
+[RX] Reconnecting WebSocket...
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Audio: 293760 samples (6.1s) RMS=0.1062 → test/dtmf_108mhz_-5db.wav
+
+──────────────────────────────────────────────────────────────────────
+  Freq: 108.0 MHz | Iteration: 2
+──────────────────────────────────────────────────────────────────────
+  Expected:  123A456B789C*0#D
+  Detected:  789C*0#D5123A456B789C*0#D123A45
+  Accuracy:  50% (8/16)
+  SNR:       min=6.1dB max=28.6dB mean=21.2dB
+  Magnitude: low=0.0524 high=0.0538
+  Timing:    tone_err=40.2ms gap_err=45.7ms (expected: tone=150ms gap=100ms)
+
+  Char     SNR   LowMag  HighMag  Hits  Dur ms   TErr
+  ───────────────────────────────────────────────────────
+  ✓   7   14.7dB   0.0457   0.0562     2     45  -105
+  ✓   8   21.1dB   0.0448   0.0626     9    150    +0
+  ✓   9   14.7dB   0.0451   0.0533     9    150    +0
+  ✓   C   19.3dB   0.0445   0.0619    11    180   +30
+  ✓   *   15.4dB   0.0376   0.0372     2     45  -105
+  ✓   0   20.3dB   0.0571   0.0622    11    180   +30
+  ✓   #   20.0dB   0.0578   0.0526    10    165   +15
+  ✓   D   20.0dB   0.0571   0.0620     7    120   -30
+  ~   5    6.1dB   0.0000   0.0001     1     30  -120
+  ✓   1   23.6dB   0.0624   0.0550     6    105   -45
+  ✓   2   28.6dB   0.0617   0.0613    10    165   +15
+  ✓   3   23.2dB   0.0620   0.0524    10    165   +15
+  ✓   A   19.0dB   0.0506   0.0509     3     60   -90
+  ✓   4   23.6dB   0.0626   0.0552    11    180   +30
+  ✓   5   27.1dB   0.0615   0.0612    11    180   +30
+  ✓   6   22.7dB   0.0610   0.0522     5     90   -60
+  ✓   B   26.9dB   0.0614   0.0614    10    165   +15
+  ✓   7   25.0dB   0.0455   0.0563     6    105   -45
+  ✓   8   16.8dB   0.0449   0.0626    10    165   +15
+  ✓   9   19.2dB   0.0452   0.0533    11    180   +30
+  ✓   C   20.2dB   0.0401   0.0467     3     60   -90
+  ✓   *   25.3dB   0.0570   0.0557    11    180   +30
+  ✓   0   20.4dB   0.0570   0.0623     9    150    +0
+  ✓   #   20.6dB   0.0582   0.0519     8    135   -15
+  ✓   D   20.0dB   0.0572   0.0617    11    180   +30
+  ✓   1   23.4dB   0.0623   0.0550     9    150    +0
+  ✓   2   28.5dB   0.0618   0.0613    10    165   +15
+  ✓   3   23.1dB   0.0616   0.0523     5     90   -60
+  ✓   A   28.0dB   0.0616   0.0614    11    180   +30
+  ✓   4   23.7dB   0.0627   0.0551    11    180   +30
+  ✓   5   15.5dB   0.0358   0.0340     1     30  -120
+
+[TX] Starting PlutoSDR: freq=108.0MHz gain=-15dB
+[RX] Reconnecting WebSocket...
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Audio: 289920 samples (6.0s) RMS=0.1072 → test/dtmf_108mhz_-15db.wav
+
+──────────────────────────────────────────────────────────────────────
+  Freq: 108.0 MHz | Iteration: 3
+──────────────────────────────────────────────────────────────────────
+  Expected:  123A456B789C*0#D
+  Detected:  89C*0#D1293A4567B789C*0#9D71273A45
+  Accuracy:  56% (9/16)
+  SNR:       min=6.1dB max=28.3dB mean=19.8dB
+  Magnitude: low=0.0472 high=0.0485
+  Timing:    tone_err=47.2ms gap_err=58.2ms (expected: tone=150ms gap=100ms)
+
+  Char     SNR   LowMag  HighMag  Hits  Dur ms   TErr
+  ───────────────────────────────────────────────────────
+  ✓   8   22.4dB   0.0446   0.0622     9    150    +0
+  ✓   9   17.9dB   0.0452   0.0532    10    165   +15
+  ✓   C   19.5dB   0.0446   0.0618    12    255  +105
+  ✓   *   18.2dB   0.0586   0.0532     4     75   -75
+  ✓   0   23.4dB   0.0576   0.0622    11    180   +30
+  ✓   #   20.2dB   0.0585   0.0522    10    165   +15
+  ✓   D   21.9dB   0.0573   0.0621     9    150    +0
+  ✓   1   24.0dB   0.0625   0.0550    10    165   +15
+  ✓   2   28.3dB   0.0618   0.0611     8    135   -15
+  ~   9    7.1dB   0.0002   0.0001     1     30  -120
+  ✓   3   23.0dB   0.0621   0.0523    10    165   +15
+  ✓   A   27.9dB   0.0616   0.0614     7    120   -30
+  ✓   4   23.8dB   0.0625   0.0551    11    180   +30
+  ✓   5   27.4dB   0.0619   0.0614    11    180   +30
+  ✓   6   15.0dB   0.0432   0.0396     2     45  -105
+  ~   7    7.7dB   0.0001   0.0001     1     30  -120
+  ✓   B   27.4dB   0.0615   0.0612    11    180   +30
+  ✓   7   15.4dB   0.0459   0.0566     8    135   -15
+  ✓   8   15.1dB   0.0448   0.0623     9    150    +0
+  ✓   9   24.3dB   0.0452   0.0534    11    180   +30
+  ✓   C   15.5dB   0.0447   0.0622     7    120   -30
+  ✓   *   21.1dB   0.0592   0.0538    11    180   +30
+  ✓   0   20.4dB   0.0575   0.0621    10    165   +15
+  ✓   #   21.7dB   0.0491   0.0455     3     60   -90
+  ~   9    7.2dB   0.0002   0.0001     1     30  -120
+  ✓   D   20.2dB   0.0574   0.0619    10    165   +15
+  ~   7    6.1dB   0.0002   0.0001     1     30  -120
+  ✓   1   24.0dB   0.0625   0.0550     9    150    +0
+  ✓   2   28.1dB   0.0619   0.0613    10    165   +15
+  ~   7    6.5dB   0.0001   0.0001     1     30  -120
+  ✓   3   16.2dB   0.0482   0.0433     2     45  -105
+  ✓   A   27.6dB   0.0617   0.0611    10    165   +15
+  ✓   4   23.8dB   0.0625   0.0551    11    180   +30
+  ✓   5   25.8dB   0.0615   0.0608     2     45  -105
+
+[TX] Starting PlutoSDR: freq=108.0MHz gain=-20dB
+[RX] Reconnecting WebSocket...
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Audio: 288768 samples (6.0s) RMS=0.1079 → test/dtmf_108mhz_-20db.wav
+
+──────────────────────────────────────────────────────────────────────
+  Freq: 108.0 MHz | Iteration: 4
+──────────────────────────────────────────────────────────────────────
+  Expected:  123A456B789C*0#D
+  Detected:  89DC*0#D123CA456B9789C*0#7D123A945
+  Accuracy:  12% (2/16)
+  SNR:       min=6.3dB max=28.9dB mean=20.0dB
+  Magnitude: low=0.0464 high=0.0473
+  Timing:    tone_err=46.3ms gap_err=57.6ms (expected: tone=150ms gap=100ms)
+
+  Char     SNR   LowMag  HighMag  Hits  Dur ms   TErr
+  ───────────────────────────────────────────────────────
+  ✓   8   22.6dB   0.0454   0.0625     9    150    +0
+  ✓   9   15.1dB   0.0454   0.0533     9    150    +0
+  ~   D    6.6dB   0.0002   0.0002     1     30  -120
+  ✓   C   22.8dB   0.0446   0.0623    11    180   +30
+  ✓   *   21.9dB   0.0339   0.0339     2     45  -105
+  ✓   0   22.1dB   0.0572   0.0623    11    180   +30
+  ✓   #   20.1dB   0.0585   0.0523    10    165   +15
+  ✓   D   22.5dB   0.0573   0.0613     5     90   -60
+  ✓   1   23.9dB   0.0625   0.0548     9    150    +0
+  ✓   2   28.9dB   0.0619   0.0609    10    165   +15
+  ✓   3   23.2dB   0.0624   0.0522    10    165   +15
+  ~   C    7.7dB   0.0002   0.0003     1     30  -120
+  ✓   A   16.0dB   0.0330   0.0351     1     30  -120
+  ✓   4   23.6dB   0.0626   0.0553    11    180   +30
+  ✓   5   26.8dB   0.0617   0.0612     9    150    +0
+  ✓   6   23.1dB   0.0626   0.0525    10    165   +15
+  ✓   B   26.9dB   0.0617   0.0616    10    165   +15
+  ~   9    6.3dB   0.0003   0.0003     1     30  -120
+  ✓   7   16.2dB   0.0380   0.0417     2     45  -105
+  ✓   8   15.0dB   0.0448   0.0623    10    165   +15
+  ✓   9   22.0dB   0.0452   0.0531    11    180   +30
+  ✓   C   19.9dB   0.0448   0.0619     6    105   -45
+  ✓   *   23.6dB   0.0586   0.0549    11    180   +30
+  ✓   0   20.1dB   0.0579   0.0620     8    135   -15
+  ✓   #   19.3dB   0.0588   0.0522    10    165   +15
+  ~   7    6.8dB   0.0003   0.0002     1     30  -120
+  ✓   D   20.0dB   0.0576   0.0621    10    165   +15
+  ✓   1   23.3dB   0.0625   0.0549    11    180   +30
+  ✓   2   28.6dB   0.0619   0.0611    10    165   +15
+  ✓   3   15.8dB   0.0483   0.0427     3     60   -90
+  ✓   A   27.7dB   0.0618   0.0612    10    165   +15
+  ~   9    9.1dB   0.0002   0.0002     1     30  -120
+  ✓   4   24.3dB   0.0625   0.0552    10    165   +15
+  ✓   5   26.8dB   0.0618   0.0611     3     60   -90
+
+[TX] Starting PlutoSDR: freq=108.0MHz gain=0dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Audio: 291072 samples (6.1s) RMS=0.1071 → test/dtmf_108mhz_0db.wav
+
+──────────────────────────────────────────────────────────────────────
+  Freq: 108.0 MHz | Iteration: 5
+──────────────────────────────────────────────────────────────────────
+  Expected:  123A456B789C*0#D
+  Detected:  456B789C*0#D123A456B78C9C*0#D1
+  Accuracy:  100% (22/16)
+  SNR:       min=6.6dB max=30.5dB mean=22.1dB
+  Magnitude: low=0.0527 high=0.0542
+  Timing:    tone_err=37.5ms gap_err=36.9ms (expected: tone=150ms gap=100ms)
+
+  Char     SNR   LowMag  HighMag  Hits  Dur ms   TErr
+  ───────────────────────────────────────────────────────
+  ✓   4   23.1dB   0.0621   0.0548     5     90   -60
+  ✓   5   27.3dB   0.0616   0.0614    10    165   +15
+  ✓   6   22.9dB   0.0619   0.0524     7    120   -30
+  ✓   B   27.2dB   0.0613   0.0612    11    180   +30
+  ✓   7   15.8dB   0.0317   0.0305     2     45  -105
+  ✓   8   17.8dB   0.0448   0.0625    11    180   +30
+  ✓   9   21.7dB   0.0450   0.0532    11    180   +30
+  ✓   C   22.1dB   0.0444   0.0608     5     90   -60
+  ✓   *   19.3dB   0.0583   0.0547    10    165   +15
+  ✓   0   21.9dB   0.0574   0.0618     9    150    +0
+  ✓   #   19.4dB   0.0582   0.0521    10    165   +15
+  ✓   D   25.7dB   0.0570   0.0617    11    180   +30
+  ✓   1   23.4dB   0.0624   0.0550    10    165   +15
+  ✓   2   28.7dB   0.0617   0.0613    11    180   +30
+  ✓   3   20.5dB   0.0339   0.0328     2     45  -105
+  ✓   A   30.5dB   0.0616   0.0614    11    180   +30
+  ✓   4   23.8dB   0.0627   0.0552    10    165   +15
+  ✓   5   27.3dB   0.0613   0.0613     5     90   -60
+  ✓   6   23.1dB   0.0623   0.0526    10    165   +15
+  ✓   B   26.9dB   0.0612   0.0616     8    135   -15
+  ✓   7   18.7dB   0.0457   0.0566    10    165   +15
+  ✓   8   22.7dB   0.0448   0.0622    11    180   +30
+  ~   C    6.6dB   0.0000   0.0000     1     30  -120
+  ✓   9   15.8dB   0.0441   0.0527     3     60   -90
+  ✓   C   17.8dB   0.0445   0.0619    10    165   +15
+  ✓   *   18.8dB   0.0590   0.0537    10    165   +15
+  ✓   0   23.0dB   0.0570   0.0602     4     75   -75
+  ✓   #   24.8dB   0.0562   0.0531    11    180   +30
+  ✓   D   22.3dB   0.0571   0.0620    10    165   +15
+  ✓   1   23.5dB   0.0623   0.0551    10    165   +15
+
+══════════════════════════════════════════════════════════════════════
+  Testing 145.0 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] Starting PlutoSDR: freq=145.0MHz gain=-10dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=145.0MHz gain=-5dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 9984
+
+[TX] Starting PlutoSDR: freq=145.0MHz gain=-15dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 13824
+
+[TX] Starting PlutoSDR: freq=145.0MHz gain=-20dB
+[RX] Reconnecting WebSocket...
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Audio: 302208 samples (6.3s) RMS=0.1208 → test/dtmf_145mhz_-20db.wav
+
+──────────────────────────────────────────────────────────────────────
+  Freq: 145.0 MHz | Iteration: 4
+──────────────────────────────────────────────────────────────────────
+  Expected:  123A456B789C*0#D
+  Detected:  89C*0#DA123A456B789#C*20#D123A45
+  Accuracy:  44% (7/16)
+  SNR:       min=6.4dB max=29.1dB mean=21.5dB
+  Magnitude: low=0.0512 high=0.0524
+  Timing:    tone_err=40.3ms gap_err=51.7ms (expected: tone=150ms gap=100ms)
+
+  Char     SNR   LowMag  HighMag  Hits  Dur ms   TErr
+  ───────────────────────────────────────────────────────
+  ✓   8   15.8dB   0.0450   0.0627    10    165   +15
+  ✓   9   21.7dB   0.0435   0.0513     4     75   -75
+  ✓   C   23.7dB   0.0448   0.0625    11    180   +30
+  ✓   *   24.8dB   0.0572   0.0563    11    180   +30
+  ✓   0   19.7dB   0.0582   0.0615     8    135   -15
+  ✓   #   21.0dB   0.0576   0.0533    11    180   +30
+  ✓   D   20.6dB   0.0575   0.0623    10    165   +15
+  ~   A    7.3dB   0.0005   0.0011     1     30  -120
+  ✓   1   23.4dB   0.0627   0.0551    11    180   +30
+  ✓   2   29.1dB   0.0620   0.0616    10    165   +15
+  ✓   3   23.1dB   0.0626   0.0525     8    135   -15
+  ✓   A   28.3dB   0.0620   0.0611    10    165   +15
+  ✓   4   24.6dB   0.0628   0.0554    11    180   +30
+  ✓   5   27.7dB   0.0616   0.0617     5     90   -60
+  ✓   6   23.6dB   0.0622   0.0526    11    180   +30
+  ✓   B   27.2dB   0.0618   0.0616    10    165   +15
+  ✓   7   19.2dB   0.0460   0.0566     7    120   -30
+  ✓   8   22.6dB   0.0452   0.0619    11    180   +30
+  ✓   9   19.3dB   0.0454   0.0527    11    180   +30
+  ~   #    6.6dB   0.0004   0.0009     1     30  -120
+  ✓   C   15.0dB   0.0445   0.0621     6    105   -45
+  ✓   *   19.5dB   0.0588   0.0550    10    165   +15
+  ~   2    6.4dB   0.0005   0.0007     1     30  -120
+  ✓   0   20.5dB   0.0577   0.0626    10    165   +15
+  ✓   #   25.0dB   0.0564   0.0530     8    135   -15
+  ✓   D   20.5dB   0.0578   0.0620    10    165   +15
+  ✓   1   24.6dB   0.0631   0.0548    11    180   +30
+  ✓   2   28.0dB   0.0620   0.0611     5     90   -60
+  ✓   3   26.2dB   0.0629   0.0528    11    180   +30
+  ✓   A   28.8dB   0.0618   0.0616    11    180   +30
+  ✓   4   17.4dB   0.0510   0.0465     3     60   -90
+  ✓   5   26.9dB   0.0624   0.0616     4     75   -75
+
+[TX] Starting PlutoSDR: freq=145.0MHz gain=0dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+══════════════════════════════════════════════════════════════════════
+  Testing 174.0 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] Starting PlutoSDR: freq=174.0MHz gain=-10dB
+[RX] Reconnecting WebSocket...
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Audio: 290304 samples (6.0s) RMS=0.1275 → test/dtmf_174mhz_-10db.wav
+
+──────────────────────────────────────────────────────────────────────
+  Freq: 174.0 MHz | Iteration: 1
+──────────────────────────────────────────────────────────────────────
+  Expected:  123A456B789C*0#D
+  Detected:  89C*0#D123A4*56B789C*0#D123A45
+  Accuracy:  75% (12/16)
+  SNR:       min=6.2dB max=29.1dB mean=22.7dB
+  Magnitude: low=0.0547 high=0.0559
+  Timing:    tone_err=34.0ms gap_err=52.4ms (expected: tone=150ms gap=100ms)
+
+  Char     SNR   LowMag  HighMag  Hits  Dur ms   TErr
+  ───────────────────────────────────────────────────────
+  ✓   8   19.4dB   0.0463   0.0625     8    135   -15
+  ✓   9   15.1dB   0.0451   0.0533     9    150    +0
+  ✓   C   23.3dB   0.0446   0.0624    11    180   +30
+  ✓   *   22.7dB   0.0564   0.0549     4     75   -75
+  ✓   0   23.2dB   0.0576   0.0620    11    180   +30
+  ✓   #   19.8dB   0.0582   0.0525    10    165   +15
+  ✓   D   23.5dB   0.0572   0.0617     7    120   -30
+  ✓   1   23.8dB   0.0625   0.0551    11    180   +30
+  ✓   2   29.1dB   0.0617   0.0612     7    120   -30
+  ✓   3   23.2dB   0.0621   0.0524    10    165   +15
+  ✓   A   27.2dB   0.0616   0.0614     7    120   -30
+  ✓   4   23.9dB   0.0620   0.0552    10    165   +15
+  ~   *    6.2dB   0.0001   0.0001     1     30  -120
+  ✓   5   27.1dB   0.0615   0.0613    11    180   +30
+  ✓   6   23.7dB   0.0602   0.0513     3     60   -90
+  ✓   B   26.8dB   0.0615   0.0613    11    180   +30
+  ✓   7   15.5dB   0.0456   0.0564     9    150    +0
+  ✓   8   19.6dB   0.0473   0.0625    10    165   +15
+  ✓   9   22.4dB   0.0452   0.0533    11    180   +30
+  ✓   C   19.6dB   0.0446   0.0607     5     90   -60
+  ✓   *   26.5dB   0.0570   0.0557    11    180   +30
+  ✓   0   20.7dB   0.0576   0.0612    11    180   +30
+  ✓   #   25.4dB   0.0583   0.0518     8    135   -15
+  ✓   D   20.1dB   0.0572   0.0619    10    165   +15
+  ✓   1   23.6dB   0.0625   0.0550    10    165   +15
+  ✓   2   28.5dB   0.0618   0.0612    10    165   +15
+  ✓   3   23.0dB   0.0611   0.0521     4     75   -75
+  ✓   A   27.7dB   0.0616   0.0613    10    165   +15
+  ✓   4   23.8dB   0.0624   0.0552    11    180   +30
+  ✓   5   27.1dB   0.0614   0.0612     3     60   -90
+
+[TX] Starting PlutoSDR: freq=174.0MHz gain=-5dB
+[RX] Reconnecting WebSocket...
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Audio: 130560 samples (2.7s) RMS=0.1262 → test/dtmf_174mhz_-5db.wav
+
+──────────────────────────────────────────────────────────────────────
+  Freq: 174.0 MHz | Iteration: 2
+──────────────────────────────────────────────────────────────────────
+  Expected:  123A456B789C*0#D
+  Detected:  7A89AC*0#D3123A45
+  Accuracy:  6% (1/16)
+  SNR:       min=6.1dB max=29.0dB mean=19.3dB
+  Magnitude: low=0.0442 high=0.0456
+  Timing:    tone_err=52.1ms gap_err=51.2ms (expected: tone=150ms gap=100ms)
+
+  Char     SNR   LowMag  HighMag  Hits  Dur ms   TErr
+  ───────────────────────────────────────────────────────
+  ✓   7   20.4dB   0.0394   0.0443     2     45  -105
+  ~   A    7.3dB   0.0000   0.0001     1     30  -120
+  ✓   8   21.8dB   0.0445   0.0622    10    165   +15
+  ✓   9   15.4dB   0.0452   0.0533     8    135   -15
+  ~   A    6.2dB   0.0001   0.0000     1     30  -120
+  ✓   C   21.7dB   0.0446   0.0621    11    180   +30
+  ✓   *   23.8dB   0.0494   0.0473     3     60   -90
+  ✓   0   24.7dB   0.0574   0.0611    11    180   +30
+  ✓   #   20.9dB   0.0574   0.0531    10    165   +15
+  ✓   D   20.1dB   0.0570   0.0619     9    150    +0
+  ~   3    6.1dB   0.0001   0.0001     1     30  -120
+  ✓   1   23.7dB   0.0624   0.0551     9    150    +0
+  ✓   2   29.0dB   0.0617   0.0612     9    150    +0
+  ✓   3   23.3dB   0.0623   0.0526    10    165   +15
+  ✓   A   17.5dB   0.0509   0.0503     3     60   -90
+  ✓   4   23.8dB   0.0627   0.0551    10    165   +15
+  ✓   5   22.0dB   0.0561   0.0556     2     45  -105
+
+[TX] Starting PlutoSDR: freq=174.0MHz gain=-15dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=174.0MHz gain=-20dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=174.0MHz gain=0dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+══════════════════════════════════════════════════════════════════════
+  Testing 290.0 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] Starting PlutoSDR: freq=290.0MHz gain=-10dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=290.0MHz gain=-5dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=290.0MHz gain=-15dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=290.0MHz gain=-20dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=290.0MHz gain=0dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+══════════════════════════════════════════════════════════════════════
+  Testing 435.0 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] Starting PlutoSDR: freq=435.0MHz gain=-10dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=435.0MHz gain=-5dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=435.0MHz gain=-15dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=435.0MHz gain=-20dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=435.0MHz gain=0dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+══════════════════════════════════════════════════════════════════════
+  Testing 915.0 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] Starting PlutoSDR: freq=915.0MHz gain=-10dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=915.0MHz gain=-5dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=915.0MHz gain=-15dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=915.0MHz gain=-20dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=915.0MHz gain=0dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+══════════════════════════════════════════════════════════════════════
+  Testing 1090.0 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] Starting PlutoSDR: freq=1090.0MHz gain=-10dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=1090.0MHz gain=-5dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=1090.0MHz gain=-15dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=1090.0MHz gain=-20dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=1090.0MHz gain=0dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+══════════════════════════════════════════════════════════════════════
+  Testing 1420.0 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] Starting PlutoSDR: freq=1420.0MHz gain=-10dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=1420.0MHz gain=-5dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=1420.0MHz gain=-15dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=1420.0MHz gain=-20dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=1420.0MHz gain=0dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+══════════════════════════════════════════════════════════════════════
+  Testing 1700.0 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] Starting PlutoSDR: freq=1700.0MHz gain=-10dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=1700.0MHz gain=-5dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=1700.0MHz gain=-15dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=1700.0MHz gain=-20dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+[TX] Starting PlutoSDR: freq=1700.0MHz gain=0dB
+[RX] DDC rate: 32000Hz
+[RX] Capturing 7.3s of audio...
+[RX] Too few audio samples: 0
+
+══════════════════════════════════════════════════════════════════════
+  FINAL RESULTS
+══════════════════════════════════════════════════════════════════════
+
+      Freq   Gain Accuracy      SNR  ToneErr   GapErr             Detected
+  ──────────────────────────────────────────────────────────────────────────
+  ✗   88.0   -10dB     31%   18.7dB   59.2ms   56.0ms  456B72389C*30#D1231A4256B7892C3*A09D1
+  ✗   88.0    -5dB     38%   21.5dB   43.5ms   49.0ms  456B7839C*0#D123A456B7891C*0#D1
+  ★   88.0   -15dB    100%   23.2dB   35.9ms   48.0ms  89C*0#D123A456B789C*0#D123A4
+  ✗   88.0   -20dB     25%   21.0dB   44.5ms   50.3ms  456BA789C*0#D123A34546B789C*0#D1
+  ✗  108.0   -10dB     12%   26.4dB   45.0ms   55.0ms               12A45
+  ✗  108.0    -5dB     50%   21.2dB   40.2ms   45.7ms  789C*0#D5123A456B789C*0#D123A45
+  ✗  108.0   -15dB     56%   19.8dB   47.2ms   58.2ms  89C*0#D1293A4567B789C*0#9D71273A45
+  ✗  108.0   -20dB     12%   20.0dB   46.3ms   57.6ms  89DC*0#D123CA456B9789C*0#7D123A945
+  ★  108.0     0dB    100%   22.1dB   37.5ms   36.9ms  456B789C*0#D123A456B78C9C*0#D1
+  ✗  145.0   -20dB     44%   21.5dB   40.3ms   51.7ms  89C*0#DA123A456B789#C*20#D123A45
+  ✓  174.0   -10dB     75%   22.7dB   34.0ms   52.4ms  89C*0#D123A4*56B789C*0#D123A45
+  ✗  174.0    -5dB      6%   19.3dB   52.1ms   51.2ms   7A89AC*0#D3123A45
+
+  Best: 100% at 88.0MHz gain=-15dB SNR=23.2dB
+  Detected: 89C*0#D123A456B789C*0#D123A4
+
+  ✅ PRISTINE — all 16 DTMF tones detected perfectly

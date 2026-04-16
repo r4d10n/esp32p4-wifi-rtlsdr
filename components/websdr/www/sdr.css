@@ -1,7 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/* ESP32-P4 WebSDR - ESP32-P4 WebSDR */
-
-@font-face { font-family: 'DSEG7'; src: url('/dseg7.woff2') format('woff2'); font-display: swap; }
+/* SDR Console V3 faithful replica - ESP32-P4 WebSDR */
 
 :root {
   /* Chrome / UI Frame */
@@ -25,7 +23,7 @@
   --vfo-titlebar-bg: #D0D4E0;
   --vfo-border: #B0B4C0;
 
-  /* Spectrum - Dark theme */
+  /* Spectrum - SDR Console V3 dark theme */
   --spec-bg: #000000;
   --spec-grid: rgba(30, 40, 80, 0.5);
   --spec-trace: #C0D0FF;
@@ -333,9 +331,9 @@ body {
   color: var(--panel-text);
 }
 
-/* Frequency display - large prominent tuning display */
-#freq-display, .freq-display {
-  font: bold 34px 'Segoe UI', 'Arial Black', Arial, sans-serif;
+/* Frequency display - proportional bold sans-serif (SDR Console style) */
+.freq-display {
+  font: bold 28px 'Segoe UI', 'Arial Black', Arial, sans-serif;
   letter-spacing: 0.5px;
   white-space: nowrap;
   display: flex;
@@ -349,33 +347,23 @@ body {
   cursor: ns-resize;
   position: relative;
   display: inline-block;
-  transition: background .15s, text-shadow .15s, color .15s;
-  padding: 1px 2px;
-  border-radius: 3px;
-  font-family: 'DSEG7', 'Consolas', 'Courier New', monospace;
-  font-size: 36px;
-  color: var(--vfo-freq-color, #1a1a2e);
+  transition: background .1s;
+  padding: 0 0.5px;
+  border-radius: 2px;
 }
 .fd:hover, .fd.active {
-  background: rgba(0, 120, 255, 0.12);
-  color: #0066cc;
-  text-shadow: 0 0 8px rgba(0, 120, 255, 0.4);
+  background: rgba(68, 136, 204, 0.15);
 }
 
 .fd-hz {
-  color: var(--vfo-freq-dim, #999);
-  font-size: 28px;
-  opacity: 0.6;
-}
-.fd-hz:hover, .fd-hz.active {
-  opacity: 1;
+  color: var(--vfo-freq-dim);
 }
 
 .fs {
-  color: var(--panel-text-dim, #888);
-  font: bold 28px 'Segoe UI', sans-serif;
-  margin: 0 1px;
-  user-select: none;
+  color: var(--panel-text-dim);
+  font-size: 24px;
+  margin: 0 0px;
+  font-weight: bold;
 }
 
 .freq-b {
@@ -384,7 +372,7 @@ body {
 }
 .fd-b {
   color: var(--panel-text-dim);
-  font: 600 18px 'DSEG7', 'Segoe UI', sans-serif;
+  font: 600 18px 'Segoe UI', sans-serif;
 }
 
 .vfo-info-col {
@@ -671,7 +659,6 @@ body {
   min-width: 0;
   min-height: 0;
   position: relative;
-  overflow: hidden;
 }
 
 #spectrum-wrap {
@@ -704,7 +691,6 @@ body {
   flex: 1;
   min-height: 60px;
   overflow: hidden;
-  background: #000;
   position: relative;
   background: #000;
 }
@@ -723,7 +709,7 @@ body {
   border-radius: 2px;
 }
 
-/* Hover overlay controls */
+/* Hover overlay controls (SDR Console signature) */
 #hover-controls {
   position: absolute;
   top: 0;
@@ -995,70 +981,25 @@ select:hover, select:focus { border-color: var(--btn-active); }
 @media (max-width: 900px) {
   #dsp-sidebar { width: 160px; }
   .freq-display { font-size: 22px; }
-  .fd { font-size: 26px; }
   .vfo-block { min-width: 240px; }
 }
 
 @media (max-width: 640px) {
-  /* Sidebar becomes a slide-out overlay on mobile */
   #dsp-sidebar {
-    position: fixed;
-    left: -250px;
-    top: 0;
-    bottom: 0;
-    width: 240px;
-    z-index: 1000;
-    transition: left 0.25s ease;
-    box-shadow: 2px 0 12px rgba(0,0,0,0.3);
+    display: none;
   }
-  #dsp-sidebar.mobile-open { left: 0; }
-  #main-content { position: relative; }
   #vfo-panel { flex-wrap: wrap; min-height: auto; }
-  .vfo-block { min-width: 180px; }
-  .freq-display { font-size: 18px; }
-  .fd { font-size: 22px; }
-  .fd-hz { font-size: 18px; }
-  .fs { font-size: 14px; }
-  #ribbon-content { min-height: 36px; overflow-x: auto; }
-  .ribbon-tab { padding: 2px 5px; font-size: 10px; }
-  .ribbon-group { padding: 2px 4px; }
-  .ribbon-group-label { font-size: 8px; }
-  /* Add a DSP toggle button visible only on mobile */
-  #mobile-dsp-toggle { display: block !important; }
+  .vfo-block { min-width: 200px; }
+  .freq-display { font-size: 20px; }
+  .fs { font-size: 16px; }
+  #ribbon-content { min-height: 40px; }
+  .ribbon-tab { padding: 2px 6px; font-size: 10px; }
 }
 
 @media (max-width: 480px) {
   .freq-display { font-size: 16px; }
-  .fd { font-size: 20px; }
-  .fd-hz { font-size: 16px; }
-  .fs { font-size: 12px; }
+  .fs { font-size: 14px; }
   #vfo-b-block { display: none; }
   #vfo-status-area { display: none; }
-  #ribbon-tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-}
-
-/* Mobile DSP toggle button - hidden on desktop */
-#mobile-dsp-toggle {
-  display: none;
-  position: fixed;
-  bottom: 60px;
-  left: 8px;
-  z-index: 1001;
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  background: var(--btn-active, #4488cc);
-  color: white;
-  border: none;
-  font-size: 18px;
-  cursor: pointer;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-}
-/* Mobile overlay backdrop */
-#mobile-dsp-backdrop {
-  display: none;
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.4);
-  z-index: 999;
+  #ribbon-tabs { overflow-x: auto; }
 }

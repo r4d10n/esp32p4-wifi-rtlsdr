@@ -1,0 +1,426 @@
+/usr/lib/python3.11/site-packages/paramiko/pkey.py:82: CryptographyDeprecationWarning: TripleDES has been moved to cryptography.hazmat.decrepit.ciphers.algorithms.TripleDES and will be removed from cryptography.hazmat.primitives.ciphers.algorithms in 48.0.0.
+  "cipher": algorithms.TripleDES,
+/usr/lib/python3.11/site-packages/paramiko/transport.py:253: CryptographyDeprecationWarning: TripleDES has been moved to cryptography.hazmat.decrepit.ciphers.algorithms.TripleDES and will be removed from cryptography.hazmat.primitives.ciphers.algorithms in 48.0.0.
+  "class": algorithms.TripleDES,
+======================================================================
+  AFSK1200 Packet RF Loopback Test
+  PlutoSDR TX: 192.168.2.1
+  WebSDR  RX:  192.168.1.232:8080
+======================================================================
+
+[TX] 3 AX.25 packets, 64 byte payload each
+[TX] AFSK1200 audio: 4.1s (197800 samples)
+[TX] Packet info example: PKT0000:AAAAAAAAAAAAAAAAAAAAAA...
+[TX] Local loopback verify: 3/3 packets CRC OK
+
+[TX] Connecting PlutoSDR...
+[TX] PlutoSDR connected
+[TX] FM modulated: 4120833 IQ samples, deviation=5000Hz
+[RX] WebSDR connected
+
+══════════════════════════════════════════════════════════════════════
+  88 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] 88MHz gain=-10dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.5s RMS=0.1100 rate=48000Hz → test/afsk_88mhz_-10db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 4 frames found, 3 CRC OK, 1 CRC fail
+[RESULT] Matched: 3/3 (100%)
+  ✓ PKT0001:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✓ PKT0000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✓ PKT0002:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✗ CRC fail: rx=0xded7 calc=0x1e1b info=PKT0001:AAAAAAAAAAAAAAAAAAAAAA
+
+  ★ PERFECT: all 3 packets decoded at 88MHz gain=-10dB!
+
+══════════════════════════════════════════════════════════════════════
+  108 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] 108MHz gain=-10dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.5s RMS=0.1132 rate=48000Hz → test/afsk_108mhz_-10db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 8 frames found, 2 CRC OK, 6 CRC fail
+[RESULT] Matched: 2/3 (67%)
+  ✓ PKT0002:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✓ PKT0001:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✗ CRC fail: rx=0xfbf5 calc=0xfa4d info=k��
+  ✗ CRC fail: rx=0xc224 calc=0xc25f info=
+  ✗ CRC fail: rx=0x9684 calc=0xb1c5 info=k�����Rs��u�u�u��
+
+[TX] 108MHz gain=-5dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.4s RMS=0.1134 rate=48000Hz → test/afsk_108mhz_-5db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 8 frames found, 3 CRC OK, 5 CRC fail
+[RESULT] Matched: 3/3 (100%)
+  ✓ PKT0002:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✓ PKT0001:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✓ PKT0000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✗ CRC fail: rx=0xded7 calc=0xb5d6 info=PKT0001:AAAAAAAAAAAAAAAAAAAAAA
+  ✗ CRC fail: rx=0xb216 calc=0xa663 info=PKT0000:AAAAAAAAAAAAAAAAAAAAAA
+  ✗ CRC fail: rx=0xf6a0 calc=0xc7f2 info=x�%*����������������������
+
+  ★ PERFECT: all 3 packets decoded at 108MHz gain=-5dB!
+
+══════════════════════════════════════════════════════════════════════
+  145 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] 145MHz gain=-10dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 7.7s RMS=0.1165 rate=48000Hz → test/afsk_145mhz_-10db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 5 frames found, 3 CRC OK, 2 CRC fail
+[RESULT] Matched: 2/3 (67%)
+  ✓ PKT0000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✓ PKT0001:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✓ PKT0000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✗ CRC fail: rx=0xafb5 calc=0x4c8e info=Q�����
+  ✗ CRC fail: rx=0x7da8 calc=0xbacc info=�FJ���l�]�]�[�[�)�)(.((.(
+
+[TX] 145MHz gain=-5dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Too few samples: 0
+[RX] Zero audio — attempting UART reset...
+[UART] Reset via esptool: 
+
+[TX] 145MHz gain=-15dB
+[RX] DDC rate: 0Hz
+[RX] Capturing 10.2s...
+[RX] Too few samples: 0
+[RX] Zero audio — attempting UART reset...
+[UART] Reset via esptool: 
+
+[TX] 145MHz gain=-20dB
+[RX] DDC rate: 0Hz
+[RX] Capturing 10.2s...
+[RX] Too few samples: 0
+[RX] Zero audio — attempting UART reset...
+[UART] Reset via esptool: 
+
+[TX] 145MHz gain=0dB
+[RX] DDC rate: 0Hz
+[RX] Capturing 10.2s...
+[RX] Too few samples: 0
+[RX] Zero audio — attempting UART reset...
+[UART] Reset via esptool: 
+
+══════════════════════════════════════════════════════════════════════
+  174 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] 174MHz gain=-10dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.0s RMS=0.1289 rate=48000Hz → test/afsk_174mhz_-10db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 7 frames found, 4 CRC OK, 3 CRC fail
+[RESULT] Matched: 3/3 (100%)
+  ✓ PKT0002:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✓ PKT0000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✓ PKT0001:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✗ CRC fail: rx=0x1120 calc=0xa4db info=����������������������������
+  ✗ CRC fail: rx=0x7da8 calc=0xe906 info=�FT�����]�[�%�)+.((.((.((.(
+  ✗ CRC fail: rx=0xc224 calc=0xdebc info=���
+
+  ★ PERFECT: all 3 packets decoded at 174MHz gain=-10dB!
+
+══════════════════════════════════════════════════════════════════════
+  290 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] 290MHz gain=-10dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.4s RMS=0.1598 rate=48000Hz → test/afsk_290mhz_-10db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 4 frames found, 2 CRC OK, 2 CRC fail
+[RESULT] Matched: 2/3 (67%)
+  ✓ PKT0002:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✓ PKT0001:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✗ CRC fail: rx=0x5a10 calc=0x3e7a info=�����
+LMPPVPPVPP6PPVPPPPPPPPPP
+  ✗ CRC fail: rx=0xfd41 calc=0x8e2a info=PKT0001:AAAAAAAAAAAAAAAAAAAAAA
+
+[TX] 290MHz gain=-5dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.5s RMS=0.1596 rate=48000Hz → test/afsk_290mhz_-5db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 9 frames found, 5 CRC OK, 4 CRC fail
+[RESULT] Matched: 3/3 (100%)
+  ✓ PKT0002:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✓ PKT0001:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✓ PKT0002:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✗ CRC fail: rx=0x8448 calc=0x6064 info=`ST�0��������~�P�]�]���%��
+  ✗ CRC fail: rx=0x30f0 calc=0xcfb8 info=`KT�0
+  ✗ CRC fail: rx=0x2d08 calc=0x4e02 info=������+�)+((+((+((+((+(((((((
+
+  ★ PERFECT: all 3 packets decoded at 290MHz gain=-5dB!
+
+══════════════════════════════════════════════════════════════════════
+  435 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] 435MHz gain=-10dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.4s RMS=0.2094 rate=48000Hz → test/afsk_435mhz_-10db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 6 frames found, 3 CRC OK, 3 CRC fail
+[RESULT] Matched: 3/3 (100%)
+  ✓ PKT0002:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✓ PKT0001:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✓ PKT0000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✗ CRC fail: rx=0xfb50 calc=0xee1a info=������NPPPPPPPPPPPPPPPPPPPPP
+  ✗ CRC fail: rx=0x8448 calc=0x1536 info=�j�jf&F'(((((((((((((((((((((
+  ✗ CRC fail: rx=0xfb56 calc=0xeb25 info=PKT0002:AAAAAAAAAAAAAAAAAAAqAB
+
+  ★ PERFECT: all 3 packets decoded at 435MHz gain=-10dB!
+
+══════════════════════════════════════════════════════════════════════
+  915 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] 915MHz gain=-10dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.4s RMS=0.3892 rate=48000Hz → test/afsk_915mhz_-10db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 6 frames found, 2 CRC OK, 4 CRC fail
+[RESULT] Matched: 2/3 (67%)
+  ✓ PKT0002:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✓ PKT0001:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✗ CRC fail: rx=0x0890 calc=0x7fa8 info=�WS0VS0VS0V\PV\PP\PP\PP\PPPPPP
+  ✗ CRC fail: rx=0xf6d7 calc=0xfa82 info=PKT0002:AAAAAAAAAAMAAMAAMAAMAA
+  ✗ CRC fail: rx=0x25a1 calc=0x34d7 info=�g�e�e�������
+
+[TX] 915MHz gain=-5dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.4s RMS=0.3892 rate=48000Hz → test/afsk_915mhz_-5db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 8 frames found, 0 CRC OK, 8 CRC fail
+[RESULT] Matched: 0/3 (0%)
+  ✗ CRC fail: rx=0xbda1 calc=0x7cef info=�}�2��2�F3�F3�F3�F3�^3�^+�^3
+  ✗ CRC fail: rx=0xabed calc=0x6181 info=PKT0002:AAAAAAAAAAAAAAAAAAAAAA
+  ✗ CRC fail: rx=0xb03d calc=0x1c82 info=P��=�
+
+[TX] 915MHz gain=-15dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.4s RMS=0.3889 rate=48000Hz → test/afsk_915mhz_-15db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 7 frames found, 3 CRC OK, 4 CRC fail
+[RESULT] Matched: 3/3 (100%)
+  ✓ PKT0001:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✓ PKT0000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✓ PKT0002:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✗ CRC fail: rx=0xbed4 calc=0xde39 info=ww�www�l�����
+  ✗ CRC fail: rx=0x8448 calc=0x0416 info=�k&��%��%��)�)�)+.(+.((.((.
+  ✗ CRC fail: rx=0xedb7 calc=0x77b9 info=PKT0002:AAAAAAAAAAAAAAAAAAAMAA
+
+  ★ PERFECT: all 3 packets decoded at 915MHz gain=-15dB!
+
+══════════════════════════════════════════════════════════════════════
+  1090 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] 1090MHz gain=-10dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.4s RMS=0.4560 rate=48000Hz → test/afsk_1090mhz_-10db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 5 frames found, 3 CRC OK, 2 CRC fail
+[RESULT] Matched: 3/3 (100%)
+  ✓ PKT0002:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✓ PKT0001:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✓ PKT0000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✗ CRC fail: rx=0x4cd7 calc=0x6443 info=P�U<0<�;Bw�Bw�Bw�MG�M���_`�/p�
+  ✗ CRC fail: rx=0xdabe calc=0x0b41 info=P��=�=R:AqYBq�Bw�Bw�Bw�Bw�D��D
+
+  ★ PERFECT: all 3 packets decoded at 1090MHz gain=-10dB!
+
+══════════════════════════════════════════════════════════════════════
+  1420 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] 1420MHz gain=-10dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.5s RMS=0.6090 rate=48000Hz → test/afsk_1420mhz_-10db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 2 frames found, 0 CRC OK, 2 CRC fail
+[RESULT] Matched: 0/3 (0%)
+  ✗ CRC fail: rx=0xe0af calc=0x06d5 info=
+�f�f"�f"�f"�f"�fB�B�B�
+�}
+  ✗ CRC fail: rx=0xabed calc=0x7e43 info=PKT0002:AAAAAAAAAAAAAAAAAAAAAA
+
+[TX] 1420MHz gain=-5dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.5s RMS=0.6096 rate=48000Hz → test/afsk_1420mhz_-5db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 4 frames found, 0 CRC OK, 4 CRC fail
+[RESULT] Matched: 0/3 (0%)
+  ✗ CRC fail: rx=0x99ee calc=0x5db6 info=S�.S�-S�-S�5��5�5�5�5�5�5
+  ✗ CRC fail: rx=0x84cd calc=0xc687 info=��\�.}���S������Wp�+8��$
+  ✗ CRC fail: rx=0xabed calc=0x7693 info=PKT0002:AAAAAAAAAAAAAAAAAAAAAA
+
+[TX] 1420MHz gain=-15dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.4s RMS=0.6095 rate=48000Hz → test/afsk_1420mhz_-15db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 2 frames found, 0 CRC OK, 2 CRC fail
+[RESULT] Matched: 0/3 (0%)
+  ✗ CRC fail: rx=0xb976 calc=0xfc78 info=PKT0000:AAAAAAAAAAAAAAAAAAAAAA
+  ✗ CRC fail: rx=0xabed calc=0x1559 info=PKT0002:AAAAAAAAAAAAAAAAAAAAAA
+
+[TX] 1420MHz gain=-20dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.5s RMS=0.6094 rate=48000Hz → test/afsk_1420mhz_-20db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 5 frames found, 0 CRC OK, 5 CRC fail
+[RESULT] Matched: 0/3 (0%)
+  ✗ CRC fail: rx=0xf6a0 calc=0x8cad info=t��*����������������������
+  ✗ CRC fail: rx=0xb976 calc=0x99bd info=PKT0000:AAAAAAAAAAAAAAAAAAAAAA
+  ✗ CRC fail: rx=0x1120 calc=0xff1d info=t��*���`��`��`��`��`��`����
+
+[TX] 1420MHz gain=0dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.4s RMS=0.6103 rate=48000Hz → test/afsk_1420mhz_0db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 7 frames found, 1 CRC OK, 6 CRC fail
+[RESULT] Matched: 1/3 (33%)
+  ✓ PKT0000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  ✗ CRC fail: rx=0x8cb1 calc=0x4a04 info=V{T3031:AAABqABw�Bw�Bw�Bw�Bw�B
+  ✗ CRC fail: rx=0xb3ed calc=0x9976 info=PKT0002:AAAAAAAAAAAAAAAAAAAAAA
+  ✗ CRC fail: rx=0xbda2 calc=0x27b5 info=PKT0001:AAAAAAAAAAAAAAAAAAAAAA
+
+══════════════════════════════════════════════════════════════════════
+  1700 MHz
+══════════════════════════════════════════════════════════════════════
+
+[TX] 1700MHz gain=-10dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.4s RMS=0.6919 rate=48000Hz → test/afsk_1700mhz_-10db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 6 frames found, 0 CRC OK, 6 CRC fail
+[RESULT] Matched: 0/3 (0%)
+  ✗ CRC fail: rx=0xc224 calc=0xf4f4 info=�+"���w�w�w�w�tl�l
+  ✗ CRC fail: rx=0xecaf calc=0x4c94 info=x����/���_`�7h)3h)3h)Sh,S�-S
+  ✗ CRC fail: rx=0x2d08 calc=0xa5f2 info=h/h/��.��.��.��.��.��(�)(�)+
+
+[TX] 1700MHz gain=-5dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.5s RMS=0.6922 rate=48000Hz → test/afsk_1700mhz_-5db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 7 frames found, 0 CRC OK, 7 CRC fail
+[RESULT] Matched: 0/3 (0%)
+  ✗ CRC fail: rx=0xbda2 calc=0xaff8 info=�JT0001:AAAAAAAAAAAAAAAAAAAAAA
+  ✗ CRC fail: rx=0xabed calc=0x80b5 info=�Z��Z��Z��Z�~MAYAAYqAYqAYqAAqA
+  ✗ CRC fail: rx=0x4968 calc=0x9857 info=�JT0300:AAAAAAAAAAAAAAAAAAAAAA
+
+[TX] 1700MHz gain=-15dB
+[RX] Reconnecting...
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.4s RMS=0.6908 rate=48000Hz → test/afsk_1700mhz_-15db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 2 frames found, 0 CRC OK, 2 CRC fail
+[RESULT] Matched: 0/3 (0%)
+  ✗ CRC fail: rx=0x162c calc=0x4f59 info=7��7��W��W��W�������������,�
+  ✗ CRC fail: rx=0xbfc1 calc=0xe4ed info=PKT0000:AAAAAAAAAAAAAAAAAGAAGA
+
+[TX] 1700MHz gain=-20dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.4s RMS=0.6915 rate=48000Hz → test/afsk_1700mhz_-20db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 6 frames found, 0 CRC OK, 6 CRC fail
+[RESULT] Matched: 0/3 (0%)
+  ✗ CRC fail: rx=0xc266 calc=0xccb0 info=(���\�.}���S���o��Wp�+8�%
+  ✗ CRC fail: rx=0x438b calc=0x22f8 info=��������2�2�2�2�%2�%2�
+  ✗ CRC fail: rx=0xbda2 calc=0xbb8c info=PKT0001:AAAAAAAAAAAAAAAAAAAAAA
+
+[TX] 1700MHz gain=0dB
+[RX] DDC rate: 37500Hz
+[RX] Capturing 10.2s...
+[RX] Audio: 10.5s RMS=0.6926 rate=48000Hz → test/afsk_1700mhz_0db.wav
+[RX] No audio gaps detected ✓
+
+[DECODE] 4 frames found, 0 CRC OK, 4 CRC fail
+[RESULT] Matched: 0/3 (0%)
+  ✗ CRC fail: rx=0x7844 calc=0xd11d info=��Z���������������������������
+  ✗ CRC fail: rx=0x057d calc=0x11f1 info=7p�+8��
+�
+  ✗ CRC fail: rx=0x5a10 calc=0x54a2 info=PPPPPPPPPP�QH�QH�QHPPPPPPPPPPP
+
+══════════════════════════════════════════════════════════════════════
+  AFSK1200 RESULTS (3 packets per frequency)
+══════════════════════════════════════════════════════════════════════
+
+    Freq   Gain  Frames  CRC OK  Match  Rate  Gaps   GapMs    RMS
+  ──────────────────────────────────────────────────────────────
+  ★    88   -10dB      4      3     3  100%    0      0 0.1100
+  ✓   108   -10dB      8      2     2   67%    0      0 0.1132
+  ★   108    -5dB      8      3     3  100%    0      0 0.1134
+  ✓   145   -10dB      5      3     2   67%    0      0 0.1165
+  ★   174   -10dB      7      4     3  100%    0      0 0.1289
+  ✓   290   -10dB      4      2     2   67%    0      0 0.1598
+  ★   290    -5dB      9      5     3  100%    0      0 0.1596
+  ★   435   -10dB      6      3     3  100%    0      0 0.2094
+  ✓   915   -10dB      6      2     2   67%    0      0 0.3892
+  ✗   915    -5dB      8      0     0    0%    0      0 0.3892
+  ★   915   -15dB      7      3     3  100%    0      0 0.3889
+  ★  1090   -10dB      5      3     3  100%    0      0 0.4560
+  ✗  1420   -10dB      2      0     0    0%    0      0 0.6090
+  ✗  1420    -5dB      4      0     0    0%    0      0 0.6096
+  ✗  1420   -15dB      2      0     0    0%    0      0 0.6095
+  ✗  1420   -20dB      5      0     0    0%    0      0 0.6094
+  ✗  1420     0dB      7      1     1   33%    0      0 0.6103
+  ✗  1700   -10dB      6      0     0    0%    0      0 0.6919
+  ✗  1700    -5dB      7      0     0    0%    0      0 0.6922
+  ✗  1700   -15dB      2      0     0    0%    0      0 0.6908
+  ✗  1700   -20dB      6      0     0    0%    0      0 0.6915
+  ✗  1700     0dB      4      0     0    0%    0      0 0.6926
+
+  Best: 3/3 packets at 88MHz gain=-10dB
+
+  ✅ ALL PACKETS DECODED — audio pipeline is reliable

@@ -18,6 +18,7 @@
 #include "esp_check.h"
 #include "esp_https_server.h"
 #include "esp_http_server.h"
+#include "esp_https_server.h"
 #include "esp_timer.h"
 #include "cJSON.h"
 #include "websdr.h"
@@ -74,6 +75,7 @@ struct websdr_server {
     /* WebSocket clients */
     ws_client_t         clients[MAX_WS_CLIENTS];
     SemaphoreHandle_t   client_mutex;
+    SemaphoreHandle_t   send_mutex;     /* Serialize TLS writes */
 
     /* IQ sample buffer (producer: push_samples, consumer: FFT task) */
     uint8_t            *iq_buf;
@@ -96,6 +98,9 @@ struct websdr_server {
     /* Mutex serialising concurrent WebSocket sends */
     SemaphoreHandle_t   send_mutex;
 };
+
+/* Global server pointer (used by close callback and TLS send serialization) */
+websdr_server_t *g_websdr_srv = NULL;
 
 /* ──────────────────────── IQ Ring Buffer ──────────────────────── */
 
@@ -167,9 +172,11 @@ static esp_err_t send_ws_text(websdr_server_t *srv, int fd, const char *text)
         .payload = (uint8_t *)text,
         .len = strlen(text),
     };
-    xSemaphoreTake(srv->send_mutex, portMAX_DELAY);
-    esp_err_t ret = httpd_ws_send_frame_async(srv->httpd, fd, &frame);
-    xSemaphoreGive(srv->send_mutex);
+    if (g_websdr_srv && g_websdr_srv->send_mutex)
+        xSemaphoreTake(g_websdr_srv->send_mutex, portMAX_DELAY);
+    esp_err_t ret = httpd_ws_send_frame_async(hd, fd, &frame);
+    if (g_websdr_srv && g_websdr_srv->send_mutex)
+        xSemaphoreGive(g_websdr_srv->send_mutex);
     return ret;
 }
 
@@ -180,9 +187,11 @@ static esp_err_t send_ws_binary(websdr_server_t *srv, int fd, const uint8_t *dat
         .payload = (uint8_t *)data,
         .len = len,
     };
-    xSemaphoreTake(srv->send_mutex, portMAX_DELAY);
-    esp_err_t ret = httpd_ws_send_frame_async(srv->httpd, fd, &frame);
-    xSemaphoreGive(srv->send_mutex);
+    if (g_websdr_srv && g_websdr_srv->send_mutex)
+        xSemaphoreTake(g_websdr_srv->send_mutex, portMAX_DELAY);
+    esp_err_t ret = httpd_ws_send_frame_async(hd, fd, &frame);
+    if (g_websdr_srv && g_websdr_srv->send_mutex)
+        xSemaphoreGive(g_websdr_srv->send_mutex);
     return ret;
 }
 
@@ -406,7 +415,7 @@ static esp_err_t font_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-static esp_err_t fm_handler(httpd_req_t *req)
+static esp_err_t fm_player_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, (const char *)fm_player_html_start,
@@ -510,8 +519,7 @@ static void on_close_socket(httpd_handle_t hd, int fd)
     close(fd);
 }
 
-/* Global server pointer for close callback */
-websdr_server_t *g_websdr_srv = NULL;
+/* g_websdr_srv declared near top of file */
 
 /* ──────────────────────── FFT Processing Task ──────────────────────── */
 
@@ -715,6 +723,8 @@ esp_err_t websdr_server_start(websdr_server_t **out_server, const websdr_config_
 
     srv->client_mutex = xSemaphoreCreateMutex();
     ESP_GOTO_ON_FALSE(srv->client_mutex, ESP_ERR_NO_MEM, err, TAG, "mutex alloc failed");
+    srv->send_mutex = xSemaphoreCreateMutex();
+    ESP_GOTO_ON_FALSE(srv->send_mutex, ESP_ERR_NO_MEM, err, TAG, "send mutex alloc failed");
 
     srv->send_mutex = xSemaphoreCreateMutex();
     ESP_GOTO_ON_FALSE(srv->send_mutex, ESP_ERR_NO_MEM, err, TAG, "send_mutex alloc failed");
@@ -735,13 +745,13 @@ esp_err_t websdr_server_start(websdr_server_t **out_server, const websdr_config_
     /* Set global pointer for close callback */
     g_websdr_srv = srv;
 
-    /* Start HTTPS server (required for AudioWorklet secure context) */
+    /* Start HTTPS server */
     httpd_ssl_config_t httpd_config = HTTPD_SSL_CONFIG_DEFAULT();
-    httpd_config.httpd.server_port = config->http_port ? config->http_port : WEBSDR_DEFAULT_PORT;
-    httpd_config.httpd.max_uri_handlers = 9;
+    httpd_config.httpd.max_uri_handlers = 8;
     httpd_config.httpd.max_open_sockets = 3;  /* Keep within lwIP socket limit */
     httpd_config.httpd.close_fn = on_close_socket;
-    httpd_config.httpd.stack_size = 12288;   /* TLS needs more stack than plain HTTP */
+    httpd_config.httpd.stack_size = 10240;
+    httpd_config.port_secure = config->http_port ? config->http_port : WEBSDR_DEFAULT_PORT;
     httpd_config.servercert = servercert_start;
     httpd_config.servercert_len = servercert_end - servercert_start;
     httpd_config.prvtkey_pem = prvtkey_start;
@@ -763,6 +773,9 @@ esp_err_t websdr_server_start(websdr_server_t **out_server, const websdr_config_
     const httpd_uri_t uri_font = {
         .uri = "/dseg7.woff2", .method = HTTP_GET, .handler = font_handler,
     };
+    const httpd_uri_t uri_fm = {
+        .uri = "/fm", .method = HTTP_GET, .handler = fm_player_handler,
+    };
     const httpd_uri_t uri_ws = {
         .uri = "/ws", .method = HTTP_GET, .handler = ws_handler,
         .user_ctx = srv, .is_websocket = true,
@@ -776,6 +789,7 @@ esp_err_t websdr_server_start(websdr_server_t **out_server, const websdr_config_
     httpd_register_uri_handler(srv->httpd, &uri_js);
     httpd_register_uri_handler(srv->httpd, &uri_css);
     httpd_register_uri_handler(srv->httpd, &uri_font);
+    httpd_register_uri_handler(srv->httpd, &uri_fm);
     httpd_register_uri_handler(srv->httpd, &uri_ws);
     httpd_register_uri_handler(srv->httpd, &uri_fm);
 
@@ -787,7 +801,7 @@ esp_err_t websdr_server_start(websdr_server_t **out_server, const websdr_config_
 
     *out_server = srv;
     ESP_LOGI(TAG, "WebSDR HTTPS server started on port %d (FFT %lu bins @ %lu Hz)",
-             httpd_config.httpd.server_port, (unsigned long)srv->fft_size,
+             httpd_config.port_secure, (unsigned long)srv->fft_size,
              (unsigned long)srv->fft_rate);
     return ESP_OK;
 

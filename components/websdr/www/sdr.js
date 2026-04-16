@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/* ESP32-P4 WebSDR - ESP32-P4 WebSDR */
+/* SDR Console V3 replica - ESP32-P4 WebSDR */
 (function(){'use strict';
 var $=document.getElementById.bind(document),DC=document.createElement.bind(document);
 function on(el,ev,fn,opt){el.addEventListener(ev,fn,opt);}
@@ -27,14 +27,14 @@ var pkBuf=null,avgBuf=null,avgA=.15,pkD=.5;
 var curX=-1,curY=-1,fftF32=null;
 var glTex=null,glCmap=null,glProg=null,glRow=0,glTH=512;
 var glVao=null,glUO=null,glUH=null;
-var cmN='default0',cmD=new Uint8Array(1024),cmaps={},wfID=null;
+var cmN='sdrc0',cmD=new Uint8Array(1024),cmaps={},wfID=null;
 
 /* S-meter elements */
 var smFill=$('smeter-fill'),smPkMark=$('smeter-peak-mark'),smVal=$('smeter-val');
 var smDbm=$('smeter-dbm');
 var smPct=0,smTgt=0,smPkPct=0,smPkT=0;
 
-var settings={cmap:'default0',fftAvg:50,pkDecay:5,agcSpd:'medium',deemph:'75us',limiter:true,limDrive:2.0,limCeil:0.35};
+var settings={cmap:'sdrc0',fftAvg:50,pkDecay:5,agcSpd:'medium',deemph:'75us',limiter:true,limDrive:2.0,limCeil:0.35};
 var mems=[],bStack={},rhDrag=false,rhY0=0,rhH0=0;
 var eDot=$('status-led'),eTxt=$('status-txt'),eRD=$('rate-display');
 var eGS=$('gain-slider'),eGV=$('gain-val'),eVS=$('vol-slider'),eVV=$('vol-val');
@@ -46,11 +46,11 @@ var eTK=$('tune-slider'),eTL=$('tune-lbl'),eBW=$('bw-val'),eCR=$('cursor-readout
 var eRit=$('rit-val');
 var pndF=null,fTmr=null;
 
-/* ---- Waterfall palettes ---- */
+/* ---- SDR Console waterfall palettes ---- */
 function mkCm(fn){var d=new Uint8Array(1024);for(var i=0;i<256;i++){var t=i/255,c=fn(t);d[i*4]=c[0];d[i*4+1]=c[1];d[i*4+2]=c[2];d[i*4+3]=255;}return d;}
 function buildCm(){
-/* Default palette: dark blue (noise) -> blue -> light blue -> white (strong) */
-cmaps.default0=mkCm(function(t){
+/* SDR Console V3 palette: dark blue (noise) -> blue -> light blue -> white (strong) */
+cmaps.sdrc0=mkCm(function(t){
   if(t<0.10){var p=t/0.10;return[0,0,MR(10+p*50)];}
   if(t<0.30){var p=(t-0.10)/0.20;return[0,MR(p*40),MR(60+p*100)];}
   if(t<0.55){var p=(t-0.30)/0.25;return[MR(p*40),MR(40+p*120),MR(160+p*60)];}
@@ -63,7 +63,7 @@ cmaps.viridis=mkCm(function(t){return[68+t*187*(t<.5?t*2:1)|0,MN(255,2+t*252)|0,
 cmaps.grayscale=mkCm(function(t){var v=t*255|0;return[v,v,v];});
 setCm(settings.cmap);
 }
-function setCm(n){cmN=n;cmD=cmaps[n]||cmaps.default0;if(wfGL&&glCmap){wfGL.bindTexture(wfGL.TEXTURE_2D,glCmap);wfGL.texImage2D(wfGL.TEXTURE_2D,0,wfGL.RGBA,256,1,0,wfGL.RGBA,wfGL.UNSIGNED_BYTE,cmD);}wfID=null;}
+function setCm(n){cmN=n;cmD=cmaps[n]||cmaps.sdrc0;if(wfGL&&glCmap){wfGL.bindTexture(wfGL.TEXTURE_2D,glCmap);wfGL.texImage2D(wfGL.TEXTURE_2D,0,wfGL.RGBA,256,1,0,wfGL.RGBA,wfGL.UNSIGNED_BYTE,cmD);}wfID=null;}
 
 /* ---- Helpers ---- */
 function fF(h){var hz=MR(MA(h)),s=String(hz).padStart(9,'0');return s.substr(0,3)+'.'+s.substr(3,3)+'.'+s.substr(6,3);}
@@ -79,10 +79,9 @@ function tx(c,p){if(!ws||ws.readyState!==1)return;var m={cmd:c};if(p)for(var k i
 function subIQ(){if(audOn){var pm=mP();tx('subscribe_iq',{offset:pm.o,bw:pm.b});}}
 function tDb(){tx('db_range',{min:PI(eLV.value)-PI(eNS.value),max:PI(eLV.value)});}
 function wsc(){
-var h=location.hostname||'192.168.1.233';
+var h=location.hostname||'192.168.1.232',p=location.port||'8080';
 var proto=location.protocol==='https:'?'wss://':'ws://';
-var p=location.port||(location.protocol==='https:'?'443':'8080');
-ws=new WebSocket(proto+h+(p==='443'||p==='80'?'':':'+p)+'/ws');ws.binaryType='arraybuffer';
+ws=new WebSocket(proto+h+':'+p+'/ws');ws.binaryType='arraybuffer';
 ws.onopen=function(){eDot.className='connected';eTxt[TC]='Connected';reconDelay=2000;};
 ws.onclose=function(){eDot.className='';eTxt[TC]='Disconnected';reconDelay=Math.min(reconDelay*2,30000);setTimeout(wsc,reconDelay);};
 ws.onerror=function(){ws.close();};
@@ -96,12 +95,7 @@ else if(m.type==='iq_stop'){iqRate=0;}
 else if(m.type==='error'){console.warn('Server error:',m.msg);if(eTxt)eTxt[TC]='Err: '+(m.msg||'').slice(0,30);setTimeout(function(){if(eTxt&&eTxt[TC].startsWith('Err:'))eTxt[TC]='Connected';},3000);}}
 function onBin(buf){var d=new Uint8Array(buf);if(d.length<2)return;var t=d[0],p=d.subarray(1);
 if(t===1){procFFT(p);var now=performance.now();if(now-wfLast>=wfSpd){dWf(p);wfLast=now;}uSm(p);}
-else if(t===2&&audOn){if(aQ.length>100)aQ.splice(0,aQ.length-50);aQ.push(p.slice());}
-else if(t===3&&audOn){/* MSG_IQ16: int16 IQ data - convert to uint8 for audio pipeline */
-var raw=d.subarray(1);var ab=new ArrayBuffer(raw.length);new Uint8Array(ab).set(raw);
-var i16=new Int16Array(ab);var u8=new Uint8Array(i16.length);
-for(var j=0;j<i16.length;j++){var v=(i16[j]>>8)+128;u8[j]=v<0?0:v>255?255:v;}
-if(aQ.length>100)aQ.splice(0,aQ.length-50);aQ.push(u8);}}
+else if(t===2&&audOn){if(aQ.length>100)aQ.splice(0,aQ.length-50);aQ.push(p.slice());}}
 function rstBuf(){pkBuf=avgBuf=fftF32=wfID=null;glRow=0;}
 function syncC(){if(eRS)eRS.value=''+sRate;if(eFS)eFS.value=''+fftSz;var r=dbMax-dbMin;if(eNS){eNS.value=r;if(eNV)eNV[TC]=r|0;}if(eLS){eLV.value=dbMax;if(eLV)eLV[TC]=dbMax|0;}}
 
@@ -114,21 +108,15 @@ for(var i=0;i<digits.length&&i<s.length;i++)digits[i][TC]=s[i];
 /* Update VFO-B display */
 var fb=$('freq-display-b');
 if(fb){
-  var vfoMap={A:vfoA,B:vfoB,C:vfoC,D:vfoD};
-  /* Show the "other" VFO: if active is A show B, etc. Cycle: A<->B, C<->D */
-  var otherKey=actVfo==='A'?'B':actVfo==='B'?'A':actVfo==='C'?'D':'C';
-  var bv=vfoMap[otherKey]||vfoB;
+  var bv=actVfo==='A'?vfoB:vfoA;
   var bs=String(MR(bv.f)).padStart(10,'0');
   var bSpan=fb.querySelector('.fd-b');
-  if(bSpan)bSpan[TC]=bs[0]+'.'+bs.substr(1,3)+'.'+bs.substr(4,3)+'.'+bs.substr(7,3);
+  if(bSpan)bSpan[TC]=bs.substr(0,3)+'.'+bs.substr(3,3)+'.'+bs.substr(6,3);
 }
 /* Update mode labels */
 var am=$('vfo-a-mode'),bm=$('vfo-b-mode');
-var vfoMapL={A:vfoA,B:vfoB,C:vfoC,D:vfoD};
-if(am)am[TC]=mode;
-if(bm){var otherK=actVfo==='A'?'B':actVfo==='B'?'A':actVfo==='C'?'D':'C';bm[TC]=(vfoMapL[otherK]||vfoB).m;}
-/* Update VFO letter */
-var aLetter=$('vfo-a-letter');if(aLetter)aLetter[TC]=actVfo;
+if(am)am[TC]=actVfo==='A'?mode:(vfoB?vfoB.m:'NFM');
+if(bm)bm[TC]=actVfo==='A'?(vfoB?vfoB.m:'NFM'):mode;
 /* Update dBm readout */
 var dbmEl=$('vfo-a-dbm');
 if(dbmEl&&smDbm)dbmEl[TC]=smDbm[TC];
@@ -137,21 +125,18 @@ function initFD(){
 var fd=$('freq-display');
 if(!fd)return;
 fd.querySelectorAll('.fd').forEach(function(d){
-on(d,'wheel',function(e){e.preventDefault();if(window._sdrLocked&&window._sdrLocked())return;var step=PI(d.dataset.step)||1;
-if(window._sdrFastTune&&window._sdrFastTune())step*=10;
+on(d,'wheel',function(e){e.preventDefault();var step=PI(d.dataset.step)||1;
 cFreq=clamp(MR(cFreq+(e.deltaY<0?1:-1)*step),24e6,1766e6);tunedFreq=cFreq;tuneOff=0;tx('freq',{value:cFreq});uD();},{passive:false});
 on(d,'mouseenter',function(){d.classList.add('active');});
 on(d,'mouseleave',function(){d.classList.remove('active');});});}
 
-function uD(resetTune){
+function uD(){
 buildFD();
 if(eRD)eRD[TC]=(sRate/1e3|0)+' kSPS';
 if(eBW)eBW[TC]='BW: '+bwT();
-if(resetTune!==false){
-  if(eRit)eRit[TC]='RIT: '+(tuneOff>=0?'+':'')+tuneOff+' Hz';
-  if(eTK){eTK.value=tuneOff;}
-  if(eTL)eTL[TC]=(tuneOff>=0?'+':'')+tuneOff;
-}
+if(eRit)eRit[TC]='RIT: '+(tuneOff>=0?'+':'')+tuneOff+' Hz';
+if(eTK){eTK.value=0;}
+if(eTL)eTL[TC]='\xb10';
 }
 
 /* ---- S-meter (horizontal bar) ---- */
@@ -198,7 +183,7 @@ var w=spCv.width,h=spCv.height;if(!w||!h||!fftF32)return;
 var n=fftF32.length,v=vB(n),vl=v.e-v.s,xs=w/vl,dr=dbMax-dbMin;
 function d2y(d){return h-(d-dbMin)/dr*h;}
 
-/* Dark background */
+/* SDR Console V3 dark background */
 spCtx.fillStyle='#000000';
 spCtx.fillRect(0,0,w,h);
 
@@ -236,7 +221,7 @@ for(var i=0;i<vl;i++){var xi=i*xs,yi=d2y(avgBuf[v.s+i]);i?spCtx.lineTo(xi,yi):sp
 spCtx.strokeStyle='#FFAA00';spCtx.lineWidth=0.8;spCtx.beginPath();
 for(var i=0;i<vl;i++){var xi=i*xs,yi=d2y(pkBuf[v.s+i]);i?spCtx.lineTo(xi,yi):spCtx.moveTo(xi,yi);}spCtx.stroke();
 
-/* Main FFT trace - white/light blue (Dark theme) */
+/* Main FFT trace - white/light blue (SDR Console V3 dark theme) */
 spCtx.strokeStyle='#C0D0FF';spCtx.lineWidth=1.5;spCtx.beginPath();
 for(var i=0;i<vl;i++){var xi=i*xs,yi=d2y(fftF32[v.s+i]);i?spCtx.lineTo(xi,yi):spCtx.moveTo(xi,yi);}spCtx.stroke();
 
@@ -246,7 +231,7 @@ gr.addColorStop(0,'rgba(40,80,180,0.4)');
 gr.addColorStop(1,'rgba(20,40,100,0.1)');
 spCtx.fillStyle=gr;spCtx.lineTo((vl-1)*xs,h);spCtx.lineTo(0,h);spCtx.closePath();spCtx.fill();
 
-/* Filter overlay - BW trapezoid (Trapezoid) */
+/* Filter overlay - BW trapezoid (SDR Console characteristic) */
 dFO(spCv,spCtx,w,h);
 
 /* Squelch line */
@@ -256,7 +241,7 @@ if(sql>0){var sy=d2y(dbMin+sql/255*dr);spCtx.strokeStyle='rgba(255,100,100,0.5)'
 if(curX>=0&&curX<=w&&curY>=0&&curY<=h&&eCR)eCR[TC]=fF(MR(vf.s+curX/w*vf.bw))+' / '+(dbMax-curY/h*dr|0)+' dBm';
 }
 
-/* Filter overlay - BW trapezoid style (Trapezoid style) */
+/* Filter overlay - BW trapezoid style (SDR Console) */
 function dFO(cv,ctx,w,h){
 var vf=gVF(),fl=f2x(tunedFreq-filterBW/2,w,vf),fr=f2x(tunedFreq+filterBW/2,w,vf),cx=f2x(tunedFreq,w,vf);
 var bwPx=fr-fl;
@@ -434,16 +419,9 @@ var WK_CODE=DSP_CODE+
 'return true;}}'+
 'registerProcessor("sdr-processor",P);';
 
-var spCfg={mode:'NFM',ir:48e3,ag:'medium',vol:.5,sql:0,deemph:'75us',lim:true,limD:2.0,limC:0.35,nbEn:false,nbLvl:0,nrEn:false,nrLvl:0,notchEn:false,notchAuto:false};
-function sendCfg(){
-/* Read current NB/NR/Notch state from DOM checkboxes */
-var _nbEn=$('dsp-nb-enable'),_nrEn=$('dsp-nr-enable'),_notchEn=$('dsp-notch-enable');
-var _nbLvl=$('dsp-nb-level'),_nrLvl=$('dsp-nr-level');
-var c={type:'config',mode:mode,ir:iqRate,ag:settings.agcSpd,vol:vol,sql:sql,deemph:settings.deemph,lim:settings.limiter,limD:settings.limDrive,limC:settings.limCeil,
-  nbEn:_nbEn?_nbEn.checked:false, nbLvl:_nbLvl?PI(_nbLvl.value):0,
-  nrEn:_nrEn?_nrEn.checked:false, nrLvl:_nrLvl?PI(_nrLvl.value):0,
-  notchEn:_notchEn?_notchEn.checked:false, notchAuto:false};
-for(var k in c)if(k!=='type')spCfg[k]=c[k];
+var spCfg={mode:'NFM',ir:48e3,ag:'medium',vol:.5,sql:0,deemph:'75us',lim:true,limD:2.0,limC:0.35};
+function sendCfg(){var c={type:'config',mode:mode,ir:iqRate,ag:settings.agcSpd,vol:vol,sql:sql,deemph:settings.deemph,lim:settings.limiter,limD:settings.limDrive,limC:settings.limCeil};
+spCfg.mode=mode;spCfg.ir=iqRate;spCfg.ag=settings.agcSpd;spCfg.vol=vol;spCfg.sql=sql;spCfg.deemph=settings.deemph;spCfg.lim=settings.limiter;spCfg.limD=settings.limDrive;spCfg.limC=settings.limCeil;
 if(wkNode&&wkNode.port)wkNode.port.postMessage(c);}
 function pumpIQ(){if(!wkReady||!wkNode)return;while(aQ.length)wkNode.port.postMessage({type:'iq',data:aQ.shift()});}
 
@@ -504,62 +482,10 @@ while(aQ.length>0&&rBuf.length<o.length*2){
     else{for(var j=0;j<r.length;j++)rBuf.push(r[j]);}
   }
 }
-/* NB: impulse blanking on rBuf */
-if(C.nbEn&&C.nbLvl>0){
-  var thr=3+(255-C.nbLvl)*0.1,blk=32;
-  for(var bi=0;bi<rBuf.length;bi+=blk){
-    var be=MN(bi+blk,rBuf.length),sm=0;
-    for(var bj=bi;bj<be;bj++)sm+=rBuf[bj]*rBuf[bj];
-    var rms=MS(sm/(be-bi))+1e-10,bt=rms*thr;
-    for(var bj=bi;bj<be;bj++){
-      if(MA(rBuf[bj])>bt){var pv=bj>0?rBuf[bj-1]:0,nv=bj<rBuf.length-1?rBuf[bj+1]:0;rBuf[bj]=(pv+nv)*.5;}
-    }
-  }
-}
-/* NR: simple spectral gate */
-if(C.nrEn&&C.nrLvl>0){
-  var sub=1+C.nrLvl/64,blk2=256;
-  if(!st.nrFloor)st.nrFloor=0;
-  for(var bi=0;bi<rBuf.length;bi+=blk2){
-    var be=MN(bi+blk2,rBuf.length),pw2=0;
-    for(var bj=bi;bj<be;bj++)pw2+=rBuf[bj]*rBuf[bj];
-    pw2/=(be-bi);
-    st.nrFloor=.98*st.nrFloor+.02*pw2;
-    var g=1;if(pw2<st.nrFloor*sub*sub){g=MX(.01,pw2/(st.nrFloor*sub*sub+1e-10));g=MS(g);}
-    for(var bj=bi;bj<be;bj++)rBuf[bj]*=g;
-  }
-}
-/* Notch: IIR notch filter */
-if(C.notchEn){
-  if(!st.nF)st.nF=0;
-  if(C.notchAuto){var cx=0;for(var ni=1;ni<rBuf.length;ni++)if((rBuf[ni]>=0)!==(rBuf[ni-1]>=0))cx++;
-    var ef=cx/2/rBuf.length*48e3;st.nF=st.nF?st.nF*.95+ef*.05:ef;}
-  if(st.nF>0&&st.nF<24000){
-    var Q=30,rr=1-MP/Q/24e3;if(rr<.8)rr=.8;
-    var w0=2*MP*st.nF/48e3,cw=Math.cos(w0),a1=-2*rr*cw,a2=rr*rr,b1=-2*cw;
-    var nm=(1+a1+a2)/(1+b1+1);if(!st.nw0)st.nw0=0;if(!st.nw1)st.nw1=0;
-    for(var ni=0;ni<rBuf.length;ni++){var x=rBuf[ni],y=nm*x+st.nw0;st.nw0=nm*b1/nm*x-a1*y+st.nw1;st.nw1=nm*x-a2*y;rBuf[ni]=y;}
-  }
-}
-/* AGC */
-if(C.ag&&C.ag!=='off'){
-  var atk=C.ag==='fast'?.002:C.ag==='slow'?.025:.005;
-  var dec=C.ag==='fast'?.1:C.ag==='slow'?.5:.2;
-  if(!st.agcG)st.agcG=1;
-  for(var ai=0;ai<rBuf.length;ai++){
-    var tgt=.3/(MA(rBuf[ai])+1e-6);tgt=clamp(tgt,.1,50);
-    st.agcG+=(tgt-st.agcG)*(tgt<st.agcG?atk:dec)/48e3*1e3;
-    rBuf[ai]*=st.agcG;
-  }
-}
-/* Squelch */
-var sqPw=0;for(var si=0;si<rBuf.length;si++)sqPw+=rBuf[si]*rBuf[si];
-sqPw/=rBuf.length||1;
-var sqMute=C.sql>0&&sqPw<C.sql/255*.01;
 /* Output with limiter + metering */
 var pk=0,ch=MN(rBuf.length,o.length);
 for(var p=0;p<ch;p++){
-  var v=sqMute?0:rBuf[p]*C.vol;
+  var v=rBuf[p]*C.vol;
   if(C.lim&&C.mode==='WBFM')v=Math.tanh(v*C.limD)*C.limC;
   o[p]=v;var av=MA(v);if(av>pk)pk=av;
 }
@@ -582,7 +508,7 @@ function gcx(e){return e.touches&&e.touches.length?e.touches[0].clientX:e.client
 function gcy(e){return e.touches&&e.touches.length?e.touches[0].clientY:e.clientY;}
 function commitF(){if(pndF!==null){tx('freq',{value:pndF});pndF=null;}}
 
-function onDn(e){e.preventDefault();if(window._sdrLocked&&window._sdrLocked())return;var t=e.currentTarget,r=gbc(t),x=gcx(e)-r.left,edge=nrE(x,r.width);
+function onDn(e){e.preventDefault();var t=e.currentTarget,r=gbc(t),x=gcx(e)-r.left,edge=nrE(x,r.width);
 if(edge){isResize=true;resEdge=edge;t.style.cursor='ew-resize';return;}isDrag=true;dragMoved=false;dragX=x;dragF=cFreq;t.style.cursor='grabbing';}
 
 function onMv(e){e.preventDefault();var t=e.currentTarget,r=gbc(t),x=gcx(e)-r.left;curX=x;curY=gcy(e)-r.top;
@@ -760,16 +686,14 @@ if(eBW)eBW[TC]='BW: '+bwT();sendCfg();}
 function initVFO(){
 /* VFO selection buttons in ribbon */
 qsa('.vfo-sel-btn').forEach(function(b){on(b,'click',function(){
-  var vfoMap={A:vfoA,B:vfoB,C:vfoC,D:vfoD};
-  var target=b.dataset.vfo;
-  if(vfoMap[target]){
-    var cv=vfoMap[actVfo];if(cv){cv.f=tunedFreq;cv.m=mode;cv.b=filterBW;}
-    actVfo=target;
+  if(b.dataset.vfo==='A'||b.dataset.vfo==='B'){
+    var cv=actVfo==='A'?vfoA:vfoB;cv.f=tunedFreq;cv.m=mode;cv.b=filterBW;
+    actVfo=b.dataset.vfo;
     qsa('.vfo-sel-btn').forEach(function(x){x.classList.toggle('active',x.dataset.vfo===actVfo);});
     var va=$('vfo-a-block'),vb=$('vfo-b-block');
     if(va)va.classList.toggle('active',actVfo==='A');
     if(vb)vb.classList.toggle('active',actVfo==='B');
-    var nv=vfoMap[actVfo];cFreq=nv.f;tunedFreq=nv.f;tuneOff=0;setM(nv.m);filterBW=nv.b;tx('freq',{value:cFreq});subIQ();uD();
+    var nv=actVfo==='A'?vfoA:vfoB;cFreq=nv.f;tunedFreq=nv.f;tuneOff=0;setM(nv.m);filterBW=nv.b;tx('freq',{value:cFreq});subIQ();uD();
   }
 });});
 
@@ -881,16 +805,9 @@ function saveSet(){try{localStorage.setItem('sdr_set',JSON.stringify(settings));
 function applySet(){
 if(settings.cmap!==cmN)setCm(settings.cmap);
 avgA=settings.fftAvg/100;pkD=settings.pkDecay/10;
-/* Sync colormap selector */
-var cmSel=$('set-colormap');if(cmSel)cmSel.value=settings.cmap;
-/* Sync FFT avg and peak sliders */
-var avgSl=$('set-fft-avg');if(avgSl){avgSl.value=settings.fftAvg;var al=$('set-fft-avg-val');if(al)al[TC]=avgA.toFixed(2);}
-var pkSl=$('set-peak-decay');if(pkSl){pkSl.value=settings.pkDecay;var pl=$('set-peak-decay-val');if(pl)pl[TC]=pkD.toFixed(1);}
 /* Sync DSP sidebar AGC */
 var dspAgc=$('dsp-agc-speed');if(dspAgc)dspAgc.value=settings.agcSpd;
 var ribAgc=$('set-agc-speed');if(ribAgc)ribAgc.value=settings.agcSpd;
-/* Sync de-emphasis */
-var deemSel=$('set-deemph');if(deemSel)deemSel.value=settings.deemph||'75us';
 /* Sync limiter controls */
 if(settings.limiter===undefined)settings.limiter=true;
 if(settings.limDrive===undefined)settings.limDrive=2.0;
@@ -898,8 +815,6 @@ if(settings.limCeil===undefined)settings.limCeil=0.35;
 var lCb=$('set-limiter');if(lCb)lCb.checked=settings.limiter;
 var lDr=$('set-lim-drive');if(lDr){lDr.value=MR(settings.limDrive*10);var lbl=$('set-lim-drive-val');if(lbl)lbl[TC]=settings.limDrive.toFixed(1);}
 var lCl=$('set-lim-ceil');if(lCl){lCl.value=MR(settings.limCeil*100);var lbl=$('set-lim-ceil-val');if(lbl)lbl[TC]=settings.limCeil.toFixed(2);}
-/* Sync waterfall speed */
-if(eWS){eWS.value=wfSpd>0?(110-wfSpd):50;if(eWV)eWV[TC]=eWS.value;}
 }
 
 /* ---- Controls ---- */
@@ -928,15 +843,11 @@ var lockBtn=$('btn-lock');
 if(lockBtn)on(lockBtn,'click',function(){lockBtn.classList.toggle('active');});
 var fastBtn=$('btn-fast-tune');
 if(fastBtn)on(fastBtn,'click',function(){fastBtn.classList.toggle('active');});
-/* Expose lock/fast state globally */
-window._sdrLocked=function(){return lockBtn&&lockBtn.classList.contains('active');};
-window._sdrFastTune=function(){return fastBtn&&fastBtn.classList.contains('active');};
 }
 
 /* ---- Keyboard shortcuts ---- */
 function initKbd(){on(document,'keydown',function(e){
 var tag=e.target.tagName;if(tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA')return;
-if(window._sdrLocked&&window._sdrLocked())return; /* Lock prevents keyboard tuning */
 var step=modeBW[mode]||1e3;
 if(window._sdrFastTune&&window._sdrFastTune())step*=10; /* Fast tune = 10x step */
 function tune(d){cFreq=clamp(cFreq+d,24e6,1766e6);tunedFreq=cFreq;tuneOff=0;tx('freq',{value:cFreq});uD();}
@@ -971,14 +882,6 @@ var lastT=0,clockT=0;
 function loop(ts){var dt=(ts-lastT)/1e3;if(dt>.05)dt=.05;lastT=ts;tickSm(dt);pumpIQ();
 if(ts-clockT>1000){tickClock();clockT=ts;}
 requestAnimationFrame(loop);}
-
-/* ---- Mobile DSP sidebar toggle ---- */
-var mobBtn=$('mobile-dsp-toggle'),mobBd=$('mobile-dsp-backdrop'),sidebar=$('dsp-sidebar');
-function toggleMobileDSP(){
-  if(sidebar){sidebar.classList.toggle('mobile-open');
-  if(mobBd)mobBd.style.display=sidebar.classList.contains('mobile-open')?'block':'none';}}
-if(mobBtn)on(mobBtn,'click',toggleMobileDSP);
-if(mobBd)on(mobBd,'click',toggleMobileDSP);
 
 /* ---- Init ---- */
 buildCm();rsz();
