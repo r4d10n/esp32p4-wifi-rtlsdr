@@ -89,7 +89,11 @@ export class AudioPipeline {
   update(s: Partial<DspSettings>) {
     const prev = this.settings;
     this.settings = { ...prev, ...s };
-    if (s.mode && s.mode !== prev.mode) this.demod = null; // rebuild on next block
+    // Any of these invalidate demod state — rebuild on next block.
+    if (
+      (s.mode && s.mode !== prev.mode) ||
+      (s.deemphasisUs !== undefined && s.deemphasisUs !== prev.deemphasisUs)
+    ) this.demod = null;
   }
 
   /** Called when the server announces a new IQ stream rate. */
@@ -104,7 +108,9 @@ export class AudioPipeline {
   feed(buf: ArrayBuffer) {
     if (!this.node || !this.iqRate) return;
     if (!this.demod) {
-      this.demod = makeDemod(this.settings.mode, this.iqRate);
+      this.demod = makeDemod(this.settings.mode, this.iqRate, {
+        deemphasisUs: this.settings.deemphasisUs,
+      });
     }
     const iq = decodeIq(buf);
     const pcm = this.demod.process(iq);
