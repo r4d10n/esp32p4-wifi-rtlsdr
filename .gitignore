@@ -7,3 +7,6 @@ dependencies.lock
 __pycache__/
 .cache/
 .omc/
+components/websdr/dist/
+components/websdr/certs/
+web/node_modules/

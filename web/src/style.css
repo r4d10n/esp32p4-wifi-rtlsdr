@@ -1,0 +1,34 @@
+:root {
+  --bg: #0d0906;
+  --panel: #1a120b;
+  --amber: #ffb000;
+  --amber-dim: #a06800;
+  --grid: #3a2a12;
+  --text: #ffd080;
+  --accent: #ff4000;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
+
+button, select, input {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--amber-dim);
+  border-radius: 2px;
+  font: inherit;
+  padding: 4px 8px;
+}
+button:hover { border-color: var(--amber); }
+button.active { background: var(--amber-dim); color: #000; }
+
+.status-dot {
+  display: inline-block;
+  width: 10px; height: 10px; border-radius: 50%;
+  background: #555; margin-right: 6px; vertical-align: middle;
+}
+.status-dot.open { background: #4fc36a; }
+.status-dot.connecting { background: var(--amber); }
+.status-dot.closed { background: var(--accent); }
