@@ -6,8 +6,10 @@ import Waterfall from '@/widgets/Waterfall.vue';
 import FreqDisplay from '@/widgets/FreqDisplay.vue';
 import Ribbon from '@/widgets/Ribbon.vue';
 import RdsPanel from '@/widgets/RdsPanel.vue';
+import Bookmarks from '@/widgets/Bookmarks.vue';
 import { AudioPipeline } from '@/dsp/audio';
 import type { RdsState } from '@/dsp/rds';
+import type { Bookmark } from '@/stores/bookmarks';
 
 const connState = ref<'connecting' | 'open' | 'closed'>('connecting');
 const freqHz = ref(100_000_000);
@@ -91,6 +93,12 @@ async function toggleAudio() {
   audioOn.value = true;
 }
 
+function recallBookmark(b: Bookmark) {
+  freqHz.value = b.freqHz;
+  ws?.send({ cmd: 'freq', value: b.freqHz });
+  updateDsp({ mode: b.mode, bwHz: b.bwHz });
+}
+
 function updateDsp(patch: Partial<DspSettings>) {
   Object.assign(dsp, patch);
   audio?.update(patch);
@@ -138,7 +146,16 @@ onUnmounted(() => { ws?.close(); audio?.stop(); });
       @fft-size="(v) => { fftSize = v; ws?.send({ cmd: 'fft_size', value: v }); }"
       @dsp="updateDsp"
       @audio-toggle="toggleAudio"
-    />
+    >
+      <template #favourites>
+        <Bookmarks
+          :current-freq="freqHz"
+          :current-mode="dsp.mode"
+          :current-bw="dsp.bwHz"
+          @recall="recallBookmark"
+        />
+      </template>
+    </Ribbon>
 
     <main class="canvas">
       <Waterfall :fft="lastFft" :db-min="dbMin" :db-max="dbMax" />
