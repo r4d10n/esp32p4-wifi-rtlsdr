@@ -29,7 +29,10 @@ const PTY_NAMES = [
       <span class="rt-text">{{ rds.rt.trimEnd() || '—' }}</span>
     </div>
     <div class="row small stats">
-      groups {{ rds.groupCount }} · blocks {{ rds.blockCount }}
+      <span :class="{ locked: rds.pilotLocked, unlocked: !rds.pilotLocked }">
+        pilot {{ rds.pilotLocked ? 'LOCK' : '----' }}
+      </span>
+      · groups {{ rds.groupCount }} · blocks {{ rds.blockCount }}
     </div>
   </div>
   <div v-else class="rds off">RDS inactive (WBFM mode only)</div>
@@ -53,5 +56,7 @@ const PTY_NAMES = [
 .mono { font-family: ui-monospace, monospace; }
 .rt-text { font-family: ui-monospace, monospace; word-break: break-word; }
 .tp { color: #ff4040; font-weight: bold; }
-.stats { opacity: 0.5; font-size: 0.75em; }
+.stats { opacity: 0.7; font-size: 0.75em; }
+.stats .locked { color: #4fc36a; font-weight: bold; }
+.stats .unlocked { color: var(--amber-dim); }
 </style>
