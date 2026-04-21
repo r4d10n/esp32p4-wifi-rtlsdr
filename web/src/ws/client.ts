@@ -63,7 +63,7 @@ export class WsClient {
       if (ev.data instanceof ArrayBuffer) {
         // Implicit routing matches the existing C protocol: the IQ subscription
         // state tells us what a binary frame represents.
-        this.opts.onBinary(ev.data, this.iqSubscribed ? 'audio' : 'fft');
+        this.opts.onBinary(ev.data, this.iqSubscribed ? 'iq' : 'fft');
       }
     };
 

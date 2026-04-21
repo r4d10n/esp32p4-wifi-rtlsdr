@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue';
+import { onMounted, onUnmounted, reactive, ref } from 'vue';
 import { WsClient } from './ws/client';
-import type { ServerMsg } from './types';
+import type { ServerMsg, DspSettings } from './types';
 import Waterfall from '@/widgets/Waterfall.vue';
 import FreqDisplay from '@/widgets/FreqDisplay.vue';
+import Ribbon from '@/widgets/Ribbon.vue';
+import { AudioPipeline } from '@/dsp/audio';
 
 const connState = ref<'connecting' | 'open' | 'closed'>('connecting');
 const freqHz = ref(100_000_000);
@@ -13,8 +15,21 @@ const fftSize = ref(1024);
 const dbMin = ref(-120);
 const dbMax = ref(-20);
 const lastFft = ref<Float32Array | null>(null);
+const audioOn = ref(false);
+
+const dsp = reactive<DspSettings>({
+  mode: 'WBFM',
+  bwHz: 200_000,
+  squelchDb: -120,
+  noiseReduction: 0,
+  notchHz: 0,
+  deemphasisUs: 50,
+  stereo: false,
+  volume: 0.8,
+});
 
 let ws: WsClient | null = null;
+let audio: AudioPipeline | null = null;
 
 function onText(msg: ServerMsg) {
   switch (msg.type) {
@@ -30,42 +45,65 @@ function onText(msg: ServerMsg) {
     case 'freq':
       freqHz.value = msg.value;
       break;
+    case 'iq_start':
+      audio?.setIqRate(msg.rate);
+      break;
+    case 'iq_stop':
+      // handled by caller via audioOn
+      break;
   }
 }
 
-function onBinary(buf: ArrayBuffer, kind: 'fft' | 'audio') {
+function onBinary(buf: ArrayBuffer, kind: 'fft' | 'iq') {
   if (kind === 'fft') {
-    // FFT frame is a Float32Array of dB values, length == fftSize.
-    lastFft.value = new Float32Array(buf);
+    // C sends uint8 0..255; map to dB via db_range client-side for display.
+    const u8 = new Uint8Array(buf);
+    const f32 = new Float32Array(u8.length);
+    const span = dbMax.value - dbMin.value;
+    for (let i = 0; i < u8.length; i++) f32[i] = dbMin.value + (u8[i] / 255) * span;
+    lastFft.value = f32;
+  } else if (audio) {
+    audio.feed(buf);
   }
-  // audio kind handled by audio pipeline in a later milestone
 }
 
 function tune(deltaHz: number) {
-  const next = freqHz.value + deltaHz;
+  const next = Math.max(0, freqHz.value + deltaHz);
   freqHz.value = next;
   ws?.send({ cmd: 'freq', value: next });
 }
 
-function setRate(rate: number) {
-  sampleRate.value = rate;
-  ws?.send({ cmd: 'rate', value: rate });
+async function toggleAudio() {
+  if (audioOn.value) {
+    ws?.send({ cmd: 'unsubscribe_iq' });
+    await audio?.stop();
+    audio = null;
+    audioOn.value = false;
+    return;
+  }
+  audio = new AudioPipeline(dsp);
+  await audio.start();
+  ws?.send({ cmd: 'subscribe_iq', offset: 0, bw: dsp.bwHz });
+  audioOn.value = true;
 }
 
-function setGain(g: number) {
-  gain.value = g;
-  ws?.send({ cmd: 'gain', value: g });
+function updateDsp(patch: Partial<DspSettings>) {
+  Object.assign(dsp, patch);
+  audio?.update(patch);
+  // Bandwidth and mode change the server-side DDC output rate — need to
+  // resubscribe so the backend rebuilds the DDC with the new parameters.
+  if ((patch.bwHz || patch.mode) && audioOn.value) {
+    ws?.send({ cmd: 'subscribe_iq', offset: 0, bw: dsp.bwHz });
+  }
 }
 
 onMounted(() => {
   ws = new WsClient({
-    onText,
-    onBinary,
+    onText, onBinary,
     onStateChange: (s) => (connState.value = s),
   });
 });
-
-onUnmounted(() => ws?.close());
+onUnmounted(() => { ws?.close(); audio?.stop(); });
 </script>
 
 <template>
@@ -77,36 +115,26 @@ onUnmounted(() => ws?.close());
       </span>
       <FreqDisplay :hz="freqHz" @step="tune" />
       <span class="meta">
-        {{ (sampleRate / 1e6).toFixed(3) }} MS/s · gain
-        {{ gain === 0 ? 'auto' : (gain / 10).toFixed(1) + ' dB' }}
+        {{ (sampleRate / 1e6).toFixed(3) }} MS/s ·
+        gain {{ gain === 0 ? 'auto' : (gain / 10).toFixed(1) + ' dB' }} ·
+        {{ dsp.mode }}
       </span>
     </header>
 
-    <section class="ribbon">
-      <div class="group">
-        <label>Rate</label>
-        <select :value="sampleRate" @change="(e) => setRate(+(e.target as HTMLSelectElement).value)">
-          <option value="250000">250k</option>
-          <option value="1024000">1.024M</option>
-          <option value="1200000">1.2M</option>
-          <option value="2048000">2.048M</option>
-          <option value="2400000">2.4M</option>
-        </select>
-      </div>
-      <div class="group">
-        <label>Gain</label>
-        <input
-          type="range" min="0" max="496" step="1"
-          :value="gain" @input="(e) => setGain(+(e.target as HTMLInputElement).value)"
-        />
-        <span class="val">{{ gain === 0 ? 'Auto' : (gain / 10).toFixed(1) + ' dB' }}</span>
-      </div>
-      <div class="group">
-        <label>dB range</label>
-        <input type="number" :value="dbMin" @change="(e) => (dbMin = +(e.target as HTMLInputElement).value, ws?.send({ cmd: 'db_range', min: dbMin, max: dbMax }))" />
-        <input type="number" :value="dbMax" @change="(e) => (dbMax = +(e.target as HTMLInputElement).value, ws?.send({ cmd: 'db_range', min: dbMin, max: dbMax }))" />
-      </div>
-    </section>
+    <Ribbon
+      :sample-rate="sampleRate"
+      :gain="gain"
+      :db-min="dbMin" :db-max="dbMax"
+      :fft-size="fftSize"
+      :dsp="dsp"
+      :audio-on="audioOn"
+      @rate="(v) => { sampleRate = v; ws?.send({ cmd: 'rate', value: v }); }"
+      @gain="(v) => { gain = v; ws?.send({ cmd: 'gain', value: v }); }"
+      @db-range="(mn, mx) => { dbMin = mn; dbMax = mx; ws?.send({ cmd: 'db_range', min: mn, max: mx }); }"
+      @fft-size="(v) => { fftSize = v; ws?.send({ cmd: 'fft_size', value: v }); }"
+      @dsp="updateDsp"
+      @audio-toggle="toggleAudio"
+    />
 
     <main class="canvas">
       <Waterfall :fft="lastFft" :db-min="dbMin" :db-max="dbMax" />
@@ -122,12 +150,5 @@ onUnmounted(() => ws?.close());
   border-bottom: 1px solid var(--amber-dim);
 }
 .topbar .meta { opacity: 0.7; font-size: 0.9em; }
-.ribbon {
-  display: flex; gap: 16px; padding: 8px 12px;
-  background: var(--panel); border-bottom: 1px solid var(--grid);
-}
-.group { display: flex; align-items: center; gap: 6px; }
-.group label { font-size: 0.8em; color: var(--amber); text-transform: uppercase; }
-.val { min-width: 60px; font-variant-numeric: tabular-nums; }
 .canvas { flex: 1; position: relative; overflow: hidden; }
 </style>

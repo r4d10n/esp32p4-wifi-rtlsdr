@@ -20,9 +20,24 @@ export type ServerMsg =
   | { type: 'iq_stop' };
 
 // ── ESP → Browser (binary) ──────────────────────────────────────────
-// Binary frame classification happens by inspecting the first byte tag.
-// Current protocol uses raw float32/int16 arrays; the first-byte tag is
-// a forward-compatible extension — for M1 we just treat binary as FFT bins
-// when IQ is not subscribed, else as audio PCM. The existing sdr.js does
-// the same implicit routing; we preserve it.
-export type BinaryFrameKind = 'fft' | 'audio';
+// Binary routing is implicit: the IQ subscription state tells us the payload.
+// - No IQ subscription: payload is FFT power spectrum as uint8 (0..255),
+//   length == fft_size, mapped via db_range to the dB scale.
+// - IQ subscribed: payload is narrowband uint8 interleaved IQ (I0,Q0,I1,Q1,…)
+//   at the DDC output rate (reported in the `iq_start` message).
+//   The browser demodulates this stream — C only channelizes.
+export type BinaryFrameKind = 'fft' | 'iq';
+
+// ── Demodulation ────────────────────────────────────────────────────
+export type DemodMode = 'WBFM' | 'NFM' | 'AM' | 'USB' | 'LSB' | 'DSB' | 'CW';
+
+export interface DspSettings {
+  mode: DemodMode;
+  bwHz: number;        // channel bandwidth (passed to DDC via subscribe_iq)
+  squelchDb: number;   // mute threshold in dB (RMS below = muted); -120 = off
+  noiseReduction: number;  // 0..1, spectral smoothing amount
+  notchHz: number;     // 0 = off, else tone frequency to notch
+  deemphasisUs: number; // WBFM only: 50 or 75 microseconds, 0 = off
+  stereo: boolean;     // WBFM only
+  volume: number;      // 0..1
+}
