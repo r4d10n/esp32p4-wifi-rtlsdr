@@ -6,6 +6,7 @@ import type { DspSettings } from '@/types';
 import { decodeIq } from './iq';
 import { makeDemod, type Demodulator } from './demod';
 import { BiquadNotch, applyGain, rmsDb } from './chain';
+import { RdsDecoder, type RdsState } from './rds';
 
 const WORKLET_SRC = `
 class PcmFeederProcessor extends AudioWorkletProcessor {
@@ -54,8 +55,9 @@ export class AudioPipeline {
   private notch = new BiquadNotch();
   private settings: DspSettings;
   private iqRate = 0;
-  // Cache of applied notch freq so we only re-setup when it changes
   private lastNotchFreq = 0;
+  private rds: RdsDecoder | null = null;
+  private onRds: ((s: RdsState) => void) | null = null;
 
   constructor(initial: DspSettings) {
     this.settings = { ...initial };
@@ -84,7 +86,10 @@ export class AudioPipeline {
     await this.ctx?.close();
     this.ctx = null;
     this.demod = null;
+    this.rds = null;
   }
+
+  setRdsHandler(h: ((s: RdsState) => void) | null) { this.onRds = h; }
 
   update(s: Partial<DspSettings>) {
     const prev = this.settings;
@@ -101,6 +106,7 @@ export class AudioPipeline {
     if (rate !== this.iqRate) {
       this.iqRate = rate;
       this.demod = null;
+      this.rds = null;  // sample-rate-dependent BPF coefficients
       this.node?.port.postMessage('flush');
     }
   }
@@ -114,6 +120,19 @@ export class AudioPipeline {
     }
     const iq = decodeIq(buf);
     const pcm = this.demod.process(iq);
+
+    // RDS taps the demod's pre-decimation MPX (WBFM only). Needs ≥ 200 kHz
+    // MPX rate to clear the 57 kHz subcarrier; the DDC output rate controls
+    // this implicitly via the bandwidth the user selects.
+    if (this.settings.mode === 'WBFM' && this.onRds) {
+      const mpx = this.demod.lastMpx?.();
+      if (mpx && this.iqRate >= 150000) {
+        if (!this.rds) this.rds = new RdsDecoder(this.iqRate);
+        this.rds.feed(mpx);
+        this.onRds(this.rds.snapshot());
+      }
+    }
+
     if (!pcm.length) return;
 
     // Squelch: mute whole block when audio RMS sits below threshold

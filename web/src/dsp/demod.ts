@@ -6,6 +6,9 @@ export interface Demodulator {
   readonly outputRate: number;
   process(iq: IqBlock): Float32Array;
   reset(): void;
+  /** WBFM only: last block's pre-decimation MPX baseband (input-rate samples).
+   *  Null for every other mode. Consumers like RDS decoders tap this. */
+  lastMpx?(): Float32Array | null;
 }
 
 export interface DemodOpts {
@@ -83,6 +86,7 @@ class FmDemod implements Demodulator {
   private accIdx = 0; private accSum = 0;
   private deemp: Deemphasis;
   private narrow: boolean;
+  private mpxBuf: Float32Array | null = null;  // pre-decim discriminator output
 
   constructor(inputRate: number, deemphasisUs: number, narrow = false) {
     this.inputRate = inputRate;
@@ -92,31 +96,38 @@ class FmDemod implements Demodulator {
     this.narrow = narrow;
   }
 
-  reset() { this.prevI = 0; this.prevQ = 0; this.accIdx = 0; this.accSum = 0; this.deemp.reset(); }
+  reset() {
+    this.prevI = 0; this.prevQ = 0; this.accIdx = 0; this.accSum = 0;
+    this.deemp.reset(); this.mpxBuf = null;
+  }
+
+  lastMpx(): Float32Array | null { return this.narrow ? null : this.mpxBuf; }
 
   process({ i, q }: IqBlock): Float32Array {
     const n = i.length;
     const out = new Float32Array(Math.ceil(n / this.decim) + 1);
+    // For WBFM we keep the full-rate discriminator output around so an RDS
+    // decoder (running off the same pipeline block) can tap it without
+    // re-running the expensive atan2.
+    const mpx = !this.narrow ? new Float32Array(n) : null;
     let outIdx = 0;
     let pi = this.prevI, pq = this.prevQ;
     let acc = this.accSum, ai = this.accIdx;
     const d = this.decim;
-    // NFM has much smaller deviation — boost so audio levels are sane.
     const gain = (this.narrow ? 3.0 : 1.0) / Math.PI;
     for (let k = 0; k < n; k++) {
       const ii = i[k], qq = q[k];
       const re = ii * pi + qq * pq;
       const im = qq * pi - ii * pq;
-      acc += Math.atan2(im, re) * gain;
-      ai++;
+      const phase = Math.atan2(im, re) * gain;
+      if (mpx) mpx[k] = phase;
+      acc += phase; ai++;
       pi = ii; pq = qq;
-      if (ai === d) {
-        out[outIdx++] = acc / d;
-        ai = 0; acc = 0;
-      }
+      if (ai === d) { out[outIdx++] = acc / d; ai = 0; acc = 0; }
     }
     this.prevI = pi; this.prevQ = pq;
     this.accIdx = ai; this.accSum = acc;
+    this.mpxBuf = mpx;
     const slice = out.subarray(0, outIdx);
     this.deemp.apply(slice);
     return slice;

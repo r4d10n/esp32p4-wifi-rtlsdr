@@ -5,7 +5,9 @@ import type { ServerMsg, DspSettings } from './types';
 import Waterfall from '@/widgets/Waterfall.vue';
 import FreqDisplay from '@/widgets/FreqDisplay.vue';
 import Ribbon from '@/widgets/Ribbon.vue';
+import RdsPanel from '@/widgets/RdsPanel.vue';
 import { AudioPipeline } from '@/dsp/audio';
+import type { RdsState } from '@/dsp/rds';
 
 const connState = ref<'connecting' | 'open' | 'closed'>('connecting');
 const freqHz = ref(100_000_000);
@@ -16,6 +18,7 @@ const dbMin = ref(-120);
 const dbMax = ref(-20);
 const lastFft = ref<Float32Array | null>(null);
 const audioOn = ref(false);
+const rds = ref<RdsState | null>(null);
 
 const dsp = reactive<DspSettings>({
   mode: 'WBFM',
@@ -83,6 +86,7 @@ async function toggleAudio() {
   }
   audio = new AudioPipeline(dsp);
   await audio.start();
+  audio.setRdsHandler((s) => (rds.value = s));
   ws?.send({ cmd: 'subscribe_iq', offset: 0, bw: dsp.bwHz });
   audioOn.value = true;
 }
@@ -138,6 +142,7 @@ onUnmounted(() => { ws?.close(); audio?.stop(); });
 
     <main class="canvas">
       <Waterfall :fft="lastFft" :db-min="dbMin" :db-max="dbMax" />
+      <RdsPanel v-if="dsp.mode === 'WBFM' && audioOn" :rds="rds" />
     </main>
   </div>
 </template>
